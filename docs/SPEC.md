@@ -1,0 +1,449 @@
+# MEDUSA NEXUS — Product Specification
+
+*Unified Mobile Threat Analysis Platform.*
+CLI: `mnexus` · Tagline: *"Every head sees a different angle."*
+
+---
+
+## 1. Identity
+
+The name pays homage to Medusa (ch0pin's framework, central to the workflow). "Nexus" is the hub where every analysis tool converges. In the myth, Medusa's heads each looked in a different direction; here, each "head" is a different engine, and the Nexus is the layer that correlates what they see.
+
+---
+
+## 2. System Architecture
+
+Local-first orchestration layer that wraps each tool's API/CLI and exposes a unified interface.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        MEDUSA NEXUS CORE                            │
+│                     (Python Orchestrator)                           │
+├─────────────┬──────────────┬──────────────┬────────────┬────────────┤
+│  ADB Bridge │ Frida Engine │ JADX Engine  │ Burp API   │ MobSF API  │
+│             │ + Medusa     │              │            │            │
+│             │ + Stheno     │              │            │            │
+├─────────────┴──────┬───────┴──────┬───────┴────────────┴────────────┤
+│   Ghidra Headless  │  APKTool     │  Custom Yara / Semgrep Rules    │
+│   (analyzeHeadless)│  (decode)    │  (pattern matching)             │
+├────────────────────┴──────────────┴─────────────────────────────────┤
+│                     UNIFIED DATA LAYER                              │
+│              (SQLite + JSON artifacts store)                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                     INTERFACE LAYER                                 │
+│         ┌──────────┐  ┌──────────┐  ┌──────────────┐                │
+│         │ Web UI   │  │   CLI    │  │  REST API    │                │
+│         │ (React)  │  │ (Click)  │  │  (FastAPI)   │                │
+│         └──────────┘  └──────────┘  └──────────────┘                │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 2.1 Core Orchestrator
+
+```python
+# mnexus/core/orchestrator.py
+
+class MedusaNexus:
+    """
+    Central orchestrator. Manages tool lifecycle, data flow between
+    engines, artifact storage. The brainstem — where every head reports in.
+    """
+
+    def __init__(self, config: NexusConfig):
+        self.config = config
+        self.db = ArtifactStore(config.db_path)
+        self.project: Optional[Project] = None
+        self.engines: Dict[str, BaseEngine] = {}
+        self._register_engines()
+
+    def _register_engines(self):
+        self.engines = {
+            "adb":     ADBEngine(self.config),
+            "frida":   FridaEngine(self.config),   # wraps Medusa + Stheno
+            "jadx":    JADXEngine(self.config),
+            "burp":    BurpEngine(self.config),
+            "mobsf":   MobSFEngine(self.config),
+            "ghidra":  GhidraEngine(self.config),
+            "apktool": APKToolEngine(self.config),
+        }
+
+    async def ingest_apk(self, apk_path: str) -> Project:
+        project = Project.create(apk_path)
+        self.project = project
+
+        # Phase 1 — static analysis, all engines in parallel.
+        static_tasks = [
+            self.engines["jadx"].decompile(apk_path),
+            self.engines["mobsf"].scan(apk_path),
+            self.engines["apktool"].decode(apk_path),
+            self.engines["ghidra"].analyze_native_libs(apk_path),
+        ]
+        static_results = await asyncio.gather(*static_tasks)
+
+        # Phase 2 — correlate findings across engines.
+        attack_surface = self._build_attack_surface(static_results)
+
+        # Phase 3 — auto-generate Frida hooks from what we actually found.
+        hooks = self._generate_hooks(attack_surface)
+
+        # Phase 4 — if there's a device, prep dynamic analysis.
+        if await self.engines["adb"].is_device_connected():
+            await self._prepare_dynamic_session(project, hooks)
+
+        project.attack_surface = attack_surface
+        project.suggested_hooks = hooks
+        self.db.save_project(project)
+        return project
+```
+
+### 2.2 Engine Interface
+
+Every tool implements `BaseEngine`. This is what makes them composable.
+
+```python
+# mnexus/engines/base.py
+
+class BaseEngine(ABC):
+    @property
+    @abstractmethod
+    def name(self) -> str: ...
+
+    @property
+    @abstractmethod
+    def capabilities(self) -> List[str]:
+        """What this engine can do: ['decompile', 'hook', 'intercept', ...]"""
+
+    @abstractmethod
+    async def health_check(self) -> bool: ...
+
+    @abstractmethod
+    async def execute(self, context: AnalysisContext) -> List[Finding]: ...
+
+    def to_findings(self, raw_output: dict) -> List[Finding]:
+        """Normalize tool-specific output into unified Finding objects."""
+```
+
+### 2.3 Data Model
+
+```python
+# mnexus/models.py
+
+class Severity(Enum):
+    CRITICAL = "critical"
+    HIGH     = "high"
+    MEDIUM   = "medium"
+    LOW      = "low"
+    INFO     = "info"
+
+class FindingCategory(Enum):
+    CRYPTO      = "Weak Cryptography"
+    STORAGE     = "Insecure Data Storage"
+    NETWORK     = "Network Security"
+    AUTH        = "Authentication/Authorization"
+    CODE        = "Code Quality"
+    NATIVE      = "Native Code"
+    OBFUSCATION = "Anti-Tampering/Obfuscation"
+    PRIVACY     = "Privacy"
+    IPC         = "Inter-Process Communication"
+    WEBVIEW     = "WebView"
+
+@dataclass
+class Finding:
+    id: str
+    title: str
+    description: str
+    severity: Severity
+    category: FindingCategory
+    source_engine: str
+    evidence: str
+    location: Optional[str] = None
+    cwe_id: Optional[str] = None
+    owasp_mobile: Optional[str] = None
+    suggested_hook: Optional[str] = None
+    remediation: Optional[str] = None       # first-class, never optional in practice
+    confirmed: bool = False                 # True after dynamic validation
+
+@dataclass
+class AttackSurface:
+    exported_activities: List[Dict]
+    exported_services: List[Dict]
+    exported_receivers: List[Dict]
+    content_providers: List[Dict]
+    deeplinks: List[str]
+    native_libraries: List[Dict]
+    api_endpoints: List[str]
+    permissions: List[str]
+    sdk_fingerprint: Dict
+    crypto_operations: List[Dict]
+    ssl_pinning_detected: bool
+    root_detection_detected: bool
+    emulator_detection_detected: bool
+    findings: List[Finding] = field(default_factory=list)
+
+@dataclass
+class Project:
+    id: str
+    name: str
+    apk_path: str
+    package_name: str
+    version: str
+    min_sdk: int
+    target_sdk: int
+    created_at: datetime
+    attack_surface: Optional[AttackSurface] = None
+    suggested_hooks: List[str] = field(default_factory=list)
+    dynamic_results: List[Finding] = field(default_factory=list)
+```
+
+---
+
+## 3. Features
+
+### 3.1 APK Intake & Reconnaissance
+
+| Feature | Description |
+|---|---|
+| Drag & drop import | `.apk` / `.xapk`. SHA-256, VirusTotal lookup, store artifact. |
+| Pull from device | ADB one-click. Lists installed packages, pulls base + split APKs. |
+| APK metadata | APKTool parses `AndroidManifest.xml`: package, version, SDK levels, permissions, components, intent filters, deep links. |
+| Certificate analysis | Signing cert, debug-signed check, v1-only flag, chain validation. |
+| SDK fingerprinting | Detects Firebase, Adjust, Appsflyer, Facebook SDK, etc., maps to known CVEs. |
+| Permission risk scoring | Each permission gets a weight; dangerous combos (`CAMERA` + `INTERNET` + `RECORD_AUDIO`) flagged with context. |
+
+### 3.2 Static Analysis Engine
+
+| Feature | Description |
+|---|---|
+| JADX decompilation | Full APK → Java/Kotlin source, indexed and searchable. |
+| Ghidra native analysis | Headless Ghidra on every `.so`. Detects JNI, native crypto, anti-tamper. |
+| MobSF automated scan | Full static scan via API, normalized into `Finding`. |
+| Hardcoded secrets scanner | Regex + entropy. API keys, tokens, private keys in code, resources, native libs. |
+| Crypto audit | All cryptographic operations: algos, key sizes, IV handling, ECB abuse, custom crypto. |
+| Component export analysis | All exported components + intent filters. Flags the unprotected. |
+| Deep link mapper | Extracts schemes and host patterns, generates test payloads. |
+| WebView audit | `setJavaScriptEnabled(true)`, `addJavascriptInterface`, `setAllowFileAccess`, insecure URL handling. |
+| SQL injection surface | `rawQuery` with concatenation, unparameterized Content Provider queries. |
+| Custom rule engine | YAML (Semgrep-style) + Yara. Ships with 200+ rules mapped to OWASP MASTG. |
+
+### 3.3 Dynamic Analysis Engine
+
+| Feature | Description |
+|---|---|
+| Medusa integration | Load and combine recipe modules from the UI. |
+| Stheno integration | APK patching: gadget injection, SSL pinning disable, root-detection disable. |
+| Auto-hook generation | From static findings. `SecretKeySpec` found → key logger hook. `checkRoot()` found → bypass. |
+| Live method tracer | Pick a class/method from decompiled code, trace live: args, returns, call stack. |
+| SSL pinning bypass | One-click, multi-technique (TrustManager, OkHttp, custom). |
+| Root/emulator bypass | Detects the library in use (SafetyNet, RootBeer, custom) and picks the right bypass. |
+| Crypto logger | Hooks `Cipher`, `MessageDigest`, `Mac`, `SecretKeySpec`, `KeyStore`. Logs plaintext, keys, IVs, algorithms. |
+| Intent monitor | All incoming/outgoing Intents with extras, URIs, targets. |
+| File system monitor | File I/O, SharedPreferences access, paths of stored secrets. |
+| Clipboard monitor | Read/write events, sensitive-data flags. |
+| Screenshot / screen-record detection | Tests `FLAG_SECURE` coverage and detects screen recording. |
+
+### 3.4 Network Analysis Engine
+
+| Feature | Description |
+|---|---|
+| Burp integration | Auto-configures device proxy, pushes Burp CA, start/stop from UI. |
+| API endpoint discovery | Static URLs + live traffic → complete API map. |
+| Auth flow analysis | Login, refresh, session mgmt. Flags tokens in URLs, missing expiry. |
+| Certificate pinning map | Which domains, which library, targeted bypass script. |
+| Traffic diff | Compare two sessions (e.g. before/after patch). |
+| Sensitive data in transit | Auto-flags PII, credentials, tokens, device IDs in bodies and headers. |
+
+### 3.5 Attack Surface Visualizer
+
+| Feature | Description |
+|---|---|
+| Component graph | Interactive graph: components, connections, exported status, intent filters. |
+| Data flow diagram | Input → processing → storage → network. Sensitive-data highlights. |
+| Attack tree generator | Per high-severity finding: prerequisites, steps, impact. |
+| OWASP MASTG mapping | Every finding mapped to MASTG categories. Compliance gaps visible. |
+| Risk heatmap | Per-area visual. Darker = more findings = higher risk. |
+
+### 3.6 Report Generator
+
+| Feature | Description |
+|---|---|
+| Executive summary | High-level risk score, critical count, business impact. |
+| Technical report | Findings with evidence, repro steps, code refs, Frida scripts. |
+| OWASP compliance matrix | Pass/fail vs MASVS. |
+| **Mitigation Playbook** | Per finding: concrete remediation — before/after code, config changes, library substitutions. **Mandatory in every template.** |
+| Export formats | PDF, HTML, Markdown, JSON. |
+| Diff report | Before/after runs; what got fixed, what's new. |
+| Evidence package | Screenshots, Frida logs, traffic captures, decompiled snippets — ready for delivery. |
+
+### 3.7 Workflow Automation (Pipeline)
+
+```yaml
+# mnexus_pipeline.yaml
+name: "Full Security Assessment"
+version: 1
+
+stages:
+  - name: intake
+    engine: apktool
+    action: decode
+
+  - name: static_scan
+    parallel: true
+    steps:
+      - { engine: jadx,   action: decompile }
+      - { engine: mobsf,  action: full_scan }
+      - { engine: ghidra, action: analyze_native_libs,
+          config: { scripts: [FindJNI.java, CryptoDetector.java] } }
+
+  - name: secret_scan
+    engine: custom_rules
+    action: scan
+    rules: [hardcoded_secrets.yara, api_keys.semgrep, crypto_misuse.semgrep]
+
+  - name: dynamic_prep
+    engine: stheno
+    action: patch
+    patches: [inject_gadget, disable_ssl_pinning, disable_root_detection]
+
+  - name: dynamic_analysis
+    engine: frida
+    action: run_session
+    modules:
+      - medusa://ssl_pinning_bypass
+      - medusa://crypto_monitor
+      - medusa://intent_monitor
+      - auto_generated_hooks
+    duration: 300
+
+  - name: network_capture
+    engine: burp
+    action: capture
+    config: { proxy_port: 8080, scope: "*.target-app.com" }
+
+  - name: report
+    engine: reporter
+    action: generate
+    formats: [pdf, json]
+    template: full_assessment
+    include_evidence: true
+    mitigation_playbook: true   # non-negotiable
+```
+
+### 3.8 CLI Interface
+
+```bash
+$ mnexus doctor
+$ mnexus scan ./target.apk
+$ mnexus dynamic --package com.target.app --modules ssl_bypass,crypto_log
+$ mnexus report --format pdf --output ./report.pdf
+```
+
+### 3.9 Web UI
+
+See `design/INDEX.md` and `design/screens/` for the full Pencil deck (31 screens, 8 groups).
+
+Tech stack:
+
+| Layer | Technology | Why |
+|---|---|---|
+| Frontend | React + TypeScript | Component ecosystem |
+| UI framework | Tailwind + shadcn/ui | Dark-theme friendly |
+| Graph viz | D3.js + react-flow | Attack surface |
+| Code viewer | Monaco Editor | VS Code engine |
+| Terminal | xterm.js | Embedded Frida console |
+| Backend | FastAPI (Python) | Async; same language as Frida bindings |
+| Real-time | WebSockets | Live Frida output, logcat |
+| Database | SQLite | Local-first, portable projects |
+| Task queue | Celery + Redis | Long-running jobs |
+
+---
+
+## 4. Intelligence Layer
+
+The real value is between the tools, not inside them.
+
+### 4.1 Cross-engine correlation
+
+Examples the correlator must recognize:
+
+1. **JADX:** `SecretKeySpec` with hardcoded key.
+   **Ghidra:** same bytes in `.rodata` of a `.so`.
+   → CONFIRMED: truly hardcoded, not runtime-derived.
+
+2. **MobSF:** exported Activity.
+   **JADX:** Activity handles deep links with user input.
+   **No input validation.**
+   → ESCALATED: deep link injection → potential account takeover.
+
+3. **Static:** SSL pinning (OkHttp `CertificatePinner`).
+   **Dynamic:** Frida bypass succeeds.
+   → CONFIRMED: bypassable, interception viable.
+
+4. **JADX:** SharedPreferences stores `auth_token`.
+   **Frida:** token value captured at runtime.
+   **Burp:** same token in `Authorization` header.
+   → CHAIN: full token lifecycle mapped, storage → transit.
+
+### 4.2 Auto-hook generation
+
+The "Valsamaras approach" (from *Cracking the Uncrackable*) systematized. Inputs: `AttackSurface`. Outputs: targeted Frida scripts.
+
+- Root detection detected → bypass hook.
+- SSL pinning detected → bypass for the specific lib.
+- Crypto operation detected → logger hook.
+- Exported component without permission → intent fuzzer.
+- Methods matching `login|auth|token|encrypt|decrypt|verify|check|password|pin|biometric|fingerprint|key|secret|sign` → tracer hooks.
+
+---
+
+## 5. Project structure (target)
+
+```
+medusa-nexus/
+├── mnexus/
+│   ├── cli.py
+│   ├── config.py
+│   ├── core/
+│   ├── engines/                 # adb, frida, jadx, ghidra, burp, mobsf, apktool
+│   ├── intelligence/            # correlator, hook_generator, attack_surface
+│   ├── models/
+│   ├── reporting/
+│   ├── api/                     # FastAPI + websockets
+│   └── web/                     # React frontend
+├── scripts/                     # ghidra headless + frida snippets
+├── rules/                       # yara + semgrep
+├── tests/
+├── pyproject.toml
+├── Dockerfile
+└── README.md
+```
+
+---
+
+## 6. Quick start (target)
+
+```bash
+git clone https://github.com/jacksonmafra-umain/medusa-nexus.git
+cd medusa-nexus
+pip install -e .
+mnexus doctor
+mnexus serve --port 3000
+# or
+mnexus scan ./suspicious-app.apk --full --report pdf
+```
+
+---
+
+## 7. Summary
+
+MEDUSA NEXUS is not a dashboard that launches other tools. It is the layer where:
+
+1. An APK gets ingested.
+2. Every static engine runs in parallel.
+3. An attack surface is built by correlating their outputs.
+4. Frida hooks are auto-generated from what the code actually contains.
+5. Dynamic analysis runs with one click using Medusa recipes + those hooks.
+6. Burp captures and filters the app's traffic.
+7. Static suspicions get confirmed (or dismissed) by dynamic evidence.
+8. A professional report ships — mapped to OWASP, with a full Mitigation Playbook.
+
+Every tool keeps doing what it's best at. MEDUSA NEXUS just makes them talk to each other.
