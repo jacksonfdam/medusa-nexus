@@ -26,7 +26,7 @@ All on-screen copy is English. Every finding card and every report template carr
 | # | Screen | Fidelity | File |
 |---|---|---|---|
 | 03 | APK Intake / Drag & Drop | hero | [03-apk-intake.png](screens/group-2-intake/03-apk-intake.png) |
-| 05 | Pull from Device | stub | [05-pull-from-device.png](screens/group-2-intake/05-pull-from-device.png) |
+| 05 | Pull from Device | hero | [05-pull-from-device.png](screens/group-2-intake/05-pull-from-device.png) |
 | 06 | Device Bridge | stub | [06-device-bridge.png](screens/group-2-intake/06-device-bridge.png) |
 
 *(04 merged into 06 — single device page covers list + bridge.)*
@@ -38,13 +38,13 @@ Tabs in the workspace: **Overview · Static · Dynamic · Network · Report**.
 | # | Screen | Fidelity | File |
 |---|---|---|---|
 | 07 | Overview (risk gauge + timeline) | hero | [07-overview.png](screens/group-3-workspace/07-overview.png) |
-| 08 | Static Analysis | stub | [08-static-analysis.png](screens/group-3-workspace/08-static-analysis.png) |
+| 08 | Static Analysis | hero | [08-static-analysis.png](screens/group-3-workspace/08-static-analysis.png) |
 | 09 | Secrets & Crypto Audit | stub | [09-secrets-crypto.png](screens/group-3-workspace/09-secrets-crypto.png) |
 | 10 | Components & Deep Links | stub | [10-components-deeplinks.png](screens/group-3-workspace/10-components-deeplinks.png) |
 | 11 | Native Analysis (Ghidra) | stub | [11-native-ghidra.png](screens/group-3-workspace/11-native-ghidra.png) |
 | 12 | Dynamic Analysis (Frida console) | hero | [12-dynamic-analysis.png](screens/group-3-workspace/12-dynamic-analysis.png) |
 | 13 | Live Method Tracer | stub | [13-live-tracer.png](screens/group-3-workspace/13-live-tracer.png) |
-| 14 | Network Analysis | stub | [14-network-analysis.png](screens/group-3-workspace/14-network-analysis.png) |
+| 14 | Network Analysis | hero | [14-network-analysis.png](screens/group-3-workspace/14-network-analysis.png) |
 | 15 | API Endpoint Map | stub | [15-api-map.png](screens/group-3-workspace/15-api-map.png) |
 | 16 | SSL Pinning Map | stub | [16-ssl-pinning-map.png](screens/group-3-workspace/16-ssl-pinning-map.png) |
 
@@ -55,7 +55,7 @@ Tabs in the workspace: **Overview · Static · Dynamic · Network · Report**.
 | 17 | Attack Surface Graph | stub | [17-attack-surface-graph.png](screens/group-4-visualizers/17-attack-surface-graph.png) |
 | 18 | Data Flow Diagram | stub | [18-data-flow-diagram.png](screens/group-4-visualizers/18-data-flow-diagram.png) |
 | 19 | Attack Tree | stub | [19-attack-tree.png](screens/group-4-visualizers/19-attack-tree.png) |
-| 20 | OWASP MASVS Matrix | stub | [20-owasp-masvs-matrix.png](screens/group-4-visualizers/20-owasp-masvs-matrix.png) |
+| 20 | OWASP MASVS Matrix | hero | [20-owasp-masvs-matrix.png](screens/group-4-visualizers/20-owasp-masvs-matrix.png) |
 
 ## Group 5 — Finding & Report
 
@@ -72,8 +72,8 @@ The Finding Detail drawer and the Report Generator both render a **Mitigation** 
 | # | Screen | Fidelity | File |
 |---|---|---|---|
 | 24 | Pipeline Editor | stub | [24-pipeline-editor.png](screens/group-6-automation/24-pipeline-editor.png) |
-| 25 | Recipes Library | stub | [25-recipes-library.png](screens/group-6-automation/25-recipes-library.png) |
-| 26 | Tools / Doctor | stub | [26-tools-doctor.png](screens/group-6-automation/26-tools-doctor.png) |
+| 25 | Recipes Library | hero | [25-recipes-library.png](screens/group-6-automation/25-recipes-library.png) |
+| 26 | Tools / Doctor | hero | [26-tools-doctor.png](screens/group-6-automation/26-tools-doctor.png) |
 | 27 | Settings | stub | [27-settings.png](screens/group-6-automation/27-settings.png) |
 | 28 | Terminal / CLI Console | stub | [28-terminal-console.png](screens/group-6-automation/28-terminal-console.png) |
 
