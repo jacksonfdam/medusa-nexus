@@ -122,8 +122,8 @@ What the script does:
 
 1. Checks for a JRE (11+ / 21 for the latest release).
 2. Downloads the latest `burp-rest-api-*.jar` from GitHub releases into `~/.mnexus/tools/burp-rest-api/`.
-3. Auto-detects `burpsuite_community.jar` / `burpsuite_pro.jar` in common install paths (or takes `BURP_SUITE_JAR=<abs path>`).
-4. Writes a wrapper `run.sh` that launches everything in headless mode on port **8090** with no auth.
+3. Tries to locate `burpsuite_community.jar` / `burpsuite_pro.jar` via a candidate list (also accepts `BURP_SUITE_JAR=<abs path>`). On macOS, if no Burp is found and the run is interactive, offers to `brew install --cask burp-suite` inline.
+4. Writes a wrapper `run.sh` that **re-runs the detection at launch time**, so you can set up now and install Burp later without re-running the script. Launches everything headless on port **8090**, no auth.
 5. Sets `MNEXUS_BURP_URL=http://localhost:8090` and `MNEXUS_BURP_API_KEY=none` in `~/.mnexus/env.sh` — the Python `BurpEngine` recognizes the `none` sentinel and probes `/burp/versions` instead of the Pro API's `/<key>/v0.1/` path.
 
 Launching:
