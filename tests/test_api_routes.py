@@ -18,8 +18,8 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def test_root_serves_dashboard_html(client: TestClient) -> None:
-    """GET / mirrors the `01 // DASHBOARD` Pencil screen — pin the structural bits."""
+def test_root_serves_spa_shell(client: TestClient) -> None:
+    """GET / now returns the SPA shell: topbar + sidebar + #view + loads app.js/css."""
     r = client.get("/")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
@@ -28,27 +28,52 @@ def test_root_serves_dashboard_html(client: TestClient) -> None:
     # Brand + version
     assert "MEDUSA::NEXUS" in body
     assert "v0.1.0-alpha" in body
-
-    # Header row signal (clock id + CONNECTED badge)
     assert 'id="clock"' in body
-    assert "CONNECTED" in body
 
-    # Sidebar nav — one entry per group in the Pencil design.
+    # Sidebar: 9 primary routes + 3 secondary at the bottom.
     for nav_item in ("DASHBOARD", "PROJECTS", "SCAN", "DYNAMIC", "NETWORK",
-                     "REPORT", "TOOLS", "RECIPES", "SETTINGS"):
+                     "REPORT", "TOOLS", "RECIPES", "SETTINGS",
+                     "BOOT", "CREDITS", "TERMINAL"):
         assert f">{nav_item}<" in body, f"sidebar missing {nav_item}"
 
-    # 4-up metric card labels
-    for kicker in ("// AVG RISK", "// OPEN CRITICALS", "// DEVICES", "// ENGINES"):
-        assert kicker in body, f"missing metric card {kicker}"
+    # Static asset references wired
+    assert '/static/app.css' in body
+    assert '/static/app.js' in body
 
-    # ASCII section header + gradient underline
-    assert "02 // RECENT" in body
-    assert "gradient-underline" in body
-
-    # Engine status panel + footer
-    assert "// ENGINE STATUS" in body
+    # The main pane is empty until the router renders on the client.
+    assert 'id="view"' in body
     assert "SYSTEM READY" in body
+
+
+def test_spa_static_assets_served(client: TestClient) -> None:
+    """app.css and app.js are reachable — otherwise the SPA is a brick."""
+    css = client.get("/static/app.css")
+    assert css.status_code == 200
+    assert css.headers["content-type"].startswith("text/css")
+    assert "--cyan: #00FFFF" in css.text  # design token present
+
+    js = client.get("/static/app.js")
+    assert js.status_code == 200
+    assert js.headers["content-type"].startswith(("application/javascript", "text/javascript"))
+    assert "renderRoute" in js.text  # router entrypoint present
+
+
+def test_every_sidebar_route_has_a_handler(client: TestClient) -> None:
+    """Pin that every primary sidebar label corresponds to an entry in the JS route table."""
+    js = client.get("/static/app.js").text
+    for route in ("dashboard", "projects", "scan", "dynamic", "network",
+                  "report", "tools", "recipes", "settings",
+                  "about", "boot", "terminal"):
+        # Each route shows up as a path entry in the ROUTES list.
+        assert f'path: "{route}"' in js, f"route '{route}' not in ROUTES table"
+
+
+def test_mitigation_is_pinned_in_spa(client: TestClient) -> None:
+    """The Mitigation block is a first-class UI element; don't let anyone quietly drop it."""
+    js = client.get("/static/app.js").text
+    assert "MITIGATION PLAYBOOK" in js
+    assert "mitigation" in js  # CSS class
+    assert "Android Keystore" in js  # sample mitigation content from Finding Detail
 
 
 def test_favicon_is_svg(client: TestClient) -> None:
