@@ -18,13 +18,36 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def test_root_serves_landing_page_html(client: TestClient) -> None:
+def test_root_serves_dashboard_html(client: TestClient) -> None:
+    """GET / mirrors the `01 // DASHBOARD` Pencil screen — pin the structural bits."""
     r = client.get("/")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     body = r.text
+
+    # Brand + version
     assert "MEDUSA::NEXUS" in body
-    assert "/v1/doctor" in body  # link to doctor endpoint is present
+    assert "v0.1.0-alpha" in body
+
+    # Header row signal (clock id + CONNECTED badge)
+    assert 'id="clock"' in body
+    assert "CONNECTED" in body
+
+    # Sidebar nav — one entry per group in the Pencil design.
+    for nav_item in ("DASHBOARD", "PROJECTS", "SCAN", "DYNAMIC", "NETWORK",
+                     "REPORT", "TOOLS", "RECIPES", "SETTINGS"):
+        assert f">{nav_item}<" in body, f"sidebar missing {nav_item}"
+
+    # 4-up metric card labels
+    for kicker in ("// AVG RISK", "// OPEN CRITICALS", "// DEVICES", "// ENGINES"):
+        assert kicker in body, f"missing metric card {kicker}"
+
+    # ASCII section header + gradient underline
+    assert "02 // RECENT" in body
+    assert "gradient-underline" in body
+
+    # Engine status panel + footer
+    assert "// ENGINE STATUS" in body
     assert "SYSTEM READY" in body
 
 
