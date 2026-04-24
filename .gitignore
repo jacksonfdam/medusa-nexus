@@ -47,9 +47,10 @@ Icon?
 .Spotlight-V100
 .Trashes
 
-# ─── IDEs ───
+# ─── IDEs / tooling ───
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
