@@ -67,8 +67,23 @@ Idempotent — safe to re-run. `NO_COLOR=1 ./scripts/setup.sh` kills ANSI output
 | *(none)* | full install |
 | `--minimal` | skip Ghidra, MobSF docker, frida-server push |
 | `--device` | only push frida-server to the currently connected device |
+| `--mobsf` | start MobSF in Docker with a pinned API key + write it to `~/.mnexus/env.sh` |
 | `--doctor` | only run `mnexus doctor` |
 | `--help` | print usage |
+
+### Starting MobSF (and getting past the `MISSING` doctor row)
+
+```bash
+# spin up the container with a deterministic API key,
+# and have the script write MNEXUS_MOBSF_API_KEY into the env file for you.
+./scripts/setup.sh --mobsf
+
+# re-source the env in the current shell, then verify
+source ~/.mnexus/env.sh
+mnexus doctor
+```
+
+You can pin your own key via `MOBSF_API_KEY=<your-key> ./scripts/setup.sh --mobsf` — useful for CI and team setups.
 
 ## Running
 
