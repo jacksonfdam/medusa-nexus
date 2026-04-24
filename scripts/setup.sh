@@ -28,7 +28,8 @@ readonly MNEXUS_TOOLS="$MNEXUS_HOME/tools"
 readonly MNEXUS_WORKSPACE="$MNEXUS_HOME/workspace"
 readonly MNEXUS_ENV_FILE="$MNEXUS_HOME/env.sh"
 readonly VENV_DIR="$REPO_ROOT/.venv"
-readonly GHIDRA_VERSION="${GHIDRA_VERSION:-11.1.2}"
+# Empty = auto-detect latest from GitHub. Override with GHIDRA_VERSION=X.Y.Z
+readonly GHIDRA_VERSION="${GHIDRA_VERSION:-}"
 
 # ─── ANSI palette (cyberpunk terminal) ────────────────────────────────────
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -57,6 +58,7 @@ for arg in "$@"; do
         --minimal) MODE="minimal" ;;
         --device)  MODE="device" ;;
         --doctor)  MODE="doctor" ;;
+        --mobsf)   MODE="mobsf" ;;
         --help|-h)
             cat <<'HELP'
 MEDUSA NEXUS — installer. Opinionated. Idempotent.
@@ -65,13 +67,15 @@ Usage:
   scripts/setup.sh              full install
   scripts/setup.sh --minimal    skip Ghidra, MobSF, frida-server
   scripts/setup.sh --device     only push frida-server on the connected device
+  scripts/setup.sh --mobsf      start MobSF in Docker with a pinned API key and write it to env
   scripts/setup.sh --doctor     only run `mnexus doctor`
   scripts/setup.sh --help
 
 Environment overrides:
   MNEXUS_HOME        default $HOME/.mnexus
-  GHIDRA_VERSION     default 11.1.2
+  GHIDRA_VERSION     default = latest GitHub release
   FRIDA_VERSION      default = latest GitHub release
+  MOBSF_API_KEY      optional pinned key; auto-generated UUID if unset
   NO_COLOR=1         disable ANSI output
 HELP
             exit 0
@@ -190,34 +194,57 @@ install_jadx_from_release() {
 
 # ─── Ghidra (optional: --minimal skips) ───────────────────────────────────
 install_ghidra() {
-    step "installing Ghidra v$GHIDRA_VERSION"
     local target="$MNEXUS_TOOLS/ghidra"
 
     if [[ -x "$target/support/analyzeHeadless" ]]; then
-        ok "Ghidra already at $target"
+        step "Ghidra already installed"
+        ok "$target"
         return 0
     fi
 
-    mkdir -p "$MNEXUS_TOOLS"
-    local api="https://api.github.com/repos/NationalSecurityAgency/ghidra/releases"
-    local url
-    url=$(curl -fsSL "$api" \
-        | grep -E "\"browser_download_url\".*ghidra_${GHIDRA_VERSION}_PUBLIC.*\\.zip\"" \
-        | head -1 | cut -d'"' -f4)
+    if [[ -n "$GHIDRA_VERSION" ]]; then
+        step "installing Ghidra v$GHIDRA_VERSION"
+    else
+        step "installing Ghidra (latest release)"
+    fi
 
-    if [[ -z "$url" ]]; then
-        warn "Ghidra v$GHIDRA_VERSION release not found on GitHub. Try another GHIDRA_VERSION="
+    mkdir -p "$MNEXUS_TOOLS"
+
+    local url
+    # Try latest release first when no version pinned.
+    if [[ -z "$GHIDRA_VERSION" ]]; then
+        url=$(curl -fsSL "https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest" \
+            | grep -Eo '"browser_download_url":[^"]*"[^"]*ghidra_[^"]+_PUBLIC[^"]*\.zip"' \
+            | head -1 | cut -d'"' -f4 || true)
+    else
+        url=$(curl -fsSL "https://api.github.com/repos/NationalSecurityAgency/ghidra/releases" \
+            | grep -Eo "\"browser_download_url\":[^\"]*\"[^\"]*ghidra_${GHIDRA_VERSION}_PUBLIC[^\"]*\\.zip\"" \
+            | head -1 | cut -d'"' -f4 || true)
+    fi
+
+    if [[ -z "${url:-}" ]]; then
+        warn "could not resolve a Ghidra release zip from GitHub — skipping"
+        hint "browse https://github.com/NationalSecurityAgency/ghidra/releases and set GHIDRA_VERSION=X.Y.Z"
         return 0
     fi
 
     say "downloading: $url"
     local tmp; tmp=$(mktemp -d)
-    curl -fL --progress-bar -o "$tmp/ghidra.zip" "$url"
-    say "unpacking (~400 MB; kettle-on time)"
-    unzip -q "$tmp/ghidra.zip" -d "$tmp/unpack"
+    if ! curl -fL --progress-bar -o "$tmp/ghidra.zip" "$url"; then
+        warn "download failed — skipping Ghidra"
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    say "unpacking (~400 MB — kettle-on time)"
+    unzip -q "$tmp/ghidra.zip" -d "$tmp/unpack" || { warn "unzip failed — skipping"; rm -rf "$tmp"; return 0; }
     local extracted
     extracted=$(find "$tmp/unpack" -maxdepth 1 -type d -name "ghidra_*" | head -1)
-    [[ -n "$extracted" ]] || fail "extracted Ghidra layout unexpected"
+    if [[ -z "$extracted" ]]; then
+        warn "unexpected Ghidra zip layout — skipping"
+        rm -rf "$tmp"
+        return 0
+    fi
     rm -rf "$target"
     mv "$extracted" "$target"
     rm -rf "$tmp"
@@ -264,46 +291,135 @@ pull_mobsf_docker() {
 # ─── frida-server on connected device ─────────────────────────────────────
 push_frida_server() {
     step "pushing frida-server to connected device"
+
     if ! command -v adb >/dev/null 2>&1; then
         warn "adb not on PATH — skipping frida-server push."
         return 0
     fi
     if ! adb devices | awk 'NR>1 && $2=="device"{found=1} END{exit !found}'; then
-        warn "no device connected (adb devices shows nothing). Run: scripts/setup.sh --device"
+        warn "no device connected (adb devices shows nothing)."
+        hint "plug a device in, authorize USB debugging, then: scripts/setup.sh --device"
+        return 0
+    fi
+    if ! command -v xz >/dev/null 2>&1; then
+        warn "xz not installed — skipping. On macOS: 'brew install xz'. On Linux: 'apt install xz-utils'."
         return 0
     fi
 
-    local dev_abi
+    local dev_abi frida_arch
     dev_abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')
-    local frida_arch
     case "$dev_abi" in
-        arm64-v8a) frida_arch="arm64" ;;
-        armeabi-v7a) frida_arch="arm" ;;
-        x86_64) frida_arch="x86_64" ;;
-        x86) frida_arch="x86" ;;
-        *) warn "unknown device ABI: $dev_abi — skipping"; return 0 ;;
+        arm64-v8a)   frida_arch="arm64"  ;;
+        armeabi-v7a) frida_arch="arm"    ;;
+        x86_64)      frida_arch="x86_64" ;;
+        x86)         frida_arch="x86"    ;;
+        *) warn "unknown device ABI: '$dev_abi' — skipping"; return 0 ;;
     esac
+    ok "device ABI: $dev_abi → frida-server arch: $frida_arch"
 
     local frida_ver="${FRIDA_VERSION:-}"
     if [[ -z "$frida_ver" ]]; then
         frida_ver=$(curl -fsSL https://api.github.com/repos/frida/frida/releases/latest \
-            | grep -m1 '"tag_name"' | cut -d'"' -f4)
+            | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)
     fi
-    [[ -n "$frida_ver" ]] || fail "could not resolve frida release version"
+    if [[ -z "${frida_ver:-}" ]]; then
+        warn "could not resolve frida release version (GitHub rate-limited?) — skipping"
+        return 0
+    fi
+    ok "frida release: $frida_ver"
 
     local url="https://github.com/frida/frida/releases/download/${frida_ver}/frida-server-${frida_ver}-android-${frida_arch}.xz"
-    local tmp; tmp=$(mktemp -d)
-    say "fetching $url"
-    curl -fL --progress-bar -o "$tmp/frida-server.xz" "$url"
-    xz -d "$tmp/frida-server.xz"
+    hint "$url"
 
-    say "pushing to /data/local/tmp/frida-server on device"
-    adb push "$tmp/frida-server" /data/local/tmp/frida-server >/dev/null
-    adb shell "chmod 755 /data/local/tmp/frida-server"
+    # HEAD check first so we don't download a 404 page.
+    if ! curl -fsSLI -o /dev/null "$url"; then
+        warn "binary not found at the URL above — skipping."
+        hint "asset naming may have changed. Browse https://github.com/frida/frida/releases"
+        return 0
+    fi
+
+    local tmp; tmp=$(mktemp -d)
+    say "downloading…"
+    if ! curl -fL --progress-bar -o "$tmp/frida-server.xz" "$url"; then
+        warn "download failed — skipping. Try again with better wifi."
+        rm -rf "$tmp"
+        return 0
+    fi
+    if ! xz -d "$tmp/frida-server.xz"; then
+        warn "xz decompress failed — skipping."
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    say "pushing to /data/local/tmp/frida-server"
+    adb push "$tmp/frida-server" /data/local/tmp/frida-server >/dev/null || {
+        warn "adb push failed — skipping"; rm -rf "$tmp"; return 0;
+    }
+    adb shell "chmod 755 /data/local/tmp/frida-server" || true
     rm -rf "$tmp"
 
-    ok "frida-server staged. On a rooted device: adb shell su -c '/data/local/tmp/frida-server &'"
-    hint "on non-rooted devices use Stheno to inject frida-gadget into the APK instead."
+    ok "frida-server staged on device."
+    hint "on a rooted device: adb shell 'su -c \"/data/local/tmp/frida-server &\"'"
+    hint "on a non-rooted device, use Stheno to inject frida-gadget into the APK."
+}
+
+# ─── MobSF container (pinned API key + env injection) ────────────────────
+generate_api_key() {
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuidgen | tr 'A-Z' 'a-z'
+    else
+        # Fallback: 32 hex chars from /dev/urandom.
+        LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c 32
+        echo
+    fi
+}
+
+# Upsert KEY=VALUE into the env file. Idempotent.
+# $1 = var name (e.g. MNEXUS_MOBSF_API_KEY), $2 = value.
+upsert_env_var() {
+    local var="$1" val="$2"
+    mkdir -p "$MNEXUS_HOME"
+    touch "$MNEXUS_ENV_FILE"
+    local line="export $var=\"$val\""
+    # Strip any existing active or commented entries for this var.
+    if grep -qE "^(# *)?export +$var=" "$MNEXUS_ENV_FILE"; then
+        # sed -i portability: macOS BSD sed needs a backup suffix.
+        sed -i.bak -E "/^(# *)?export +$var=/d" "$MNEXUS_ENV_FILE" && rm -f "$MNEXUS_ENV_FILE.bak"
+    fi
+    echo "$line" >> "$MNEXUS_ENV_FILE"
+}
+
+start_mobsf() {
+    step "starting MobSF container with a pinned API key"
+    if ! command -v docker >/dev/null 2>&1; then
+        fail "docker not installed. Install Docker Desktop / engine and re-run."
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        fail "docker daemon not running. Start Docker and re-run."
+    fi
+
+    local key="${MOBSF_API_KEY:-$(generate_api_key)}"
+
+    if docker ps -a --format '{{.Names}}' | grep -qx 'mobsf'; then
+        warn "existing 'mobsf' container found — removing"
+        docker rm -f mobsf >/dev/null 2>&1 || true
+    fi
+
+    say "docker run -d --name mobsf -p 8000:8000 -e MOBSF_API_KEY=<pinned> opensecurity/mobile-security-framework-mobsf:latest"
+    docker run -d \
+        --name mobsf \
+        -p 8000:8000 \
+        -e MOBSF_API_KEY="$key" \
+        opensecurity/mobile-security-framework-mobsf:latest >/dev/null
+
+    ok "MobSF starting at http://localhost:8000 (takes ~20s on first boot)"
+    say "API key pinned to: $key"
+
+    upsert_env_var "MNEXUS_MOBSF_API_KEY" "$key"
+    upsert_env_var "MNEXUS_MOBSF_URL" "http://localhost:8000"
+    ok "wrote MNEXUS_MOBSF_API_KEY + MNEXUS_MOBSF_URL to $MNEXUS_ENV_FILE"
+    hint "re-source your env file in this shell:  source $MNEXUS_ENV_FILE"
+    hint "then verify with:                         mnexus doctor"
 }
 
 # ─── env file ─────────────────────────────────────────────────────────────
@@ -361,6 +477,10 @@ main() {
     case "$MODE" in
         device)
             push_frida_server
+            exit 0
+            ;;
+        mobsf)
+            start_mobsf
             exit 0
             ;;
         doctor)
