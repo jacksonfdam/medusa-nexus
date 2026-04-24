@@ -273,33 +273,79 @@ function view_scan() {
       ${sectionHeader("I", "03 // INTAKE", "APK RECONNAISSANCE")}
       <section class="dropzone" id="dz">
         <div class="heading">[ DROP .APK / .XAPK HERE ]</div>
-        <div class="sub">or paste a path · or pull from device</div>
-        <div class="wink">SHA-256 gets computed. VirusTotal gets called. You just sit there.</div>
+        <div class="sub">or click BROWSE · or pull from device</div>
+        <div class="wink">SHA-256 gets computed. apktool detects package+version. ingest runs.</div>
+        <input type="file" id="dz-picker" accept=".apk,.xapk" style="display:none" />
         <div class="actions">
-          <button class="btn primary">[ BROWSE ]</button>
+          <button class="btn primary" onclick="document.getElementById('dz-picker').click()">[ BROWSE ]</button>
           <a class="btn" href="#/device/pull">[ PULL FROM DEVICE ]</a>
           <a class="btn" href="#/device/bridge">[ DEVICE BRIDGE ]</a>
         </div>
+        <div id="dz-status" class="muted small" style="min-height:18px;margin-top:6px"></div>
       </section>
       <section class="panel">
-        <div class="panel-head">// RECENT IMPORTS · last 10</div>
-        <div class="panel-body empty-state">
-          nothing imported yet. run <code>mnexus scan ./target.apk --package com.target.app</code>
-        </div>
+        <div class="panel-head"><span>// RECENT IMPORTS · last 10</span><span class="spacer"></span><a class="btn" href="#/projects" style="padding:4px 10px">[ SEE ALL ]</a></div>
+        <div class="panel-body tight" id="recent-imports">loading…</div>
       </section>
     </div>`;
+}
+
+async function mount_scan_after_upload_wiring() {
+    const projects = await getJSON("/v1/projects").catch(() => []);
+    const el = $("#recent-imports");
+    if (!el) return;
+    if (!projects.length) {
+        el.innerHTML = `<div class="empty-state">nothing imported yet. drop an APK above or run <code>mnexus scan ./target.apk</code></div>`;
+        return;
+    }
+    el.innerHTML = projects.slice(0, 10).map((p) => `
+        <a class="table-row" href="#/project/${encodeURIComponent(p.id)}/overview" style="grid-template-columns: 1fr 140px 100px 120px;text-decoration:none;color:inherit">
+          <span class="t-mono" style="font-weight:700">${p.package_name || p.name || p.id}</span>
+          <span class="t-muted">${p.version_name || "—"}</span>
+          <span class="t-mono" style="color:var(--sev-${classifyRisk(p.risk_score || 0)})">${(p.risk_score || 0).toFixed(1)}</span>
+          <span class="t-muted">${(p.updated_at || "").slice(0, 10)}</span>
+        </a>`).join("");
 }
 
 function mount_scan() {
     const dz = $("#dz");
     if (!dz) return;
-    ["dragenter", "dragover"].forEach((e) => dz.addEventListener(e, (ev) => { ev.preventDefault(); dz.classList.add("over"); }));
+
+    const picker = $("#dz-picker");
+    const status = $("#dz-status");
+
+    ["dragenter", "dragover"].forEach((e) =>
+        dz.addEventListener(e, (ev) => { ev.preventDefault(); dz.classList.add("over"); })
+    );
     ["dragleave", "drop"].forEach((e) => dz.addEventListener(e, () => dz.classList.remove("over")));
-    dz.addEventListener("drop", (ev) => {
-        ev.preventDefault();
-        const f = ev.dataTransfer?.files?.[0];
-        if (f) alert(`received ${f.name} — upload endpoint not wired yet (iteration 2).`);
-    });
+    dz.addEventListener("drop", (ev) => { ev.preventDefault(); handleUpload(ev.dataTransfer?.files?.[0]); });
+    if (picker) picker.addEventListener("change", (ev) => handleUpload(ev.target.files?.[0]));
+
+    async function handleUpload(file) {
+        if (!file) return;
+        status.innerHTML = `<span style="color:var(--acid)">↑ uploading <b>${file.name}</b> (${fmtBytes(file.size)}) · detecting package via apktool…</span>`;
+
+        const fd = new FormData();
+        fd.append("file", file);
+        try {
+            const r = await fetch("/v1/apks/upload", { method: "POST", body: fd });
+            const payload = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                status.innerHTML = `<span style="color:var(--sev-crit)">✕ upload failed: ${payload.detail || r.statusText}</span>`;
+                return;
+            }
+            status.innerHTML = `<span style="color:var(--acid)">✓ ingested as <b>${payload.project_id}</b> (${payload.package} ${payload.version}) — redirecting…</span>`;
+            setTimeout(() => { location.hash = `#/project/${encodeURIComponent(payload.project_id)}/overview`; }, 900);
+        } catch (e) {
+            status.innerHTML = `<span style="color:var(--sev-crit)">✕ upload error: ${e.message}</span>`;
+        }
+    }
+}
+
+function fmtBytes(n) {
+    if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${n} B`;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -978,6 +1024,316 @@ function view_finding_detail(ctx) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ *  mount hooks for every wired screen
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+async function mount_project_overview(ctx) {
+    const id = ctx.params.id;
+    let project;
+    try {
+        project = await getJSON(`/v1/projects/${encodeURIComponent(id)}`);
+    } catch (e) {
+        const view = $("#view main, .main");
+        if (view) view.innerHTML += `<div class="empty-state"><div style="color:var(--sev-crit);font-size:18px">project ${id} not found — <a href="#/projects">back to list</a></div></div>`;
+        return;
+    }
+    const surface = project.attack_surface || {};
+    const counts = project.findings_by_severity || surface.findings_by_severity || {};
+    const score = project.risk_score || 0;
+
+    // Replace the whole main pane with real data. Keep the tab bar.
+    const main = $(".main");
+    if (!main) return;
+
+    const severityRows = [
+        ["CRIT", "sev-crit", counts.critical || 0],
+        ["HIGH", "sev-high", counts.high || 0],
+        ["MED",  "sev-med",  counts.medium || 0],
+        ["LOW",  "sev-low",  counts.low || 0],
+        ["INFO", "muted",    counts.info || 0],
+    ];
+
+    const findingsList = (surface.findings || []).slice(0, 8).map((f) => `
+        <a href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" class="row" style="padding:8px 12px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;text-decoration:none;color:inherit">
+            ${chip((f.severity || "info").toLowerCase())}
+            <span class="grow">${f.title}</span>
+            <span class="t-muted">[${f.source_engine || "?"}]</span>
+        </a>`).join("") || `<div class="empty-state">no findings yet — every static engine returned []. Wire real detection in iteration 2.</div>`;
+
+    main.innerHTML = h`
+      <div class="muted small uppercase">🔱 NEXUS / ${id} / overview · ${project.package_name || "—"} v${project.version_name || "?"}</div>
+      ${projectTabs(id, "overview")}
+      <section class="row" style="align-items:flex-start;gap:24px">
+        <div class="col" style="width:280px">
+          <div class="risk-gauge" style="--deg: ${Math.round((score / 100) * 360)}deg">
+            <div class="arc"></div>
+            <div class="label">
+              <div class="value">${score.toFixed(1)}</div>
+              <div class="caption">RISK / 100</div>
+            </div>
+          </div>
+          <section class="panel">
+            <div class="panel-head">// SEVERITY</div>
+            <div class="panel-body col" style="gap:4px">
+              ${severityRows.map(([label, color, n]) => `
+                <div class="row">
+                  <span style="color:var(--${color});width:40px">${label}</span>
+                  <span class="t-mono" style="color:var(--${color})">${bar(n, 16)}</span>
+                  <span class="grow" style="text-align:right">${String(n).padStart(2, "0")}</span>
+                </div>`).join("")}
+            </div>
+          </section>
+        </div>
+        <div class="col grow">
+          <section class="panel">
+            <div class="panel-head"><span>// FINDINGS TIMELINE</span><span class="spacer"></span><span class="muted">${(surface.findings || []).length} total</span></div>
+            <div class="panel-body col" style="gap:8px">${findingsList}</div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">// ATTACK SURFACE</div>
+            <div class="panel-body row" style="gap:24px">
+              <div class="col grow"><span class="muted small uppercase">COMPONENTS</span><span class="t-mono">${(surface.exported_components || []).length} exported</span></div>
+              <div class="col grow"><span class="muted small uppercase">DEEP LINKS</span><span class="t-mono">${(surface.deeplinks || []).length}</span></div>
+              <div class="col grow"><span class="muted small uppercase">NATIVE LIBS</span><span class="t-mono">${(surface.native_libraries || []).length}</span></div>
+              <div class="col grow"><span class="muted small uppercase">SSL PINNING</span><span class="t-mono">${surface.ssl_pinning_detected ? "detected · " + (surface.ssl_pinning_library || "?") : "none"}</span></div>
+            </div>
+          </section>
+        </div>
+      </section>`;
+}
+
+function bar(n, max) {
+    const fill = Math.min(Math.round((n / Math.max(max, 1)) * 16), 16);
+    return "█".repeat(fill) + "░".repeat(16 - fill);
+}
+
+async function mount_project_static(ctx) {
+    const id = ctx.params.id;
+    let findings = [];
+    try {
+        findings = await getJSON(`/v1/projects/${encodeURIComponent(id)}/findings`);
+    } catch (e) { /* empty */ }
+
+    const panel = $$(".panel")[2];  // the findings panel is the 3rd in the Static layout
+    if (!panel) return;
+    const body = panel.querySelector(".panel-body");
+    if (!body) return;
+    if (!findings.length) {
+        body.innerHTML = `<div class="empty-state">no findings yet — static engines are still stubs. JADX/MobSF/Ghidra run on upload but currently emit []. <a href="#/scan">Ingest an APK</a> and check back once detection rules land.</div>`;
+        return;
+    }
+    body.innerHTML = findings.slice(0, 10).map((f) => `
+        <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
+          <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine || "?"}]</span></div>
+          <div class="title">${f.title}</div>
+          <div class="meta">${f.location || "?"} · ${f.cwe_id || ""} ${f.owasp_mobile || ""}</div>
+        </a>`).join("");
+}
+
+async function mount_project_dynamic(ctx) {
+    let recipes = [];
+    try { recipes = await getJSON("/v1/recipes"); } catch (e) { /* empty */ }
+    const left = $(".panel");
+    if (!left) return;
+    const body = left.querySelector(".panel-body");
+    if (!body || !recipes.length) return;
+
+    const listed = recipes.map((r, i) => {
+        const on = i < 3;
+        return `
+        <div class="row" style="padding:6px 10px;background:${on ? "var(--bg-accent-panel)" : "var(--bg-panel)"};border:1px solid ${on ? "var(--border-accent)" : "var(--border)"};border-radius:2px">
+          <span style="color:${on ? "var(--acid)" : "var(--muted)"}">[${on ? "x" : " "}]</span>
+          <span class="t-mono" style="color:${on ? "var(--acid)" : "var(--muted)"};flex:1">${r.name}</span>
+          <span class="muted small">${r.origin}</span>
+        </div>`;
+    }).join("");
+    body.innerHTML = `<div class="muted small">Auto-generated from static findings + loaded recipes. Untick at your own risk.</div>` + listed +
+        `<a class="btn" href="#/recipes" style="margin-top:10px">[ LOAD MORE RECIPES ]</a>`;
+}
+
+async function mount_device_pull() {
+    const info = await getJSON("/v1/device/info").catch(() => ({connected: false, reason: "network error"}));
+    const pkgs = info.connected ? await getJSON("/v1/device/packages").catch(() => []) : [];
+    const badgeRoot = $(".row .badge");
+    if (badgeRoot) {
+        badgeRoot.innerHTML = info.connected
+            ? `<span class="dot">●</span>${info.model || "device"} · android ${info.android_release || "?"}`
+            : `<span class="dot">●</span>NO DEVICE`;
+        badgeRoot.classList.toggle("connected", info.connected);
+    }
+
+    const panel = $(".panel");
+    if (!panel) return;
+    panel.querySelector(".panel-head").innerHTML = `// PACKAGES · ${pkgs.length} ${info.connected ? "· " + info.abi : ""}`;
+    const body = panel.querySelector(".panel-body");
+
+    if (!info.connected) {
+        body.innerHTML = `<div class="empty-state"><div style="color:var(--sev-crit);font-size:20px;letter-spacing:3px">NO DEVICE CONNECTED</div><div class="muted">${info.reason || ""}</div><div class="muted small" style="margin-top:12px">plug a device, authorize USB debugging, then reload this screen.</div></div>`;
+        return;
+    }
+    if (!pkgs.length) {
+        body.innerHTML = `<div class="empty-state">no packages matched.</div>`;
+        return;
+    }
+    body.innerHTML = `
+        <div class="table-hdr" style="grid-template-columns: 1fr 120px">
+            <span>PACKAGE</span><span></span>
+        </div>` +
+        pkgs.slice(0, 50).map(({ package: pkg }) => `
+            <div class="table-row" style="grid-template-columns: 1fr 120px">
+                <span class="t-mono">${pkg}</span>
+                <span style="text-align:right"><button class="btn primary" data-pull="${pkg}" style="padding:4px 10px">[ PULL ]</button></span>
+            </div>`).join("");
+
+    $$("[data-pull]").forEach((btn) => btn.addEventListener("click", async () => {
+        const pkg = btn.dataset.pull;
+        btn.textContent = "[ PULLING… ]";
+        btn.disabled = true;
+        try {
+            const fd = new FormData(); fd.append("package", pkg);
+            const r = await fetch("/v1/device/pull", { method: "POST", body: fd });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || r.statusText);
+            btn.textContent = `[ PULLED ${j.count} ]`;
+            btn.style.color = "var(--acid)";
+        } catch (e) {
+            btn.textContent = `[ FAILED ]`;
+            btn.style.color = "var(--sev-crit)";
+        }
+    }));
+}
+
+async function mount_device_bridge() {
+    const info = await getJSON("/v1/device/info").catch(() => ({connected: false, reason: "network error"}));
+
+    const devicePanel = $$(".panel")[0]?.querySelector(".panel-body");
+    if (devicePanel) {
+        if (!info.connected) {
+            devicePanel.innerHTML = `<div class="empty-state"><div style="color:var(--sev-crit);font-size:18px">NO DEVICE</div><div class="muted small">${info.reason || ""}</div></div>`;
+        } else {
+            devicePanel.innerHTML = `
+              <div class="row"><span class="muted small" style="width:140px">MODEL</span><span class="t-mono">${info.manufacturer || ""} ${info.model || ""}</span></div>
+              <div class="row"><span class="muted small" style="width:140px">ANDROID</span><span class="t-mono">${info.android_release || "?"} (SDK ${info.android_sdk || "?"})</span></div>
+              <div class="row"><span class="muted small" style="width:140px">ABI</span><span class="t-mono">${info.abi || "?"}</span></div>
+              <div class="row"><span class="muted small" style="width:140px">DEBUGGABLE</span><span class="t-mono" style="color:${info.debuggable === "1" ? "var(--sev-high)" : "var(--acid)"}">${info.debuggable === "1" ? "yes" : "no"}</span></div>
+              <div class="row"><span class="muted small" style="width:140px">FRIDA-SERVER</span><span class="t-mono" style="color:var(--${info.frida_server_running ? "acid" : info.frida_server_staged ? "sev-high" : "muted"})">${info.frida_server_running ? "running" : info.frida_server_staged ? "staged · not running" : "not staged"}</span></div>`;
+        }
+    }
+
+    $$('.btn.primary').forEach((btn) => {
+        if (btn.textContent.includes("START FRIDA")) {
+            btn.addEventListener("click", async () => {
+                btn.textContent = "[ STARTING… ]";
+                try {
+                    const r = await fetch("/v1/device/frida/start", { method: "POST" });
+                    const j = await r.json();
+                    if (!r.ok) throw new Error(j.detail || r.statusText);
+                    btn.textContent = j.running ? `[ RUNNING pid=${j.pid} ]` : "[ FAILED TO START ]";
+                    btn.style.color = j.running ? "var(--acid)" : "var(--sev-crit)";
+                } catch (e) {
+                    btn.textContent = "[ ERROR ]";
+                    btn.style.color = "var(--sev-crit)";
+                }
+            });
+        }
+    });
+}
+
+async function mount_recipes() {
+    let recipes = [];
+    try { recipes = await getJSON("/v1/recipes"); } catch (e) { /* stay on sample */ }
+    if (!recipes.length) return;
+    const grid = $(".recipes-grid");
+    if (!grid) return;
+    grid.innerHTML = recipes.map((r) => `
+        <div class="recipe-card">
+          <div class="cat-row"><span class="cat">${r.category}</span><span class="grow"></span><span class="origin">${r.origin}</span></div>
+          <div class="name">${r.name}</div>
+          <div class="desc">${r.description}</div>
+          <div class="foot">
+            <span class="compat">${r.compatibility}</span>
+            <button class="btn primary" data-load="${r.name}" style="padding:4px 10px">[ LOAD ]</button>
+          </div>
+        </div>`).join("");
+    $$("[data-load]").forEach((btn) => btn.addEventListener("click", async () => {
+        const name = btn.dataset.load;
+        btn.textContent = "[ …]";
+        try {
+            const j = await getJSON(`/v1/recipes/${encodeURIComponent(name)}/script`);
+            btn.textContent = `[ ${j.script.length}B ]`;
+            btn.style.color = "var(--acid)";
+        } catch (e) {
+            btn.textContent = "[ N/A ]";
+            btn.style.color = "var(--sev-high)";
+        }
+    }));
+}
+
+async function mount_settings() {
+    const s = await getJSON("/v1/settings").catch(() => null);
+    if (!s) return;
+    const main = $(".main");
+    if (!main) return;
+    // Re-render the panels with real values.
+    const pathsPanel = $$(".panel")[0]?.querySelector(".panel-body");
+    if (pathsPanel) {
+        pathsPanel.innerHTML = Object.entries(s.paths).map(([k, v]) =>
+            `<div class="row"><span class="muted small" style="width:140px">${k.toUpperCase()}</span><code>${v || "(unset)"}</code></div>`
+        ).join("");
+    }
+    const servicesPanel = $$(".panel")[1]?.querySelector(".panel-body");
+    if (servicesPanel) {
+        servicesPanel.innerHTML = `
+          <div class="row"><span class="muted small" style="width:140px">MOBSF</span><code>${s.services.mobsf_url}</code><span class="chip ${s.services.mobsf_has_api_key ? "low" : "high"}">${s.services.mobsf_has_api_key ? "KEY SET" : "NO KEY"}</span></div>
+          <div class="row"><span class="muted small" style="width:140px">BURP</span><code>${s.services.burp_url}</code><span class="chip ${s.services.burp_has_api_key ? "low" : "high"}">${s.services.burp_has_api_key ? "KEY SET" : "NO KEY"}</span></div>
+          <div class="row"><span class="muted small" style="width:140px">WORKSPACE</span><code>${s.workspace}</code></div>
+          <div class="row"><span class="muted small" style="width:140px">DB</span><code>${s.db_path}</code></div>`;
+    }
+}
+
+async function mount_finding_detail(ctx) {
+    const fid = ctx.params.fid || ctx.params.id;
+    try {
+        const f = await getJSON(`/v1/findings/${encodeURIComponent(fid)}`);
+        const title = $(".finding .title");
+        const meta = $(".finding .meta");
+        const code = $$(".finding .code")[0];
+        const mit = $(".finding .mitigation");
+        if (title) title.textContent = f.title;
+        if (meta) meta.textContent = `${f.location || ""} · ${f.cwe_id || ""} ${f.owasp_mobile || ""} · engine: ${f.source_engine}`;
+        if (code) code.textContent = f.evidence || "(no evidence)";
+        if (mit && f.remediation) mit.innerHTML = f.remediation.split("\n").map((line) => `<div>${line}</div>`).join("");
+    } catch (e) {
+        // Fall back to the demo content — the route still shows the Finding Detail template.
+    }
+}
+
+function mount_report() {
+    $$(".btn.primary, .btn").forEach((btn) => {
+        const t = btn.textContent.trim();
+        const m = t.match(/^\[ (PDF|HTML|\.MD|JSON) \]$/);
+        if (!m) return;
+        btn.addEventListener("click", async () => {
+            // Grab the first project as a target until there's a selected one.
+            const projects = await getJSON("/v1/projects").catch(() => []);
+            if (!projects.length) { alert("no projects yet — scan one first."); return; }
+            const fmt = { "PDF": "pdf", "HTML": "html", ".MD": "markdown", "JSON": "json" }[m[1]];
+            const fd = new FormData();
+            fd.append("template", "technical");
+            fd.append("fmt", fmt);
+            const r = await fetch(`/v1/projects/${encodeURIComponent(projects[0].id)}/report`, { method: "POST", body: fd });
+            if (!r.ok) { alert(`report failed: ${r.status} ${await r.text()}`); return; }
+            const blob = await r.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = `${projects[0].id}.${fmt === "markdown" ? "md" : fmt}`;
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+    });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  *  Stub screens for everything else
  * ═══════════════════════════════════════════════════════════════════════════ */
 const STUBS = {
@@ -1066,30 +1422,30 @@ const ROUTES = [
     { path: "boot",                             view: view_boot },
     { path: "dashboard",                        view: view_dashboard,         mount: mount_dashboard },
     { path: "projects",                         view: view_projects,          mount: mount_projects },
-    { path: "scan",                             view: view_scan,              mount: mount_scan },
-    { path: "device/pull",                      view: view_device_pull },
-    { path: "device/bridge",                    view: view_device_bridge },
-    { path: "dynamic",                          view: (ctx) => view_project_dynamic(ctx) },
+    { path: "scan",                             view: view_scan,              mount: async (ctx) => { mount_scan(); await mount_scan_after_upload_wiring(); } },
+    { path: "device/pull",                      view: view_device_pull,       mount: mount_device_pull },
+    { path: "device/bridge",                    view: view_device_bridge,     mount: mount_device_bridge },
+    { path: "dynamic",                          view: (ctx) => view_project_dynamic(ctx), mount: mount_project_dynamic },
     { path: "network",                          view: (ctx) => view_project_network(ctx) },
-    { path: "report",                           view: view_report },
+    { path: "report",                           view: view_report,            mount: mount_report },
     { path: "report/diff",                      view: (ctx) => stub(STUBS["report-diff"]) },
     { path: "pipeline",                         view: (ctx) => stub(STUBS["pipeline"]) },
-    { path: "recipes",                          view: view_recipes },
+    { path: "recipes",                          view: view_recipes,           mount: mount_recipes },
     { path: "tools",                            view: view_tools,             mount: mount_tools },
-    { path: "settings",                         view: view_settings },
+    { path: "settings",                         view: view_settings,          mount: mount_settings },
     { path: "about",                            view: view_about },
     { path: "terminal",                         view: (ctx) => stub(STUBS["terminal"]) },
     { path: "states",                           view: (ctx) => stub(STUBS["states"]) },
     { path: "toasts",                           view: (ctx) => stub(STUBS["toasts"]) },
-    { path: "finding/:fid",                     view: view_finding_detail },
+    { path: "finding/:fid",                     view: view_finding_detail,    mount: mount_finding_detail },
 
     /* project scoped */
-    { path: "project/:id/overview",             view: view_project_overview },
-    { path: "project/:id/static",               view: view_project_static },
+    { path: "project/:id/overview",             view: view_project_overview,  mount: mount_project_overview },
+    { path: "project/:id/static",               view: view_project_static,    mount: mount_project_static },
     { path: "project/:id/static/secrets",       view: (ctx) => stub(STUBS["project-secrets"]) },
     { path: "project/:id/static/components",    view: (ctx) => stub(STUBS["project-components"]) },
     { path: "project/:id/static/native",        view: (ctx) => stub(STUBS["project-native"]) },
-    { path: "project/:id/dynamic",              view: view_project_dynamic },
+    { path: "project/:id/dynamic",              view: view_project_dynamic,   mount: mount_project_dynamic },
     { path: "project/:id/tracer",               view: (ctx) => stub(STUBS["project-tracer"]) },
     { path: "project/:id/network",              view: view_project_network },
     { path: "project/:id/api-map",              view: (ctx) => stub(STUBS["project-api-map"]) },
@@ -1099,7 +1455,7 @@ const ROUTES = [
     { path: "project/:id/attack-tree",          view: (ctx) => stub(STUBS["project-attack-tree"]) },
     { path: "project/:id/owasp",                view: (ctx) => stub(STUBS["project-owasp"]) },
     { path: "project/:id/report",               view: view_project_report },
-    { path: "project/:id/finding/:fid",         view: view_finding_detail },
+    { path: "project/:id/finding/:fid",         view: view_finding_detail,    mount: mount_finding_detail },
 ];
 
 function matchRoute(hashPath) {
