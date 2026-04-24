@@ -105,7 +105,45 @@ Burp Suite is closed-source and runs as a JAR — the installer can't autostart 
 
 4. `source ~/.mnexus/env.sh && mnexus doctor` — the `burp` row should flip to `OK`.
 
-**Note on Burp Community edition:** it does *not* ship the REST API. Either upgrade to Pro, or install the legacy [`burp-rest-api`](https://github.com/vmware/burp-rest-api) extension (not covered by this installer).
+**Note on Burp Community edition:** it does *not* ship the REST API. Use the legacy `burp-rest-api` extension below instead — the installer supports it.
+
+### Alternative: install `vmware-archive/burp-rest-api` (for Community edition)
+
+Adds a REST surface (`/burp/versions`, `/burp/proxy/history`, `/burp/scanner/…`) on top of any Burp Suite jar — Community or Pro.
+
+```bash
+# Make sure Burp Suite is installed first (any edition).
+# macOS: brew install --cask burp-suite
+
+./scripts/setup.sh --burp-rest-api
+```
+
+What the script does:
+
+1. Checks for a JRE (11+ / 21 for the latest release).
+2. Downloads the latest `burp-rest-api-*.jar` from GitHub releases into `~/.mnexus/tools/burp-rest-api/`.
+3. Auto-detects `burpsuite_community.jar` / `burpsuite_pro.jar` in common install paths (or takes `BURP_SUITE_JAR=<abs path>`).
+4. Writes a wrapper `run.sh` that launches everything in headless mode on port **8090** with no auth.
+5. Sets `MNEXUS_BURP_URL=http://localhost:8090` and `MNEXUS_BURP_API_KEY=none` in `~/.mnexus/env.sh` — the Python `BurpEngine` recognizes the `none` sentinel and probes `/burp/versions` instead of the Pro API's `/<key>/v0.1/` path.
+
+Launching:
+
+```bash
+# Auto-detected burp jar:
+~/.mnexus/tools/burp-rest-api/run.sh
+
+# Or override:
+BURP_SUITE_JAR=/path/to/burpsuite.jar PORT=8090 ~/.mnexus/tools/burp-rest-api/run.sh
+
+# Verify:
+source ~/.mnexus/env.sh && mnexus doctor
+```
+
+**Caveats**
+
+- `vmware-archive/burp-rest-api` is unmaintained (archived). It tracks Burp Suite internal APIs that drift between releases; real-world sweet spot is Burp **2020.x – 2023.x**. Newer builds may break.
+- Runs without authentication by default. Don't expose port 8090 beyond `localhost`.
+- Uses ~2 GB of heap. The wrapper sets `-Xmx2g`; override with `JAVA_OPTS`.
 
 ## Running
 
