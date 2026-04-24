@@ -59,6 +59,7 @@ for arg in "$@"; do
         --device)  MODE="device" ;;
         --doctor)  MODE="doctor" ;;
         --mobsf)   MODE="mobsf" ;;
+        --burp)    MODE="burp" ;;
         --help|-h)
             cat <<'HELP'
 MEDUSA NEXUS — installer. Opinionated. Idempotent.
@@ -68,6 +69,7 @@ Usage:
   scripts/setup.sh --minimal    skip Ghidra, MobSF, frida-server
   scripts/setup.sh --device     only push frida-server on the connected device
   scripts/setup.sh --mobsf      start MobSF in Docker with a pinned API key and write it to env
+  scripts/setup.sh --burp       verify Burp Pro REST API + write MNEXUS_BURP_URL / _API_KEY to env
   scripts/setup.sh --doctor     only run `mnexus doctor`
   scripts/setup.sh --help
 
@@ -76,6 +78,8 @@ Environment overrides:
   GHIDRA_VERSION     default = latest GitHub release
   FRIDA_VERSION      default = latest GitHub release
   MOBSF_API_KEY      optional pinned key; auto-generated UUID if unset
+  BURP_URL           default http://127.0.0.1:1337 (where Burp Pro's REST API listens)
+  BURP_API_KEY       required for --burp mode (copy from Burp → Settings → Suite → API)
   NO_COLOR=1         disable ANSI output
 HELP
             exit 0
@@ -490,6 +494,66 @@ start_mobsf() {
     hint "then verify with:                         mnexus doctor"
 }
 
+# ─── Burp Suite Pro REST API (no daemon to launch — just verify + env) ───
+configure_burp() {
+    step "configuring Burp Suite Pro REST API"
+
+    printf "  ${C_MUTED}Burp Pro exposes a REST API at ${C_RESET}http://<host>:<port>/<api_key>/v0.1/\n"
+    printf "  ${C_MUTED}Enable it in: ${C_CYAN}Burp → Settings → Suite → API${C_RESET}\n"
+    printf "  ${C_MUTED}Then copy the generated ${C_CYAN}API key${C_MUTED} and the ${C_CYAN}Service URL${C_MUTED}.${C_RESET}\n"
+    echo
+
+    local url="${BURP_URL:-http://127.0.0.1:1337}"
+    local key="${BURP_API_KEY:-}"
+
+    # If the user didn't pass env vars, ask interactively (only when stdin is a tty).
+    if [[ -z "$key" && -t 0 ]]; then
+        read -r -p "  Burp REST URL [$url]: " input_url
+        [[ -n "$input_url" ]] && url="$input_url"
+        read -r -p "  Burp API key: " key
+    fi
+
+    if [[ -z "$key" ]]; then
+        warn "no BURP_API_KEY supplied — skipping."
+        hint "re-run:  BURP_API_KEY=<key> [BURP_URL=<url>] scripts/setup.sh --burp"
+        return 0
+    fi
+
+    # Make sure base vars exist before we layer Burp entries on top.
+    write_env_file_base
+
+    # Verify the key against Burp. Expect 200 on the v0.1 root path.
+    local probe="$url/$key/v0.1/"
+    say "probing $probe"
+    local code
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$probe" 2>/dev/null || echo "000")
+
+    case "$code" in
+        200)
+            ok "Burp REST API reachable and authenticated"
+            ;;
+        000)
+            warn "no response — is Burp Suite Pro running with the REST API enabled?"
+            hint "writing the values to env anyway so mnexus doctor can point at them."
+            ;;
+        401|403)
+            warn "Burp rejected the key ($code). Generate a new one in the Suite API panel and re-run."
+            ;;
+        404)
+            warn "Burp answered 404 at /$key/v0.1/ — the key path is wrong. Check the API panel."
+            ;;
+        *)
+            warn "Burp answered $code. Saving values anyway — investigate with 'mnexus doctor'."
+            ;;
+    esac
+
+    upsert_env_var "MNEXUS_BURP_URL"     "$url"
+    upsert_env_var "MNEXUS_BURP_API_KEY" "$key"
+    ok "wrote MNEXUS_BURP_URL + MNEXUS_BURP_API_KEY to $MNEXUS_ENV_FILE"
+    hint "re-source:  source $MNEXUS_ENV_FILE"
+    hint "then:       mnexus doctor"
+}
+
 # ─── env file ─────────────────────────────────────────────────────────────
 # Write every base MNEXUS_* var idempotently. Does NOT touch API keys the user
 # (or start_mobsf) has already set.
@@ -558,6 +622,10 @@ main() {
             ;;
         mobsf)
             start_mobsf
+            exit 0
+            ;;
+        burp)
+            configure_burp
             exit 0
             ;;
         doctor)
