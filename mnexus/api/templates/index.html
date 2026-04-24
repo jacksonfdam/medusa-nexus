@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>🔱 MEDUSA::NEXUS</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='78' font-size='80'%3E%F0%9F%94%B1%3C/text%3E%3C/svg%3E" />
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&display=swap');
+    :root {
+      --bg: #000;
+      --panel: rgba(8, 51, 68, 0.20);
+      --accent-panel: rgba(5, 46, 22, 0.20);
+      --cyan: #00FFFF;
+      --acid: #22DE80;
+      --magenta: #E879F9;
+      --muted: rgba(0, 255, 255, 0.6);
+      --border: rgba(0, 255, 255, 0.3);
+      --border-hover: rgba(0, 255, 255, 0.5);
+      --border-accent: rgba(34, 222, 128, 0.5);
+      --crit: #FF3860;
+      --high: #FF9500;
+      --med: #F1C40F;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      padding: 48px 24px;
+      background: var(--bg);
+      color: var(--cyan);
+      font-family: "Courier Prime", ui-monospace, Menlo, monospace;
+      font-size: 14px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    /* scanline overlay, CRT-ish */
+    body::before {
+      content: "";
+      position: fixed; inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(255, 255, 255, 0.04) 0px,
+        rgba(255, 255, 255, 0.04) 1px,
+        transparent 1px,
+        transparent 4px
+      );
+      pointer-events: none;
+      mix-blend-mode: multiply;
+      z-index: 50;
+    }
+    .wrap { max-width: 960px; margin: 0 auto; }
+    h1 {
+      font-size: 48px;
+      letter-spacing: 8px;
+      margin: 0 0 6px;
+      text-shadow: 0 0 10px rgba(0, 255, 255, 0.55);
+      animation: flicker 3.2s infinite;
+    }
+    .tag {
+      color: var(--magenta);
+      letter-spacing: 2px;
+      font-size: 12px;
+      text-transform: lowercase;
+    }
+    .divider {
+      height: 2px;
+      margin: 24px 0;
+      background: linear-gradient(90deg, var(--cyan) 0%, var(--magenta) 50%, transparent 100%);
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .panel + .panel { margin-top: 0; }
+    .panel.accent { background: var(--accent-panel); border-color: var(--border-accent); }
+    .panel-head {
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .boot p { margin: 0; color: var(--acid); font-size: 13px; }
+    .boot .ready { color: var(--cyan); margin-top: 10px; font-weight: 700; letter-spacing: 2px; }
+    .row {
+      display: flex; align-items: center; gap: 14px;
+      padding: 5px 0;
+      border-bottom: 1px dotted rgba(0, 255, 255, 0.08);
+    }
+    .row:last-child { border-bottom: 0; }
+    .row .name { width: 110px; font-weight: 700; letter-spacing: 1px; }
+    .row .status { width: 90px; font-weight: 700; letter-spacing: 2px; font-size: 11px; }
+    .row .ver { width: 160px; color: var(--muted); font-size: 12px; }
+    .row .note { flex: 1; color: var(--magenta); font-size: 12px; }
+    .status.ok { color: var(--acid); }
+    .status.miss { color: var(--crit); }
+    a {
+      color: var(--cyan);
+      text-decoration: none;
+      border-bottom: 1px dotted var(--cyan);
+    }
+    a:hover { color: var(--acid); border-color: var(--acid); }
+    .ep-row { display: flex; gap: 12px; padding: 4px 0; font-size: 13px; }
+    .ep-row .path { min-width: 200px; }
+    .ep-row .desc { color: var(--muted); }
+    .hint {
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 2px;
+      margin-top: 6px;
+    }
+    code {
+      background: rgba(0, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      padding: 1px 6px;
+      color: var(--acid);
+    }
+    .foot {
+      margin-top: 48px;
+      text-align: center;
+      letter-spacing: 4px;
+      font-size: 11px;
+      color: var(--muted);
+      animation: pulse 1.1s infinite;
+    }
+    @keyframes pulse { 50% { opacity: 0.45; } }
+    @keyframes flicker {
+      0%, 92%, 94%, 100% { opacity: 1; }
+      93% { opacity: 0.6; }
+    }
+    @media (max-width: 620px) {
+      h1 { font-size: 32px; letter-spacing: 4px; }
+      .row { flex-wrap: wrap; }
+      .row .name { width: 100%; }
+      .row .ver { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>🔱 MEDUSA::NEXUS</h1>
+    <div class="tag">unified mobile threat analysis platform — every head sees a different angle</div>
+    <div class="divider"></div>
+
+    <section class="panel boot">
+      <div class="panel-head">// BOOT LOG</div>
+      <p>[boot] kernel::init                 [  OK  ]</p>
+      <p>[boot] orchestrator::online         [  OK  ]</p>
+      <p>[boot] engines: 7 registered        [  OK  ]</p>
+      <p>[boot] artifact store: sqlite ready [  OK  ]</p>
+      <p>[boot] http server: 127.0.0.1:8765  [  OK  ]</p>
+      <p class="ready">&gt; _ SYSTEM READY _</p>
+    </section>
+
+    <section class="panel accent" id="doctor-panel">
+      <div class="panel-head">// ENGINE STATUS · live from /v1/doctor</div>
+      <div id="doctor">loading…</div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">// REST API</div>
+      <div class="ep-row">
+        <span class="path"><a href="/docs">GET /docs</a></span>
+        <span class="desc">swagger UI</span>
+      </div>
+      <div class="ep-row">
+        <span class="path"><a href="/v1/health">GET /v1/health</a></span>
+        <span class="desc">liveness probe</span>
+      </div>
+      <div class="ep-row">
+        <span class="path"><a href="/v1/doctor">GET /v1/doctor</a></span>
+        <span class="desc">engine health check</span>
+      </div>
+      <div class="ep-row">
+        <span class="path"><a href="/v1/projects">GET /v1/projects</a></span>
+        <span class="desc">list stored projects</span>
+      </div>
+      <div class="ep-row">
+        <span class="path">GET /v1/projects/{id}</span>
+        <span class="desc">full project JSON</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">// CLI // LOCAL</div>
+      <div>
+        <div><code>mnexus doctor</code> &mdash; verify engines</div>
+        <div><code>mnexus scan ./target.apk --package com.target.app --version 4.12.0</code></div>
+        <div><code>mnexus dynamic --package com.target.app --modules ssl_bypass,crypto_log</code></div>
+        <div><code>mnexus report --project PRJ-XXXX --template technical --format markdown --output ./report.md</code></div>
+      </div>
+      <div class="hint">react UI lands at / once the frontend is scaffolded. this is the interim.</div>
+    </section>
+
+    <div class="foot">_ SYSTEM READY _</div>
+  </main>
+
+  <script>
+    (async () => {
+      const el = document.getElementById("doctor");
+      try {
+        const res = await fetch("/v1/doctor", { cache: "no-store" });
+        const rows = await res.json();
+        if (!Array.isArray(rows) || rows.length === 0) {
+          el.textContent = "no engines registered";
+          return;
+        }
+        el.innerHTML = rows.map((r) => {
+          const status = r.installed ? "ok" : "miss";
+          const badge = r.installed ? "● OK" : "● MISSING";
+          const version = (r.version || "—").toString().slice(0, 40);
+          const note = (r.message || "").toString();
+          return `
+            <div class="row">
+              <span class="name">${r.name}</span>
+              <span class="status ${status}">${badge}</span>
+              <span class="ver">${version}</span>
+              <span class="note">${note}</span>
+            </div>`;
+        }).join("");
+      } catch (err) {
+        el.innerHTML = `<span class="status miss">/v1/doctor failed: ${err}</span>`;
+      }
+    })();
+  </script>
+</body>
+</html>
