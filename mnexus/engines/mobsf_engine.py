@@ -26,25 +26,44 @@ class MobSFEngine(BaseEngine):
                 installed=False,
                 version=None,
                 path=self.config.mobsf_url,
-                message="set MNEXUS_MOBSF_API_KEY — MobSF doesn't give it away for free.",
+                message="set MNEXUS_MOBSF_API_KEY (or run: scripts/setup.sh --mobsf).",
             )
+
+        # Two probes:
+        # 1. GET / — is MobSF up at all?
+        # 2. POST /api/v1/scans (no body, auth headers) — does the key pass auth?
+        #    Expect 400 / 405 / 500 on valid key (we omitted the body on purpose).
+        #    401 / 403 means the key is wrong.
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(f"{self.config.mobsf_url}/api/v1/scan/recent_scans", headers=self._headers())
-                if r.status_code == 200:
+                liveness = await client.get(f"{self.config.mobsf_url}/")
+                if liveness.status_code >= 500:
                     return EngineStatus(
                         name=self.name,
-                        installed=True,
-                        version="?",
+                        installed=False,
+                        version=None,
                         path=self.config.mobsf_url,
-                        message=f"online at {self.config.mobsf_url}",
+                        message=f"MobSF answered {liveness.status_code} — still booting?",
+                    )
+
+                auth_probe = await client.post(
+                    f"{self.config.mobsf_url}/api/v1/scans",
+                    headers=self._headers(),
+                )
+                if auth_probe.status_code in (401, 403):
+                    return EngineStatus(
+                        name=self.name,
+                        installed=False,
+                        version=None,
+                        path=self.config.mobsf_url,
+                        message="MobSF up but key rejected. Try: scripts/setup.sh --mobsf",
                     )
                 return EngineStatus(
                     name=self.name,
-                    installed=False,
-                    version=None,
+                    installed=True,
+                    version=self._extract_version(liveness.text),
                     path=self.config.mobsf_url,
-                    message=f"MobSF answered {r.status_code}. Check the API key.",
+                    message=f"online · key OK ({auth_probe.status_code} on empty scan probe)",
                 )
         except httpx.HTTPError as exc:
             return EngineStatus(
@@ -60,4 +79,14 @@ class MobSFEngine(BaseEngine):
         return []
 
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": self.config.mobsf_api_key or ""}
+        """Send both header styles. MobSF has historically accepted either."""
+        key = self.config.mobsf_api_key or ""
+        return {"Authorization": key, "X-Mobsf-Api-Key": key}
+
+    @staticmethod
+    def _extract_version(html: str) -> str:
+        """Best-effort scrape of MobSF version from the landing page title/footer."""
+        import re
+
+        match = re.search(r"MobSF[^<]*?v?([0-9]+\.[0-9]+\.[0-9]+)", html)
+        return match.group(1) if match else "?"
