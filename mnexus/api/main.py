@@ -13,12 +13,15 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from mnexus.config import NexusConfig
 from mnexus.core.orchestrator import MedusaNexus
 
-# Where our static-ish templates live until the React app exists.
-_TEMPLATES = Path(__file__).parent / "templates"
+# Where our static-ish templates + SPA assets live until the React app exists.
+_API_DIR = Path(__file__).parent
+_TEMPLATES = _API_DIR / "templates"
+_STATIC = _API_DIR / "static"
 
 
 @asynccontextmanager
@@ -41,6 +44,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# SPA assets: /static/app.css, /static/app.js, etc.
+app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
