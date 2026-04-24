@@ -1,0 +1,87 @@
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# ─── Node / React ───
+node_modules/
+.pnp
+.pnp.js
+coverage/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# ─── Environments & secrets ───
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.keystore
+secrets.yaml
+
+# ─── macOS ───
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# ─── IDEs ───
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ─── MedusaNexus runtime artifacts ───
+# Working copies of pulled APKs, dynamic captures, burp logs, etc.
+workspace/
+artifacts/
+projects_db/
+*.apk
+*.xapk
+*.dex
+!tests/fixtures/**/*.apk
+
+# JADX decompilation output
+jadx_output/
+
+# Ghidra project folders
+ghidra_projects/
+
+# Frida spawn dumps
+frida_*.log
+
+# SQLite artifact stores
+*.sqlite
+*.sqlite3
+*.db
+
+# ─── Design tooling ───
+# Local Pencil cache & transient exports
+.pencil_cache/
+design/_tmp/
+*.pencil.lock
+
+# Keep committed design exports under design/screens and design/system
