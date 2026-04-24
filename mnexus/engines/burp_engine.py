@@ -1,12 +1,17 @@
 """Burp engine — proxy everything, trust nothing.
 
-Talks to Burp Suite Professional over its REST API. Burp Pro exposes the API
-at `http://<host>:<port>/<api_key>/v0.1/…` — the "key" is part of the URL path,
-not an Authorization header. Enable the API under *Settings → Suite → API*.
+Two compatible REST flavors are probed, in order:
 
-For proxy-history streaming (what we actually want) we'll later require the
-`burp-rest-api` extension or a thin Montoya helper; this file covers the
-REST-API health probe only.
+1. **vmware-archive/burp-rest-api** — Spring Boot wrapper, GET /burp/versions,
+   no auth by default. Signaled by MNEXUS_BURP_API_KEY in
+   ("", "none", "no-auth").
+
+2. **Burp Suite Professional native REST API** — GET /<api_key>/v0.1/. The
+   "key" is part of the URL path, not an Authorization header. Enable via
+   *Settings → Suite → API*. Signaled by any other MNEXUS_BURP_API_KEY value.
+
+Whichever answers 200 first wins. This keeps the health probe engine-agnostic
+so `mnexus doctor` just reports "Burp is reachable and talking".
 """
 
 from __future__ import annotations
@@ -15,6 +20,9 @@ import httpx
 
 from mnexus.engines.base import AnalysisContext, BaseEngine, EngineStatus
 from mnexus.models.finding import Finding
+
+
+_NO_AUTH_SENTINELS = {"", "none", "no-auth"}
 
 
 class BurpEngine(BaseEngine):
@@ -27,78 +35,133 @@ class BurpEngine(BaseEngine):
         return ["proxy", "intercept", "scan", "traffic_history"]
 
     async def health_check(self) -> EngineStatus:
-        if not self.config.burp_api_key:
-            return EngineStatus(
-                name=self.name,
-                installed=False,
-                version=None,
-                path=self.config.burp_url,
-                message=(
-                    "enable Burp REST API (Settings → Suite → API), "
-                    "set MNEXUS_BURP_API_KEY (or: scripts/setup.sh --burp)."
-                ),
-            )
-
+        key = (self.config.burp_api_key or "").strip()
         base = self.config.burp_url.rstrip("/")
-        url = f"{base}/{self.config.burp_api_key}/v0.1/"
+
+        # Decide which flavor to probe based on the key value.
+        probes = self._probe_plan(base, key)
+
         try:
             async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-                r = await client.get(url)
+                for flavor, url in probes:
+                    result = await self._probe(client, flavor, url)
+                    if result is not None:
+                        return result
         except httpx.HTTPError as exc:
             return EngineStatus(
                 name=self.name,
                 installed=False,
                 version=None,
                 path=self.config.burp_url,
-                message=f"Burp unreachable: {exc.__class__.__name__} — is Burp running with the REST API on?",
+                message=(
+                    f"Burp unreachable: {exc.__class__.__name__} — "
+                    "is Burp running (or burp-rest-api launched via "
+                    "`~/.mnexus/tools/burp-rest-api/run.sh`)?"
+                ),
             )
 
-        if r.status_code == 200:
-            version = self._extract_version(r)
-            return EngineStatus(
-                name=self.name,
-                installed=True,
-                version=version,
-                path=self.config.burp_url,
-                message="online — ready to proxy and scan",
-            )
-        if r.status_code == 404:
-            return EngineStatus(
-                name=self.name,
-                installed=False,
-                version=None,
-                path=self.config.burp_url,
-                message="Burp up but key path 404 — wrong MNEXUS_BURP_API_KEY? check Burp's API panel.",
-            )
-        if r.status_code in (401, 403):
-            return EngineStatus(
-                name=self.name,
-                installed=False,
-                version=None,
-                path=self.config.burp_url,
-                message=f"Burp rejected the key ({r.status_code}) — regenerate in Suite → API.",
-            )
         return EngineStatus(
             name=self.name,
             installed=False,
             version=None,
             path=self.config.burp_url,
-            message=f"Burp answered {r.status_code} at /v0.1/ — consult Burp logs.",
+            message=(
+                "no REST API answered. Either enable Burp Pro's API (Settings → Suite → API) "
+                "or install burp-rest-api: scripts/setup.sh --burp-rest-api"
+            ),
         )
 
     async def execute(self, context: AnalysisContext) -> list[Finding]:  # pragma: no cover - stub
         _ = context
         return []
 
+    # ─── internals ───
+
+    def _probe_plan(self, base: str, key: str) -> list[tuple[str, str]]:
+        """Return the (flavor, url) pairs we'll try, in order."""
+        plan: list[tuple[str, str]] = []
+        if key.lower() in _NO_AUTH_SENTINELS:
+            # Prefer burp-rest-api. Fall through to a path-keyed probe that uses
+            # the literal sentinel (mostly to generate a useful 404 message).
+            plan.append(("burp-rest-api", f"{base}/burp/versions"))
+            if key.lower() == "no-auth":
+                plan.append(("pro-fallback", f"{base}/no-auth/v0.1/"))
+        else:
+            # Pro native first, but fall back to burp-rest-api in case the user
+            # wired the wrong endpoint into MNEXUS_BURP_URL.
+            plan.append(("pro", f"{base}/{key}/v0.1/"))
+            plan.append(("burp-rest-api", f"{base}/burp/versions"))
+        return plan
+
+    async def _probe(
+        self, client: httpx.AsyncClient, flavor: str, url: str
+    ) -> EngineStatus | None:
+        """Probe one URL. Return an EngineStatus if it concludes the check,
+        or None to signal 'keep trying the next probe'."""
+        r = await client.get(url)
+
+        if r.status_code == 200:
+            version = self._extract_version(r, flavor)
+            banner = {
+                "burp-rest-api": "burp-rest-api online — headless + no auth",
+                "pro": "Burp Pro REST API online — ready to scan",
+                "pro-fallback": "Burp Pro REST API online (via sentinel key)",
+            }.get(flavor, "online")
+            return EngineStatus(
+                name=self.name,
+                installed=True,
+                version=version,
+                path=self.config.burp_url,
+                message=banner,
+            )
+
+        if r.status_code in (401, 403):
+            if flavor.startswith("pro"):
+                return EngineStatus(
+                    name=self.name,
+                    installed=False,
+                    version=None,
+                    path=self.config.burp_url,
+                    message=f"Burp rejected the key ({r.status_code}) — regenerate in Suite → API.",
+                )
+            return None  # try the next probe
+
+        if r.status_code == 404 and flavor == "burp-rest-api":
+            # burp-rest-api is not at this URL. Don't conclude yet.
+            return None
+
+        if r.status_code == 404 and flavor.startswith("pro"):
+            return EngineStatus(
+                name=self.name,
+                installed=False,
+                version=None,
+                path=self.config.burp_url,
+                message="Burp up but /<key>/v0.1/ 404 — wrong MNEXUS_BURP_API_KEY?",
+            )
+
+        # Anything else: surface it.
+        return EngineStatus(
+            name=self.name,
+            installed=False,
+            version=None,
+            path=self.config.burp_url,
+            message=f"{flavor} answered {r.status_code} at {url}",
+        )
+
     @staticmethod
-    def _extract_version(response: httpx.Response) -> str:
-        """Best-effort grab of Burp's API version string from the root response."""
+    def _extract_version(response: httpx.Response, flavor: str) -> str:
         try:
             data = response.json()
         except ValueError:
             return "?"
-        if isinstance(data, dict):
-            for key in ("version", "burp_version", "api_version"):
-                if key in data:
-                    return str(data[key])
+        if not isinstance(data, dict):
+            return "?"
+        if flavor == "burp-rest-api":
+            # GET /burp/versions returns {"extensionVersion": ..., "burpVersion": ...}
+            burp = data.get("burpVersion") or data.get("burp_version") or "?"
+            ext = data.get("extensionVersion") or data.get("extension_version")
+            return f"burp {burp} · rest-api {ext}" if ext else str(burp)
+        for k in ("version", "burp_version", "api_version"):
+            if k in data:
+                return str(data[k])
         return "?"
