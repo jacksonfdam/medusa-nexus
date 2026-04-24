@@ -500,8 +500,53 @@ start_mobsf() {
 
 # ─── burp-rest-api (vmware-archive) — Burp + Spring Boot wrapper ─────────
 # Downloads the release jar, best-effort locates burpsuite_community.jar or
-# burpsuite_pro.jar, writes a `run.sh` wrapper, and points MNEXUS_BURP_URL
-# at the local REST server (default http://localhost:8090, no auth).
+# burpsuite_pro.jar (optionally installing Burp via brew cask on macOS),
+# writes a `run.sh` wrapper that searches for the jar at LAUNCH TIME, and
+# points MNEXUS_BURP_URL at the local REST server.
+
+# Print the list of candidate paths we search. Kept here (outside the
+# function) so we can reuse the same list inside the generated run.sh.
+_burp_suite_jar_candidates() {
+    cat <<'EOF'
+/Applications/Burp Suite Professional.app/Contents/Resources/app/burpsuite_pro.jar
+/Applications/Burp Suite Community Edition.app/Contents/Resources/app/burpsuite_community.jar
+/Applications/Burp Suite Professional.app/Contents/app/burpsuite_pro.jar
+/Applications/Burp Suite Community Edition.app/Contents/app/burpsuite_community.jar
+/Applications/Burp Suite Professional.app/Contents/java/app/burpsuite_pro.jar
+/Applications/Burp Suite Community Edition.app/Contents/java/app/burpsuite_community.jar
+/Applications/BurpSuitePro/burpsuite_pro.jar
+/Applications/BurpSuiteCommunity/burpsuite_community.jar
+$HOME/Applications/Burp Suite Professional.app/Contents/Resources/app/burpsuite_pro.jar
+$HOME/Applications/Burp Suite Community Edition.app/Contents/Resources/app/burpsuite_community.jar
+$HOME/BurpSuitePro/burpsuite_pro.jar
+$HOME/BurpSuiteCommunity/burpsuite_community.jar
+/opt/BurpSuitePro/burpsuite_pro.jar
+/opt/BurpSuiteCommunity/burpsuite_community.jar
+EOF
+}
+
+_find_burp_suite_jar() {
+    # Try $BURP_SUITE_JAR first, then the candidate list, then a broad glob
+    # of /Applications (in case Burp's bundle layout moved again).
+    if [[ -n "${BURP_SUITE_JAR:-}" && -f "$BURP_SUITE_JAR" ]]; then
+        echo "$BURP_SUITE_JAR"
+        return 0
+    fi
+    local line
+    while IFS= read -r line; do
+        # Expand $HOME inside the list.
+        line="${line//\$HOME/$HOME}"
+        if [[ -f "$line" ]]; then
+            echo "$line"
+            return 0
+        fi
+    done < <(_burp_suite_jar_candidates)
+    # Last-ditch glob (bounded to /Applications so we don't wander the disk).
+    local found
+    found=$(find /Applications -maxdepth 6 -type f \( -name 'burpsuite_pro.jar' -o -name 'burpsuite_community.jar' \) 2>/dev/null | head -1 || true)
+    [[ -n "$found" ]] && echo "$found"
+}
+
 install_burp_rest_api() {
     step "installing burp-rest-api (vmware-archive)"
 
@@ -545,44 +590,48 @@ install_burp_rest_api() {
         ok "downloaded $jar_name"
     fi
 
-    # 2. Try to locate burpsuite jar. User can override via BURP_SUITE_JAR=.
-    local burp_jar="${BURP_SUITE_JAR:-}"
-    if [[ -z "$burp_jar" ]]; then
-        local candidates=(
-            "/Applications/Burp Suite Professional.app/Contents/Resources/app/burpsuite_pro.jar"
-            "/Applications/Burp Suite Community Edition.app/Contents/Resources/app/burpsuite_community.jar"
-            "/Applications/Burp Suite Professional.app/Contents/app/burpsuite_pro.jar"
-            "/Applications/Burp Suite Community Edition.app/Contents/app/burpsuite_community.jar"
-            "$HOME/Applications/Burp Suite Professional.app/Contents/Resources/app/burpsuite_pro.jar"
-            "$HOME/Applications/Burp Suite Community Edition.app/Contents/Resources/app/burpsuite_community.jar"
-            "/opt/BurpSuitePro/burpsuite_pro.jar"
-            "/opt/BurpSuiteCommunity/burpsuite_community.jar"
-            "$HOME/BurpSuitePro/burpsuite_pro.jar"
-            "$HOME/BurpSuiteCommunity/burpsuite_community.jar"
-        )
-        local c
-        for c in "${candidates[@]}"; do
-            if [[ -f "$c" ]]; then
-                burp_jar="$c"
-                break
+    # 2. Try to locate burpsuite jar.
+    local burp_jar
+    burp_jar=$(_find_burp_suite_jar || true)
+
+    # 2a. On macOS, if we didn't find it and we have brew, offer to install
+    #     Burp Community. Non-interactive runs skip the prompt.
+    if [[ -z "$burp_jar" && "$PLATFORM" == "darwin" ]] && command -v brew >/dev/null 2>&1; then
+        if [[ -t 0 ]]; then
+            printf "  ${C_MAGENTA}no Burp Suite found. Install Community via brew cask? [Y/n] ${C_RESET}"
+            local reply
+            read -r reply
+            reply="${reply:-y}"
+            if [[ "$reply" =~ ^[Yy] ]]; then
+                say "brew install --cask burp-suite"
+                brew install --cask burp-suite || warn "brew cask install failed. Install Burp manually then re-run."
+                burp_jar=$(_find_burp_suite_jar || true)
             fi
-        done
+        else
+            hint "non-interactive: install Burp with  ${C_CYAN}brew install --cask burp-suite${C_RESET}"
+        fi
     fi
 
     if [[ -n "$burp_jar" ]]; then
         ok "detected Burp jar: $burp_jar"
     else
-        warn "could not locate burpsuite_pro.jar or burpsuite_community.jar."
-        hint "install Burp Suite, then re-run with:  BURP_SUITE_JAR=/abs/path/to/burpsuite.jar scripts/setup.sh --burp-rest-api"
-        hint "macOS install:  brew install --cask burp-suite"
+        warn "no Burp Suite jar found."
+        hint "install Burp, then run:  $install_dir/run.sh"
+        hint "  macOS: brew install --cask burp-suite"
+        hint "  Linux: download from https://portswigger.net/burp/communitydownload"
+        hint "  the wrapper will search again at launch time — no re-setup needed."
     fi
 
-    # 3. Emit a wrapper script that the user (and the UI) can call.
+    # 3. Emit a wrapper that re-detects the Burp jar at LAUNCH TIME.
     local run_sh="$install_dir/run.sh"
-    cat > "$run_sh" <<'LAUNCHER'
+    {
+        cat <<'LAUNCHER_HEAD'
 #!/usr/bin/env bash
 # Auto-generated by mnexus setup. Launches burp-rest-api in headless mode.
-# Override via env: PORT, BURP_SUITE_JAR, REST_API_JAR, HEADLESS, JAVA_OPTS.
+# Re-detects the Burp Suite jar every time, so you can run setup once and
+# install Burp afterwards without re-running anything.
+#
+# Env overrides: PORT, BURP_SUITE_JAR, REST_API_JAR, HEADLESS, JAVA_OPTS.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -596,34 +645,61 @@ if [[ -z "$REST_API_JAR" || ! -f "$REST_API_JAR" ]]; then
     exit 2
 fi
 
-BURP_SUITE_JAR="${BURP_SUITE_JAR:-__AUTO_DETECTED__}"
-if [[ "$BURP_SUITE_JAR" == "__AUTO_DETECTED__" || ! -f "$BURP_SUITE_JAR" ]]; then
-    echo "BURP_SUITE_JAR not set or not a file. Point it at burpsuite_community.jar / burpsuite_pro.jar" >&2
+# Candidate list (kept in sync with the installer).
+BURP_CANDIDATES=(
+LAUNCHER_HEAD
+        # Embed each candidate as a quoted array element.
+        while IFS= read -r line; do
+            printf '    "%s"\n' "${line//\$HOME/\$HOME}"
+        done < <(_burp_suite_jar_candidates)
+        cat <<'LAUNCHER_TAIL'
+)
+
+find_burp_jar() {
+    if [[ -n "${BURP_SUITE_JAR:-}" && -f "$BURP_SUITE_JAR" ]]; then
+        echo "$BURP_SUITE_JAR"; return 0
+    fi
+    local c
+    for c in "${BURP_CANDIDATES[@]}"; do
+        if [[ -f "$c" ]]; then
+            echo "$c"; return 0
+        fi
+    done
+    # Fallback: shallow glob under /Applications.
+    local found
+    found=$(find /Applications -maxdepth 6 -type f \
+        \( -name 'burpsuite_pro.jar' -o -name 'burpsuite_community.jar' \) \
+        2>/dev/null | head -1 || true)
+    [[ -n "$found" ]] && echo "$found"
+}
+
+BURP_SUITE_JAR="$(find_burp_jar || true)"
+if [[ -z "$BURP_SUITE_JAR" ]]; then
+    echo "burpsuite_*.jar not found on this system." >&2
+    echo "Install Burp Suite:" >&2
+    echo "  macOS: brew install --cask burp-suite" >&2
+    echo "  Linux: https://portswigger.net/burp/communitydownload" >&2
+    echo "Or set BURP_SUITE_JAR=/abs/path/to/burpsuite.jar and re-run." >&2
     exit 3
 fi
 
-# burp-rest-api expects the Burp jar next to it. Use a classpath launch so
-# we don't have to copy/symlink.
+echo "[burp-rest-api] burp jar      = $BURP_SUITE_JAR"
+echo "[burp-rest-api] rest-api jar  = $REST_API_JAR"
+echo "[burp-rest-api] listening on  = http://localhost:$PORT"
+
 exec java $JAVA_OPTS \
     -cp "$BURP_SUITE_JAR:$REST_API_JAR" \
     -Dorg.springframework.boot.logging.LoggingSystem=none \
     org.springframework.boot.loader.launch.JarLauncher \
     --server.port="$PORT" \
     --headless.mode="$HEADLESS"
-LAUNCHER
-
-    # Inject the auto-detected Burp jar path into the launcher so the user
-    # doesn't have to remember it every time.
-    if [[ -n "$burp_jar" ]]; then
-        # Portable sed -i for macOS + Linux.
-        sed -i.bak "s|__AUTO_DETECTED__|$burp_jar|" "$run_sh" && rm -f "$run_sh.bak"
-    fi
+LAUNCHER_TAIL
+    } > "$run_sh"
     chmod +x "$run_sh"
     ok "launcher: $run_sh"
 
-    # 4. Write env vars. burp-rest-api uses no API key by default; we stuff a
-    #    sentinel into MNEXUS_BURP_API_KEY so the engine knows to use the
-    #    burp-rest-api endpoint shape instead of Pro's path-keyed one.
+    # 4. Write env vars. burp-rest-api uses no API key by default; MNEXUS_BURP_API_KEY=none
+    #    tells the engine to probe the burp-rest-api shape.
     write_env_file_base
     upsert_env_var "MNEXUS_BURP_URL"     "http://localhost:8090"
     upsert_env_var "MNEXUS_BURP_API_KEY" "none"
@@ -633,9 +709,6 @@ LAUNCHER
     echo
     say "to launch burp-rest-api:"
     printf "    ${C_ACID}%s${C_RESET}\n" "$run_sh"
-    if [[ -z "$burp_jar" ]]; then
-        printf "    ${C_MUTED}(export BURP_SUITE_JAR=<abs path> first)${C_RESET}\n"
-    fi
     hint "then:   source $MNEXUS_ENV_FILE && mnexus doctor"
 
     # 6. Compatibility caveat.
