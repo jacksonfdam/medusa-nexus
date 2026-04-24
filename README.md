@@ -85,6 +85,28 @@ mnexus doctor
 
 You can pin your own key via `MOBSF_API_KEY=<your-key> ./scripts/setup.sh --mobsf` — useful for CI and team setups.
 
+### Wiring up Burp Suite Pro (for the `burp` engine)
+
+Burp Suite is closed-source and runs as a JAR — the installer can't autostart it. But it can validate the REST API and drop the right env vars into `~/.mnexus/env.sh`:
+
+1. Open **Burp Suite Professional** → **Settings** → **Suite** → **API**.
+2. Toggle **Enable API**. Note the **Service URL** (defaults to `http://127.0.0.1:1337/`) and the **API key** Burp shows.
+3. Run one of:
+
+   ```bash
+   # interactive (script will prompt for URL + key)
+   ./scripts/setup.sh --burp
+
+   # non-interactive (CI-friendly)
+   BURP_URL=http://127.0.0.1:1337 BURP_API_KEY=<paste-key> ./scripts/setup.sh --burp
+   ```
+
+   The script probes `GET <url>/<key>/v0.1/` and reports 200 / 401 / 404 / connection errors with a specific message before writing `MNEXUS_BURP_URL` + `MNEXUS_BURP_API_KEY` to the env file.
+
+4. `source ~/.mnexus/env.sh && mnexus doctor` — the `burp` row should flip to `OK`.
+
+**Note on Burp Community edition:** it does *not* ship the REST API. Either upgrade to Pro, or install the legacy [`burp-rest-api`](https://github.com/vmware/burp-rest-api) extension (not covered by this installer).
+
 ## Running
 
 ```bash
