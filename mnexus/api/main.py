@@ -18,7 +18,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from mnexus.config import NexusConfig
@@ -335,6 +335,367 @@ async def device_frida_start() -> dict[str, Any]:
     return {"running": bool(ps.strip()), "pid": ps.strip().splitlines()[0] if ps.strip() else None}
 
 
+# ─── device tools: full info, shell, files, screenshot, logcat ───────────
+
+# Read-only `getprop` keys we surface in the Bridge "INFO" tab.
+# Layout chosen to match the labels Jackson asked for in the spec.
+_DEVICE_PROPS = [
+    ("device", "ro.product.device"),
+    ("product", "ro.product.name"),
+    ("model", "ro.product.model"),
+    ("manufacturer", "ro.product.manufacturer"),
+    ("brand", "ro.product.brand"),
+    ("serial_no", "ro.serialno"),
+    ("platform", "ro.board.platform"),
+    ("hardware", "ro.hardware"),
+    ("abi", "ro.product.cpu.abi"),
+    ("abi_list", "ro.product.cpu.abilist"),
+    ("android", "ro.build.version.release"),
+    ("api_level", "ro.build.version.sdk"),
+    ("fingerprint", "ro.build.fingerprint"),
+    ("security_patch", "ro.build.version.security_patch"),
+    ("build_date", "ro.build.date"),
+    ("build_id", "ro.build.id"),
+    ("display_density", "ro.sf.lcd_density"),
+    ("debuggable", "ro.debuggable"),
+]
+
+
+async def _require_adb() -> tuple[Any, str]:
+    """Return (adb_engine, adb_path) or raise 503 if adb is missing/no device.
+
+    Centralizes the `shutil.which` + `is_device_connected` guard so every
+    device endpoint fails the same way and we never let a `FileNotFoundError`
+    from a missing `adb` binary crash through to a 500.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    adb = nexus.engines["adb"]
+    adb_path = nexus.config.adb_path
+    if not shutil.which(adb_path):
+        raise HTTPException(503, "adb not on PATH")
+    try:
+        connected = await adb.is_device_connected()  # type: ignore[attr-defined]
+    except FileNotFoundError:
+        raise HTTPException(503, "adb not on PATH")
+    if not connected:
+        raise HTTPException(503, "no device connected")
+    return adb, adb_path
+
+
+async def _adb_shell(cmd: str) -> str:
+    """Single source of truth for `adb shell <cmd>` calls. Raises 503 if no device."""
+    adb, adb_path = await _require_adb()
+    return await adb._run([adb_path, "shell", cmd])  # type: ignore[attr-defined]
+
+
+@app.get("/v1/device/info/full")
+async def device_info_full() -> dict[str, Any]:
+    """Comprehensive device info — every label in the Bridge INFO tab.
+
+    Returns key/value pairs for every entry in `_DEVICE_PROPS` plus battery,
+    memory, storage and resolution probes. Empty strings on partial failures
+    so the UI can still render the keys it knows about.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    adb = nexus.engines["adb"]
+    if not shutil.which(nexus.config.adb_path):
+        return {"connected": False, "reason": "adb not on PATH"}
+    try:
+        connected = await adb.is_device_connected()  # type: ignore[attr-defined]
+    except FileNotFoundError:
+        return {"connected": False, "reason": "adb not on PATH"}
+    if not connected:
+        return {"connected": False, "reason": "no device (usb unplugged or unauthorized)"}
+
+    out: dict[str, Any] = {"connected": True}
+
+    # getprop fan-out — one call per key keeps the failure mode local.
+    for key, prop in _DEVICE_PROPS:
+        try:
+            out[key] = (await _adb_shell(f"getprop {prop}")).strip()
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            out[key] = ""
+
+    # Battery (dumpsys → key/val pairs).
+    out["battery"] = await _battery_dump()
+
+    # Memory.
+    try:
+        meminfo = await _adb_shell("cat /proc/meminfo")
+        out["memory"] = _parse_meminfo(meminfo)
+    except Exception:  # noqa: BLE001
+        out["memory"] = {}
+
+    # Storage (df on /data + /sdcard, simplest portable picker).
+    try:
+        df = await _adb_shell("df -h /data /sdcard 2>/dev/null")
+        out["storage"] = _parse_df(df)
+    except Exception:  # noqa: BLE001
+        out["storage"] = []
+
+    # Resolution.
+    try:
+        wm_size = (await _adb_shell("wm size")).strip()
+        # "Physical size: 1080x2400"
+        m = wm_size.split(":")[-1].strip() if ":" in wm_size else wm_size
+        out["resolution"] = m
+    except Exception:  # noqa: BLE001
+        out["resolution"] = ""
+
+    return out
+
+
+async def _battery_dump() -> dict[str, Any]:
+    """Parse `dumpsys battery` into structured fields the UI cares about."""
+    try:
+        raw = await _adb_shell("dumpsys battery")
+    except Exception:  # noqa: BLE001
+        return {}
+    info: dict[str, Any] = {"raw": raw[:2000]}  # cap raw to keep payload sane
+    for line in raw.splitlines():
+        line = line.strip()
+        if ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        k = k.strip().lower().replace(" ", "_")
+        v = v.strip()
+        if k in ("level", "scale", "voltage", "temperature", "ac_powered", "usb_powered",
+                 "wireless_powered", "max_charging_current", "max_charging_voltage", "status",
+                 "health", "present", "technology"):
+            info[k] = v
+    return info
+
+
+def _parse_meminfo(raw: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        out[k.strip()] = v.strip()
+    return {k: out.get(k, "—") for k in ("MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached", "SwapTotal", "SwapFree")}
+
+
+def _parse_df(raw: str) -> list[dict[str, str]]:
+    rows = []
+    for line in raw.splitlines()[1:]:  # skip header
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        rows.append({
+            "filesystem": parts[0],
+            "size": parts[1],
+            "used": parts[2],
+            "available": parts[3],
+            "use_pct": parts[4],
+            "mounted_on": parts[5],
+        })
+    return rows
+
+
+# ── Interactive shell ────────────────────────────────────────────────────
+
+# Commands we decline to execute from the web UI. The list is intentionally
+# tight — anything destructive, or that grants new permissions, gets blocked.
+_SHELL_BLOCKLIST = (
+    "rm ", "dd ", "mkfs", "format", "wipe", "fastboot",
+    "reboot", "shutdown", "poweroff",
+    "pm install", "pm uninstall", "pm clear", "pm grant", "pm revoke",
+    "settings put", "svc",
+    "am force-stop", "am kill",
+    "su ",
+    "chmod 777", "chown ", "chgrp ",
+    ":>/", "> /system",
+)
+
+
+@app.post("/v1/device/shell")
+async def device_shell(cmd: str = Form(...)) -> dict[str, Any]:
+    """Run a (read-only) adb shell command and return its output.
+
+    A small blocklist refuses obviously destructive commands. The web UI is
+    not the right venue for `pm uninstall`; the user can drop to a terminal
+    if they need that.
+    """
+    s = cmd.strip()
+    if not s:
+        raise HTTPException(400, "empty command")
+    low = s.lower()
+    for bad in _SHELL_BLOCKLIST:
+        if bad in low:
+            raise HTTPException(403, f"refused: '{bad.strip()}' is on the read-only blocklist")
+    try:
+        out = await _adb_shell(s)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"adb shell failed: {exc}") from exc
+    return {"command": s, "output": out, "exit_status": 0}
+
+
+# ── Logcat ───────────────────────────────────────────────────────────────
+
+@app.get("/v1/device/logcat")
+async def device_logcat(lines: int = 200, filter: str = "", level: str = "V") -> dict[str, Any]:
+    """Tail logcat: dump the last `lines` entries with optional level + grep filter."""
+    await _require_adb()
+    lines = max(1, min(lines, 5000))
+    level = level.upper().strip() if level else "V"
+    if level not in ("V", "D", "I", "W", "E", "F", "S"):
+        level = "V"
+    cmd = f"logcat -d -t {lines} *:{level}"
+    if filter:
+        # Escape single quotes for safety.
+        f = filter.replace("'", "'\\''")
+        cmd = f"{cmd} | grep -i '{f}'"
+    out = await _adb_shell(cmd)
+    return {"lines": out.splitlines(), "count": out.count("\n"), "filter": filter, "level": level}
+
+
+# ── Screenshot ───────────────────────────────────────────────────────────
+
+@app.post("/v1/device/screenshot")
+async def device_screenshot() -> dict[str, Any]:
+    """Capture the device screen via `screencap`. Saves the PNG into the workspace
+    and returns the local path + a base64 data URL the UI can render directly."""
+    adb, adb_path = await _require_adb()
+    nexus: MedusaNexus = app.state.nexus
+    import base64
+    out_dir = nexus.config.workspace / "screenshots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    remote = "/sdcard/mnexus-screencap.png"
+    local = out_dir / f"screen-{stamp}.png"
+
+    try:
+        await adb._run([adb_path, "shell", "screencap", "-p", remote])  # type: ignore[attr-defined]
+        await adb._run([adb_path, "pull", remote, str(local)])  # type: ignore[attr-defined]
+        await adb._run([adb_path, "shell", "rm", remote])  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"screencap failed: {exc}") from exc
+
+    if not local.exists():
+        raise HTTPException(500, "screencap finished but no file landed")
+    data = local.read_bytes()
+    return {
+        "path": str(local),
+        "size_bytes": len(data),
+        "data_url": "data:image/png;base64," + base64.b64encode(data).decode("ascii"),
+    }
+
+
+# ── File manager ─────────────────────────────────────────────────────────
+
+@app.get("/v1/device/files")
+async def device_files_list(path: str = "/sdcard") -> dict[str, Any]:
+    """List a directory on the device. Returns parsed entries.
+
+    Uses `ls -la --time-style=long-iso` so the output is parseable. Falls back
+    to plain `ls -la` on toolboxes that don't support that flag.
+    """
+    await _require_adb()
+    safe = path.replace("'", "")
+    try:
+        out = await _adb_shell(f"ls -la --time-style=long-iso '{safe}' 2>/dev/null || ls -la '{safe}'")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"adb ls failed: {exc}") from exc
+    entries = _parse_ls(out)
+    # If the listing failed (permission denied, missing path), entries will be empty.
+    return {"path": safe, "entries": entries, "count": len(entries)}
+
+
+def _parse_ls(raw: str) -> list[dict[str, str]]:
+    """Best-effort parser for `ls -la` output across Android toolbox flavors."""
+    out: list[dict[str, str]] = []
+    for line in raw.splitlines():
+        line = line.rstrip()
+        if not line or line.startswith("total ") or line.lower().startswith("ls:"):
+            continue
+        parts = line.split(None, 7)
+        if len(parts) < 8:
+            # Fallback: name only — toybox sometimes drops fields.
+            tokens = line.split()
+            if not tokens:
+                continue
+            out.append({"perms": "", "owner": "", "group": "", "size": "", "ts": "", "name": tokens[-1], "kind": _kind_from_perms(tokens[0]) if tokens[0].startswith(("d", "-", "l")) else "?"})
+            continue
+        perms, _links, owner, group, size, date, time, name = parts
+        out.append({
+            "perms": perms,
+            "owner": owner,
+            "group": group,
+            "size": size,
+            "ts": f"{date} {time}",
+            "name": name,
+            "kind": _kind_from_perms(perms),
+        })
+    return out
+
+
+def _kind_from_perms(perms: str) -> str:
+    if not perms:
+        return "?"
+    return {"d": "dir", "-": "file", "l": "link", "c": "char", "b": "block", "p": "pipe", "s": "sock"}.get(perms[0], "?")
+
+
+@app.get("/v1/device/file")
+async def device_file_get(path: str) -> Response:
+    """Pull a single file off the device. Streamed via local tmpfile."""
+    adb, adb_path = await _require_adb()
+    nexus: MedusaNexus = app.state.nexus
+    if not path or path.startswith(("|", "&", ";")):
+        raise HTTPException(400, "bad path")
+    local_dir = nexus.config.workspace / "pulled-files"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(path).name or "file"
+    local = local_dir / f"{uuid.uuid4().hex[:8]}-{safe_name}"
+    try:
+        await adb._run([adb_path, "pull", path, str(local)])  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"adb pull failed: {exc}") from exc
+    if not local.exists():
+        raise HTTPException(404, "file not pulled — wrong path or unreadable")
+    return FileResponse(str(local), filename=safe_name)
+
+
+@app.post("/v1/device/file/upload")
+async def device_file_upload(
+    file: UploadFile = File(...),
+    dest: str = Form(default="/sdcard/Download"),
+) -> dict[str, Any]:
+    """Push an uploaded file to the device under `dest`."""
+    adb, adb_path = await _require_adb()
+    nexus: MedusaNexus = app.state.nexus
+    if not file.filename:
+        raise HTTPException(400, "no filename")
+    staging = nexus.config.workspace / "push-staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    local = staging / Path(file.filename).name
+    with local.open("wb") as fh:
+        while chunk := await file.read(1024 * 1024):
+            fh.write(chunk)
+    remote = dest.rstrip("/") + "/" + Path(file.filename).name
+    try:
+        await adb._run([adb_path, "push", str(local), remote])  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"adb push failed: {exc}") from exc
+    return {"local": str(local), "remote": remote, "size_bytes": local.stat().st_size}
+
+
+@app.post("/v1/device/file/delete")
+async def device_file_delete(path: str = Form(...), confirm: str = Form(default="")) -> dict[str, Any]:
+    """Delete a single file on the device. Refuses without confirm='yes'."""
+    if confirm != "yes":
+        raise HTTPException(400, "must pass confirm=yes")
+    if not path or len(path) < 4 or path in ("/", "/sdcard", "/data", "/system"):
+        raise HTTPException(400, "refusing to delete that path")
+    safe = path.replace("'", "")
+    out = await _adb_shell(f"rm -f '{safe}'")
+    return {"path": safe, "output": out, "deleted": True}
+
+
 # ─── multi-device ADB management ─────────────────────────────────────────
 # Connection flavor matrix (per the user's request):
 #   ADB + ffmpeg server-side  → polling screencaps now, ffmpeg/scrcpy stream later
@@ -645,6 +1006,72 @@ async def device_screencap_debug(serial: str) -> dict[str, Any]:
     }
     out["picked"] = "exec-out" if png else ("temp-file" if png2 else "none")
     return out
+
+
+# ─── MJPEG live stream ───────────────────────────────────────────────────
+# Browser renders multipart/x-mixed-replace natively → no flicker, no JS
+# polling, single TCP connection. When the client disconnects, FastAPI
+# raises CancelledError into our generator and we tear down.
+
+_MJPEG_BOUNDARY = "mnexusframe"
+
+
+async def _mjpeg_frame_loop(adb_path: str, serial: str, fps: int):
+    interval = 1.0 / max(1, min(fps, 30))
+    consecutive_failures = 0
+    last_path = "exec-out"  # remember which capture path worked, skip the broken one
+    try:
+        while True:
+            if last_path == "exec-out":
+                png, _ = await _screencap_exec_out(adb_path, serial)
+                if not png:
+                    last_path = "temp-file"
+                    png, _ = await _screencap_temp_file(adb_path, serial)
+            else:
+                png, _ = await _screencap_temp_file(adb_path, serial)
+                if not png:
+                    last_path = "exec-out"
+                    png, _ = await _screencap_exec_out(adb_path, serial)
+
+            if not png:
+                consecutive_failures += 1
+                if consecutive_failures > 6:
+                    return  # >5s of failures → close the stream so the client falls back to polling
+                await asyncio.sleep(0.5)
+                continue
+            consecutive_failures = 0
+
+            header = (
+                f"--{_MJPEG_BOUNDARY}\r\n"
+                f"Content-Type: image/png\r\n"
+                f"Content-Length: {len(png)}\r\n\r\n"
+            ).encode()
+            yield header
+            yield png
+            yield b"\r\n"
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        return
+
+
+@app.get("/v1/devices/{serial}/screen.mjpeg")
+async def device_screen_mjpeg(serial: str, fps: int = 6) -> StreamingResponse:
+    """Live screen as multipart/x-mixed-replace — point an `<img src=…>` at it.
+
+    Default 6 fps because PNG frames at 1080×2400 are ~1 MB each. The browser
+    paints each frame atomically so there is no flicker. Set ?fps=12 for
+    smoother motion at 2× bandwidth, or ?fps=2 for low-power preview.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    return StreamingResponse(
+        _mjpeg_frame_loop(nexus.config.adb_path, serial, fps),
+        media_type=f"multipart/x-mixed-replace; boundary={_MJPEG_BOUNDARY}",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "X-MNexus-Stream": "mjpeg-png",
+        },
+    )
 
 
 @app.post("/v1/devices/{serial}/frida-server")
