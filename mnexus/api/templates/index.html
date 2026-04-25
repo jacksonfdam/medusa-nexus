@@ -13,6 +13,7 @@
 </head>
 <body>
   <header class="topbar">
+    <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="toggle sidebar" title="toggle sidebar (⌘B)">☰</button>
     <a class="brand" href="#/dashboard">🔱 MEDUSA::NEXUS</a>
     <div class="version">v0.1.0-alpha</div>
     <div class="spacer"></div>
@@ -21,25 +22,23 @@
     <a class="btn" href="/docs" target="_blank">[ SWAGGER ]</a>
   </header>
 
-  <div class="body-grid">
+  <div class="body-grid" id="body-grid">
     <!-- sidebar: 9 primary routes from the Pencil Dashboard design -->
     <nav class="sidebar">
       <div class="sidebar-label">// NAV</div>
-      <a class="nav-item" data-route="dashboard" href="#/dashboard"><span class="arrow">▸</span><span class="name">DASHBOARD</span><span class="count"></span></a>
-      <a class="nav-item" data-route="projects"  href="#/projects"> <span class="arrow">▸</span><span class="name">PROJECTS</span><span class="count"></span></a>
-      <a class="nav-item" data-route="scan"      href="#/scan">     <span class="arrow">▸</span><span class="name">SCAN</span><span class="count"></span></a>
-      <a class="nav-item" data-route="devices"   href="#/devices">  <span class="arrow">▸</span><span class="name">DEVICES</span><span class="count" id="nav-devices-count"></span></a>
-      <a class="nav-item" data-route="adb"       href="#/adb">      <span class="arrow">▸</span><span class="name">ADB</span><span class="count"></span></a>
-      <a class="nav-item" data-route="dynamic"   href="#/dynamic">  <span class="arrow">▸</span><span class="name">DYNAMIC</span><span class="count"></span></a>
-      <a class="nav-item" data-route="network"   href="#/network">  <span class="arrow">▸</span><span class="name">NETWORK</span><span class="count"></span></a>
-      <a class="nav-item" data-route="report"    href="#/report">   <span class="arrow">▸</span><span class="name">REPORT</span><span class="count"></span></a>
-      <a class="nav-item" data-route="tools"     href="#/tools">    <span class="arrow">▸</span><span class="name">TOOLS</span><span class="count"></span></a>
-      <a class="nav-item" data-route="recipes"   href="#/recipes">  <span class="arrow">▸</span><span class="name">RECIPES</span><span class="count"></span></a>
-      <a class="nav-item" data-route="settings"  href="#/settings"> <span class="arrow">▸</span><span class="name">SETTINGS</span><span class="count"></span></a>
+      <a class="nav-item" data-route="dashboard" data-tip="DASHBOARD" href="#/dashboard"><span class="arrow">▸</span><span class="name">DASHBOARD</span><span class="count"></span></a>
+      <a class="nav-item" data-route="projects"  data-tip="PROJECTS"  href="#/projects"> <span class="arrow">▸</span><span class="name">PROJECTS</span><span class="count"></span></a>
+      <a class="nav-item" data-route="scan"      data-tip="SCAN"      href="#/scan">     <span class="arrow">▸</span><span class="name">SCAN</span><span class="count"></span></a>
+      <a class="nav-item" data-route="devices"   data-tip="DEVICES"   href="#/devices">  <span class="arrow">▸</span><span class="name">DEVICES</span><span class="count" id="nav-devices-count"></span></a>
+      <a class="nav-item" data-route="adb"       data-tip="ADB"       href="#/adb">      <span class="arrow">▸</span><span class="name">ADB</span><span class="count"></span></a>
+      <a class="nav-item" data-route="report"    data-tip="REPORT"    href="#/report">   <span class="arrow">▸</span><span class="name">REPORT</span><span class="count"></span></a>
+      <a class="nav-item" data-route="tools"     data-tip="TOOLS"     href="#/tools">    <span class="arrow">▸</span><span class="name">TOOLS</span><span class="count"></span></a>
+      <a class="nav-item" data-route="recipes"   data-tip="RECIPES"   href="#/recipes">  <span class="arrow">▸</span><span class="name">RECIPES</span><span class="count"></span></a>
+      <a class="nav-item" data-route="settings"  data-tip="SETTINGS"  href="#/settings"> <span class="arrow">▸</span><span class="name">SETTINGS</span><span class="count"></span></a>
       <div style="flex:1"></div>
-      <a class="nav-item" style="opacity:.6" href="#/boot">     <span class="arrow">▸</span><span class="name">BOOT</span></a>
-      <a class="nav-item" style="opacity:.6" href="#/about">    <span class="arrow">▸</span><span class="name">CREDITS</span></a>
-      <a class="nav-item" style="opacity:.6" href="#/terminal"> <span class="arrow">▸</span><span class="name">TERMINAL</span></a>
+      <a class="nav-item" data-tip="BOOT"     style="opacity:.6" href="#/boot">     <span class="arrow">▸</span><span class="name">BOOT</span></a>
+      <a class="nav-item" data-tip="CREDITS"  style="opacity:.6" href="#/about">    <span class="arrow">▸</span><span class="name">CREDITS</span></a>
+      <a class="nav-item" data-tip="TERMINAL" style="opacity:.6" href="#/terminal"> <span class="arrow">▸</span><span class="name">TERMINAL</span></a>
     </nav>
 
     <main id="view"><div class="empty-state">loading…</div></main>
