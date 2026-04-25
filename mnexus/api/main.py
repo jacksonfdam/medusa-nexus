@@ -160,6 +160,38 @@ async def project_attack_surface(project_id: str) -> dict[str, Any]:
     return project.attack_surface.model_dump(mode="json")
 
 
+@app.post("/v1/projects/{project_id}/rescan")
+async def rescan_project(project_id: str) -> dict[str, Any]:
+    """Re-run the static fan-out on a stored project.
+
+    Resolves the APK from the project record, re-executes the orchestrator
+    pipeline (which rebuilds findings + attack surface in place) and writes
+    the refreshed payload back over the same project id.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    project = nexus.db.load_project(project_id)
+    if not project:
+        raise HTTPException(404, f"no project with id {project_id}")
+    apk_path = project.apk_path if isinstance(project.apk_path, Path) else Path(str(project.apk_path))
+    if not apk_path.exists():
+        raise HTTPException(410, f"APK no longer present at {apk_path} — re-import")
+    try:
+        refreshed = await nexus.ingest_apk(
+            apk_path,
+            package_name=project.package_name,
+            version=project.version_name,
+            existing_id=project.id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"rescan failed: {exc.__class__.__name__}: {exc}") from exc
+    return {
+        "project_id": refreshed.id,
+        "findings_count": len(refreshed.attack_surface.findings) if refreshed.attack_surface else 0,
+        "risk_score": refreshed.attack_surface.risk_score() if refreshed.attack_surface else 0.0,
+        "project": refreshed.model_dump(mode="json"),
+    }
+
+
 @app.get("/v1/findings/{finding_id}")
 async def get_finding(finding_id: str) -> dict[str, Any]:
     """Walks every project for the finding. O(projects × findings)."""
