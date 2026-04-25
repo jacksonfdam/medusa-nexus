@@ -1262,15 +1262,45 @@ function bindMirror(serial, w, h) {
     const img = $("#mirror-img");
     if (!img) return;
     const status = $("#mirror-status");
+    const mirror = $("#mirror");
     let fails = 0;
+    let lastBlobUrl = null;
 
-    function tick() {
+    async function tick() {
         const url = `/v1/devices/${encodeURIComponent(serial)}/screencap.png?t=${Date.now()}`;
-        const probe = new Image();
-        probe.onload = () => { img.src = probe.src; if (status) { status.textContent = "live"; status.style.color = "var(--acid)"; } fails = 0; };
-        probe.onerror = () => { fails++; if (status && fails > 2) { status.textContent = "stalled"; status.style.color = "var(--sev-crit)"; } };
-        probe.src = url;
+        try {
+            const r = await fetch(url, { cache: "no-store" });
+            if (!r.ok) {
+                fails++;
+                if (fails > 2 && status) {
+                    status.textContent = "stalled";
+                    status.style.color = "var(--sev-crit)";
+                    showMirrorError(mirror, await safeJSON(r));
+                }
+                return;
+            }
+            const blob = await r.blob();
+            const obj = URL.createObjectURL(blob);
+            img.src = obj;
+            if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+            lastBlobUrl = obj;
+            fails = 0;
+            if (status) {
+                const path = r.headers.get("X-MNexus-Path") || "?";
+                status.textContent = `live · ${path}`;
+                status.style.color = "var(--acid)";
+            }
+            hideMirrorError(mirror);
+        } catch (e) {
+            fails++;
+            if (fails > 2 && status) {
+                status.textContent = "stalled";
+                status.style.color = "var(--sev-crit)";
+                showMirrorError(mirror, { error: "network", detail: e.message });
+            }
+        }
     }
+
     tick();
     clearInterval(_mirrorTimer);
     _mirrorTimer = setInterval(() => {
@@ -1288,6 +1318,39 @@ function bindMirror(serial, w, h) {
         const fd = new FormData(); fd.append("x", x); fd.append("y", y);
         await fetch(`/v1/devices/${encodeURIComponent(serial)}/tap`, { method: "POST", body: fd });
     });
+}
+
+async function safeJSON(response) {
+    try { return await response.json(); } catch { return { error: `HTTP ${response.status}`, detail: response.statusText }; }
+}
+
+function showMirrorError(mirror, payload) {
+    if (!mirror) return;
+    let banner = mirror.querySelector(".mirror-error");
+    if (!banner) {
+        banner = document.createElement("div");
+        banner.className = "mirror-error";
+        banner.style.cssText = "padding:14px;background:#1a0008;border-top:1px solid var(--border-crit);color:var(--sev-crit);font-size:11px;line-height:1.55;display:flex;flex-direction:column;gap:6px";
+        mirror.appendChild(banner);
+    }
+    const detail = payload?.detail || payload || {};
+    const lines = [];
+    if (typeof detail === "string") lines.push(detail);
+    else {
+        if (detail.error) lines.push(`<b>${detail.error}</b>`);
+        if (detail.exec_out) lines.push(`exec-out: ${detail.exec_out}`);
+        if (detail.temp_file) lines.push(`temp-file: ${detail.temp_file}`);
+        if (detail.hint) lines.push(`<span style="color:var(--magenta)">→ ${detail.hint}</span>`);
+    }
+    banner.innerHTML = `
+      <div>screencap stalled — diagnostics:</div>
+      <div style="font-family:var(--mono)">${lines.join("<br>")}</div>
+      <div><a href="/v1/devices/${encodeURIComponent(_activeSerial)}/screencap-debug" target="_blank" style="color:var(--cyan)">[ open /screencap-debug ]</a></div>`;
+}
+
+function hideMirrorError(mirror) {
+    const banner = mirror?.querySelector(".mirror-error");
+    if (banner) banner.remove();
 }
 
 function bindActions(serial) {
