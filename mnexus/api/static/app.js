@@ -352,37 +352,22 @@ function fmtBytes(n) {
  *  SCREEN 05 — Pull from Device
  * ═══════════════════════════════════════════════════════════════════════════ */
 function view_device_pull() {
-    const sample = [
-        ["com.target.banking", 10237, "4.12.0", "—", "3x", "48.2 MB"],
-        ["com.target.social", 10254, "2.3.1", "yes", "—", "22.1 MB"],
-        ["com.target.fitness", 10278, "1.0.8", "—", "—", "15.6 MB"],
-        ["com.target.legacy.auth", 10121, "0.9.4", "yes", "—", "8.4 MB"],
-        ["com.android.vending", 10001, "38.5.18", "—", "5x", "102.3 MB"],
-    ];
     return h`
     <div class="main">
       ${sectionHeader("P", "05 // INTAKE", "PULL FROM DEVICE")}
       ${deviceTabs("pull")}
       <section class="row">
-        <div class="input grow"><span class="prompt">&gt;</span><input placeholder="pm list packages | grep target"><span class="cursor">_</span></div>
-        <span class="badge connected"><span class="dot">●</span>Pixel 6 · android 14</span>
+        <div class="input grow"><span class="prompt">&gt;</span><input id="pull-filter" placeholder="grep packages — e.g. com.target"><span class="cursor">_</span></div>
+        <span class="badge" id="pull-device-badge"><span class="dot">●</span>scanning…</span>
       </section>
       <section class="panel">
-        <div class="panel-head">// PACKAGES · 5 matched · scope: com.target.*</div>
-        <div class="panel-body tight">
-          <div class="table-hdr" style="grid-template-columns: 1fr 80px 120px 70px 60px 100px 120px">
-            <span>PACKAGE</span><span>UID</span><span>VERSION</span><span>DEBUG</span><span>SPLIT</span><span>SIZE</span><span></span>
-          </div>
-          ${sample.map(([pkg, uid, ver, dbg, split, size]) => `
-            <div class="table-row" style="grid-template-columns: 1fr 80px 120px 70px 60px 100px 120px">
-              <span class="t-mono" style="font-weight:700">${pkg}</span>
-              <span class="t-muted">${uid}</span>
-              <span class="t-mono">${ver}</span>
-              <span class="${dbg === "yes" ? "" : "t-muted"}" style="color:${dbg === "yes" ? "var(--sev-high)" : ""}">${dbg}</span>
-              <span class="${split === "—" ? "t-muted" : "t-mono"}" style="color:${split !== "—" ? "var(--magenta)" : ""}">${split}</span>
-              <span class="t-muted">${size}</span>
-              <span style="text-align:right"><button class="btn primary" style="padding:4px 10px">[ PULL ]</button></span>
-            </div>`).join("")}
+        <div class="panel-head">
+          <span>// PACKAGES</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="pull-count">scanning…</span>
+        </div>
+        <div class="panel-body" id="pull-table">
+          <div class="empty-state"><span class="muted small uppercase">scanning device…</span></div>
         </div>
       </section>
     </div>`;
@@ -473,261 +458,194 @@ function projectTabs(id, active) {
     return `
     <div class="tab-bar">
       ${tabs.map(([k, label]) => `<a class="tab ${k === active ? "active" : ""}" href="#/project/${encodeURIComponent(id)}/${k}">${k === active ? "> " : "  "}${label}</a>`).join("")}
+      <span class="grow"></span>
+      <button class="tab" data-rescan="${id}" title="re-run static fan-out + rebuild attack surface">⟳ RESCAN</button>
+      <a class="tab" href="#/project/${encodeURIComponent(id)}/${active}" data-refresh="${id}" title="reload current view">↻ REFRESH</a>
     </div>`;
 }
 
+/* Wired by every project-* mount so the tab-bar buttons work everywhere. */
+function bindProjectTabActions() {
+    $$('[data-rescan]').forEach((btn) => {
+        if (btn._wired) return; btn._wired = true;
+        btn.addEventListener("click", async () => {
+        const id = btn.dataset.rescan;
+        if (!confirm(`re-run static fan-out on ${id}?`)) return;
+        const orig = btn.textContent;
+        btn.textContent = "⟳ rescanning…";
+        btn.style.color = "var(--magenta)";
+        try {
+            const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/rescan`, { method: "POST" });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(j.detail || r.statusText);
+            btn.textContent = `✓ ${j.findings_count} findings · risk ${j.risk_score?.toFixed?.(1) || "?"}`;
+            btn.style.color = "var(--acid)";
+            // re-render the current route
+            setTimeout(() => { renderRoute(); }, 600);
+        } catch (e) {
+            btn.textContent = "✕ rescan failed";
+            btn.style.color = "var(--sev-crit)";
+            console.error(e);
+            setTimeout(() => { btn.textContent = orig; btn.style.color = ""; }, 3500);
+        }
+        });
+    });
+    $$('[data-refresh]').forEach((btn) => {
+        if (btn._wired) return; btn._wired = true;
+        btn.addEventListener("click", (e) => { e.preventDefault(); renderRoute(); });
+    });
+}
+
 function view_project_overview(ctx) {
-    const id = ctx.params.id || "PRJ-SAMPLE";
+    const id = ctx.params.id;
+    if (!id) { location.hash = "#/projects"; return ""; }
     return h`
     <div class="main">
       <div class="muted small uppercase">🔱 NEXUS / ${id} / overview</div>
       ${projectTabs(id, "overview")}
-      <section class="row" style="align-items:flex-start;gap:24px">
-        <div class="col" style="width:280px">
-          <div class="risk-gauge" style="--deg: 260deg">
-            <div class="arc"></div>
-            <div class="label">
-              <div class="value">72.4</div>
-              <div class="caption">RISK / 100</div>
-            </div>
-          </div>
-          <section class="panel">
-            <div class="panel-head">// SEVERITY</div>
-            <div class="panel-body col" style="gap:4px">
-              <div class="row"><span style="color:var(--sev-crit);width:40px">CRIT</span><span class="t-mono" style="color:var(--sev-crit)">██████░░░░░░░░░</span><span class="grow" style="text-align:right">03</span></div>
-              <div class="row"><span style="color:var(--sev-high);width:40px">HIGH</span><span class="t-mono" style="color:var(--sev-high)">████████████░░░</span><span class="grow" style="text-align:right">07</span></div>
-              <div class="row"><span style="color:var(--sev-med);width:40px">MED</span><span class="t-mono" style="color:var(--sev-med)">██████████████░░</span><span class="grow" style="text-align:right">12</span></div>
-              <div class="row"><span style="color:var(--sev-low);width:40px">LOW</span><span class="t-mono" style="color:var(--sev-low)">████████░░░░░░░</span><span class="grow" style="text-align:right">05</span></div>
-              <div class="row"><span class="muted" style="width:40px">INFO</span><span class="t-mono muted">██████████████░░</span><span class="grow" style="text-align:right">09</span></div>
-            </div>
-          </section>
-        </div>
-        <div class="col grow">
-          <section class="panel">
-            <div class="panel-head"><span>// FINDINGS TIMELINE</span><span class="spacer"></span><span class="muted">36 total</span></div>
-            <div class="panel-body col" style="gap:8px">
-              ${[
-                  ["crit", "Hardcoded AES key in com.target.crypto.KeyManager", "[JADX + GHIDRA]"],
-                  ["crit", "SQL injection in ContentProvider (no input validation)", "[MOBSF]"],
-                  ["crit", "WebView.addJavascriptInterface exposed to untrusted content", "[JADX]"],
-                  ["high", "SSL pinning via legacy TrustManager (bypassable)", "[GHIDRA]"],
-                  ["high", "Root detection only in Java layer (no native checks)", "[MEDUSA]"],
-                  ["med", "Clipboard data exposure (no sensitive-field clearing)", "[FRIDA]"],
-                  ["med", "PII exposed in Logcat (info, email, device id)", "[FRIDA]"],
-              ].map(([sev, title, src]) => `
-                <div class="row" style="padding:8px 12px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px">
-                  ${chip(sev)}
-                  <span class="grow">${title}</span>
-                  <span class="t-muted">${src}</span>
-                </div>`).join("")}
-            </div>
-          </section>
-          <section class="panel">
-            <div class="panel-head">// ATTACK SURFACE</div>
-            <div class="panel-body row" style="gap:24px">
-              <div class="col grow"><span class="muted small uppercase">ACTIVITIES</span><span class="t-mono">24 · 9 exported · 2 unprotected</span></div>
-              <div class="col grow"><span class="muted small uppercase">PROVIDERS</span><span class="t-mono" style="color:var(--sev-crit)">3 · 1 unprotected</span></div>
-              <div class="col grow"><span class="muted small uppercase">DEEP LINKS</span><span class="t-mono">7 schemes · 14 hosts</span></div>
-              <div class="col grow"><span class="muted small uppercase">NATIVE LIBS</span><span class="t-mono" style="color:var(--sev-high)">3 · arm64-v8a · crypto found</span></div>
-            </div>
-          </section>
-        </div>
-      </section>
+      <div class="empty-state"><span class="muted small uppercase">loading project ${id}…</span></div>
     </div>`;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  SCREEN 08 — Static Analysis (split view)
+ *  SCREEN 08 — Static Analysis (real APK data — populated by mount)
  * ═══════════════════════════════════════════════════════════════════════════ */
 function view_project_static(ctx) {
-    const id = ctx.params.id || "PRJ-SAMPLE";
+    const id = ctx.params.id;
+    if (!id) { location.hash = "#/projects"; return ""; }
     return h`
     <div class="main">
-      <div class="muted small uppercase">🔱 NEXUS / ${id} / static</div>
+      <div class="muted small uppercase" id="static-breadcrumb">🔱 NEXUS / ${id} / static</div>
       ${projectTabs(id, "static")}
-      <div class="row" style="align-items:flex-start;gap:12px;min-height:540px">
-        <section class="panel" style="width:280px;flex:none">
-          <div class="panel-head">// CLASS TREE</div>
-          <div class="panel-body col" style="gap:2px">
-            <div class="t-mono">▾ com.target.banking</div>
-            <div class="t-mono" style="padding-left:14px">▾ auth/</div>
-            <div class="t-mono" style="padding-left:28px">LoginActivity.java</div>
-            <div class="t-mono" style="padding-left:28px">BiometricGate.java</div>
-            <div class="t-mono" style="padding-left:14px;color:var(--sev-crit);font-weight:700">▾ crypto/</div>
-            <div class="t-mono" style="padding-left:28px;color:var(--sev-crit);font-weight:700">● KeyManager.java</div>
-            <div class="t-mono" style="padding-left:28px">Cipher1Wrapper.java</div>
-            <div class="t-mono" style="padding-left:14px">▸ net/</div>
-            <div class="t-mono" style="padding-left:14px">▸ storage/</div>
-            <div class="t-mono" style="padding-left:14px;color:var(--sev-high);font-weight:700">▸ webview/</div>
-            <div class="t-mono" style="padding-left:14px">▸ ui/</div>
-            <div class="t-mono muted" style="padding-top:8px">▸ okhttp3</div>
-            <div class="t-mono muted">▸ com.google.firebase</div>
-          </div>
+
+      <section class="row" id="static-filters" style="gap:8px;flex-wrap:wrap">
+        <span class="muted small">filter:</span>
+        <button class="btn" data-fsev="">[ ALL ]</button>
+        <button class="btn" data-fsev="critical">[ CRIT ]</button>
+        <button class="btn" data-fsev="high">[ HIGH ]</button>
+        <button class="btn" data-fsev="medium">[ MED ]</button>
+        <button class="btn" data-fsev="low">[ LOW ]</button>
+        <button class="btn" data-fsev="info">[ INFO ]</button>
+        <span class="grow"></span>
+        <span class="muted small" id="static-count">loading…</span>
+      </section>
+
+      <div class="row" style="align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <section class="panel" style="width:300px;flex:none;min-width:0">
+          <div class="panel-head">// SDK FINGERPRINT</div>
+          <div class="panel-body col" style="gap:6px" id="static-sdks">loading…</div>
         </section>
-        <section class="panel grow">
-          <div class="panel-head">
-            <span class="t-mono">com/target/banking/crypto/KeyManager.java</span>
-            <span class="spacer"></span>
-            <span class="muted">L42–L58</span>
-            <a class="btn primary" href="#/finding/FND-0042" style="padding:4px 10px">[ DETAIL ]</a>
-          </div>
-          <div class="panel-body">
-            <pre class="code"><span class="ln">40</span>
-<span class="ln">41</span>  public final class KeyManager {
-<span class="ln">42</span>      public static SecretKeySpec loadKey() {
-<span class="ln">43</span>          <span class="comment">// CWE-798: hardcoded key bytes — also present in libcrypto.so .rodata 0x1A2F</span>
-<span class="ln">44</span>          <span class="crit">byte[] key = "MedusaSays\u0000\u0000".getBytes(StandardCharsets.UTF_8);</span>
-<span class="ln">45</span>          return new SecretKeySpec(key, "AES");
-<span class="ln">46</span>      }
-<span class="ln">47</span>
-<span class="ln">48</span>      public static byte[] encrypt(byte[] in) throws Exception {
-<span class="ln">49</span>          <span class="hot">Cipher c = Cipher.getInstance("AES/CBC/PKCS5Padding"); // CWE-327 candidate</span>
-<span class="ln">50</span>          <span class="crit">c.init(Cipher.ENCRYPT_MODE, loadKey(), new IvParameterSpec(new byte[16])); // static IV</span>
-<span class="ln">51</span>          return c.doFinal(in);
-<span class="ln">52</span>      }
-<span class="ln">53</span>  }</pre>
-          </div>
+
+        <section class="panel grow" style="min-width:0">
+          <div class="panel-head"><span>// FINDINGS</span><span class="spacer"></span><span class="muted small" id="static-active-filter">all severities</span></div>
+          <div class="panel-body col" style="gap:8px" id="static-findings">loading…</div>
         </section>
-        <section class="panel" style="width:340px;flex:none">
-          <div class="panel-head">
-            <span>// FINDINGS · 36</span>
-            <span class="spacer"></span>
-            <span class="chip low">JADX</span>
-          </div>
-          <div class="panel-body col" style="gap:8px">
-            <a class="finding" href="#/finding/FND-0042" style="text-decoration:none;background:var(--bg-accent-panel);border-color:var(--border-accent)">
-              <div class="head">${chip("crit")}<span class="tag">FND-0042</span><span class="spacer"></span><span class="tag">[JADX+GHIDRA]</span></div>
-              <div class="title">Hardcoded AES key in KeyManager.loadKey()</div>
-              <div class="meta">KeyManager.java:44 · CWE-798 · confirmed</div>
-            </a>
-            <a class="finding" href="#/finding/FND-0050" style="text-decoration:none">
-              <div class="head">${chip("crit")}<span class="tag">FND-0050</span><span class="spacer"></span><span class="tag">[JADX]</span></div>
-              <div class="title">Static IV with AES/CBC in encrypt()</div>
-              <div class="meta">KeyManager.java:50 · CWE-329</div>
-            </a>
-            <a class="finding" href="#/finding/FND-0044" style="text-decoration:none">
-              <div class="head">${chip("crit")}<span class="tag">FND-0044</span><span class="spacer"></span><span class="tag">[MOBSF]</span></div>
-              <div class="title">WebView.addJavascriptInterface + unrestricted URLs</div>
-              <div class="meta">webview/SupportBrowser.java:120 · CWE-79/749</div>
-            </a>
-            <a class="finding" href="#/finding/FND-0045" style="text-decoration:none">
-              <div class="head">${chip("high")}<span class="tag">FND-0045</span><span class="spacer"></span><span class="tag">[GHIDRA]</span></div>
-              <div class="title">Legacy TrustManager in libnet.so — pinning bypassable</div>
-              <div class="meta">libnet.so+0x312C · CWE-295</div>
-            </a>
-          </div>
+
+        <section class="panel" style="width:300px;flex:none;min-width:0">
+          <div class="panel-head">// CRYPTO OPS</div>
+          <div class="panel-body col" style="gap:4px" id="static-crypto">loading…</div>
         </section>
       </div>
-      <div class="row muted small" style="justify-content:center">
-        <a href="#/project/${id}/secrets">secrets</a> ·
-        <a href="#/project/${id}/components">components</a> ·
-        <a href="#/project/${id}/native">native (ghidra)</a>
+
+      <div class="row muted small" style="justify-content:center;gap:18px;flex-wrap:wrap">
+        <a href="#/project/${id}/secrets">secrets + crypto</a> ·
+        <a href="#/project/${id}/components">components + deeplinks</a> ·
+        <a href="#/project/${id}/native">native (ghidra)</a> ·
+        <a href="#/project/${id}/owasp">OWASP MASVS matrix</a>
       </div>
     </div>`;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  SCREEN 12 — Dynamic Analysis (Frida console)
+ *  SCREEN 12 — Dynamic Analysis (real package + real auto-hooks)
  * ═══════════════════════════════════════════════════════════════════════════ */
 function view_project_dynamic(ctx) {
-    const id = ctx.params.id || "PRJ-SAMPLE";
+    const id = ctx.params.id;
+    if (!id) { location.hash = "#/projects"; return ""; }
     return h`
     <div class="main">
-      <div class="muted small uppercase">🔱 NEXUS / ${id} / dynamic <span class="badge scanning" style="margin-left:12px"><span class="dot">●</span>FRIDA ATTACHED</span></div>
+      <div class="muted small uppercase" id="dyn-breadcrumb">🔱 NEXUS / ${id} / dynamic</div>
       ${projectTabs(id, "dynamic")}
-      <div class="row" style="align-items:flex-start;gap:12px;min-height:520px">
-        <section class="panel" style="width:260px;flex:none">
-          <div class="panel-head">// HOOKS</div>
-          <div class="panel-body col" style="gap:6px">
-            <div class="muted small">Auto-generated from static findings. Untick at your own risk.</div>
-            ${[
-                ["x", "ssl_pinning_bypass", true],
-                ["x", "root_detection_bypass", true],
-                ["x", "crypto_logger", true],
-                [" ", "intent_monitor", false],
-                [" ", "file_io_monitor", false],
-                [" ", "clipboard_watcher", false],
-            ].map(([mark, name, on]) => `
-                <div class="row" style="padding:6px 10px;background:${on ? "var(--bg-accent-panel)" : "var(--bg-panel)"};border:1px solid ${on ? "var(--border-accent)" : "var(--border)"};border-radius:2px">
-                  <span style="color:${on ? "var(--acid)" : "var(--muted)"}">[${mark}]</span>
-                  <span class="t-mono" style="color:${on ? "var(--acid)" : "var(--muted)"}">${name}</span>
-                </div>`).join("")}
-            <a class="btn" href="#/recipes" style="margin-top:10px">[ LOAD RECIPE ]</a>
-          </div>
+      <div class="row" style="align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <section class="panel" style="width:280px;flex:none;min-width:0">
+          <div class="panel-head">// AUTO-HOOKS</div>
+          <div class="panel-body col" style="gap:6px" id="dyn-hooks">loading…</div>
         </section>
-        <section class="panel grow">
-          <div class="panel-head">// FRIDA CONSOLE</div>
-          <div class="panel-body console">
-<span class="nexus">[NEXUS] attaching to com.target.banking (pid 14827)</span>
-<span class="nexus">[NEXUS] loaded module: ssl_pinning_bypass</span>
-<span class="nexus">[NEXUS] loaded module: root_detection_bypass</span>
-<span class="nexus">[NEXUS] loaded module: crypto_logger</span>
-<span class="nexus">[NEXUS] auto-hooks injected: 14 (rooted-detection: RootBeer v0.0.9)</span>
-<span class="nexus">[NEXUS] session active · spawn resumed</span>
-
-<span class="meta">[ROOT ] RootBeer.isRooted() = true → returning false (because yes)</span>
-<span class="meta">[SSL  ] CertificatePinner.check("api.target.com") → noop</span>
-<span class="crypto">[CRYPTO] SecretKeySpec(AES/CBC/PKCS5Padding) key=4d656475736153617973...</span>
-<span class="crypto">[CRYPTO]   iv=000000000000000000000000 ← static IV, because of course it is</span>
-<span class="crit">[CRYPTO] Cipher.doFinal → pt={"user":"admin","token":"eyJhbGciOi..."}</span>
-<span class="intent">[INTENT] tx: com.target.banking/.ui.LoginActivity  extras={remember=true}</span>
-<span class="intent">[FS    ] read: /data/data/com.target.banking/shared_prefs/session.xml</span>
-<span class="crypto">[CLIP  ] ClipboardManager.setPrimaryClip("4532-7800-...") — send help</span>
-<span class="nexus">frida&gt; _</span>
+        <section class="panel grow" style="min-width:0">
+          <div class="panel-head">
+            <span>// FRIDA CONSOLE</span>
+            <span class="spacer"></span>
+            <button class="btn primary" id="dyn-start">[ START SESSION ]</button>
+            <button class="btn" id="dyn-stop">[ STOP ]</button>
           </div>
+          <div class="panel-body console" id="dyn-console" style="min-height:340px"></div>
         </section>
       </div>
-      <div class="row muted small" style="justify-content:center">
+      <div class="row muted small" style="justify-content:center;gap:18px;flex-wrap:wrap">
         <a href="#/project/${id}/tracer">live method tracer →</a>
+        <a href="#/recipes">+ recipes library</a>
+        <a href="#/adb">ADB control panel</a>
       </div>
     </div>`;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  SCREEN 14 — Network Analysis
+ *  SCREEN 14 — Network Analysis (real attack-surface + traffic)
  * ═══════════════════════════════════════════════════════════════════════════ */
 function view_project_network(ctx) {
-    const id = ctx.params.id || "PRJ-SAMPLE";
-    const rows = [
-        ["POST", "api.target.com", "/v2/auth/login", 200, "1.8 KB", 412, ["JWT","PII"], "crit"],
-        ["GET", "api.target.com", "/v2/accounts/me", 200, "4.2 KB", 187, ["PII"], "high"],
-        ["POST", "beacon.analytics.io", "/collect", 204, "512 B", 89, ["IDF"], "med"],
-        ["GET", "api.target.com", "/v2/transfers/recent", 401, "120 B", 102, [], "info"],
-        ["POST", "crashlytics.firebase", "/v1/reports", 200, "6.1 KB", 304, ["STACK"], "med"],
-        ["GET", "cdn.target.com", "/static/promo.html", 200, "12.4 KB", 78, ["WV"], "high"],
-    ];
+    const id = ctx.params.id;
+    if (!id) { location.hash = "#/projects"; return ""; }
     return h`
     <div class="main">
-      <div class="muted small uppercase">🔱 NEXUS / ${id} / network <span style="margin-left:12px">burp @ 127.0.0.1:8080</span></div>
+      <div class="muted small uppercase" id="net-breadcrumb">🔱 NEXUS / ${id} / network</div>
       ${projectTabs(id, "network")}
-      <section class="panel">
-        <div class="panel-head">
-          <span>// TRAFFIC · 247 · scope: com.target.*</span>
-          <span class="spacer"></span>
-          <button class="btn">[ REPLAY ]</button>
-          <button class="btn">[ DIFF ]</button>
-          <a class="btn primary" href="#/project/${id}/api-map">[ API MAP ]</a>
+
+      <section class="row" style="gap:12px;flex-wrap:wrap">
+        <div class="metric-card grow" style="min-width:180px">
+          <div class="metric-label">// API ENDPOINTS</div>
+          <div class="metric-value" id="net-endpoints-count">—</div>
+          <div class="metric-sub" id="net-endpoints-sub">discovered statically</div>
         </div>
-        <div class="panel-body tight">
-          <div class="table-hdr" style="grid-template-columns: 50px 180px 1fr 70px 80px 60px 90px">
-            <span>M</span><span>HOST</span><span>PATH</span><span>STATUS</span><span>SIZE</span><span>MS</span><span>FLAGS</span>
-          </div>
-          ${rows.map(([m, host, path, status, size, ms, flags, sev]) => `
-            <div class="table-row" style="grid-template-columns: 50px 180px 1fr 70px 80px 60px 90px">
-              <span class="t-mono" style="color:${m === "POST" ? "var(--acid)" : "var(--cyan)"};font-weight:700">${m}</span>
-              <span class="t-mono" style="color:${sev === "info" ? "var(--muted)" : "var(--cyan)"}">${host}</span>
-              <span class="t-mono" style="color:${sev === "info" ? "var(--muted)" : "var(--cyan)"}">${path}</span>
-              <span class="t-mono" style="color:var(--${status < 300 ? "acid" : status < 500 ? "sev-high" : "sev-crit"});font-weight:700">${status}</span>
-              <span class="t-muted">${size}</span>
-              <span class="t-muted">${ms}</span>
-              <span style="font-size:9px;color:var(--sev-${sev});font-weight:700">${flags.length ? "[" + flags.join("][") + "]" : ""}</span>
-            </div>`).join("")}
+        <div class="metric-card grow" style="min-width:180px">
+          <div class="metric-label">// CAPTURED TRAFFIC</div>
+          <div class="metric-value" id="net-traffic-count">—</div>
+          <div class="metric-sub" id="net-traffic-sub">via Burp / mitm</div>
+        </div>
+        <div class="metric-card grow" style="min-width:180px">
+          <div class="metric-label">// SSL PINNING</div>
+          <div class="metric-value" id="net-ssl">—</div>
+          <div class="metric-sub" id="net-ssl-sub">library</div>
+        </div>
+        <div class="metric-card grow" style="min-width:180px">
+          <div class="metric-label">// CLEARTEXT</div>
+          <div class="metric-value" id="net-cleartext">—</div>
+          <div class="metric-sub" id="net-cleartext-sub">manifest flag</div>
         </div>
       </section>
-      <div class="row muted small" style="justify-content:center;gap:18px">
-        <a href="#/project/${id}/api-map">api endpoints</a>
-        <a href="#/project/${id}/ssl-map">ssl pinning map</a>
-      </div>
+
+      <section class="panel">
+        <div class="panel-head">
+          <span>// API ENDPOINTS</span>
+          <span class="spacer"></span>
+          <a class="btn primary" href="#/project/${id}/api-map">[ FULL MAP ]</a>
+          <a class="btn" href="#/project/${id}/ssl-map">[ SSL MAP ]</a>
+        </div>
+        <div class="panel-body" id="net-endpoints">loading…</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <span>// CAPTURED TRAFFIC</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="net-traffic-meta">—</span>
+        </div>
+        <div class="panel-body tight" id="net-traffic">loading…</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">// NETWORK FINDINGS</div>
+        <div class="panel-body col" style="gap:8px" id="net-findings">loading…</div>
+      </section>
     </div>`;
 }
 
@@ -765,22 +683,12 @@ function view_report() {
           </div>
         </section>
         <section class="panel grow">
-          <div class="panel-head">// PREVIEW · technical_report.pdf · 37 pages</div>
-          <div class="panel-body col" style="gap:12px;background:#050505">
-            <div style="font-size:20px;color:var(--cyan);font-weight:700;letter-spacing:2px">MEDUSA NEXUS // TECHNICAL ASSESSMENT</div>
-            <div class="muted small">target: com.target.banking v4.12.0 · SHA-256 86fa…d23c · 2026-04-24</div>
-            <div class="gradient-underline"></div>
-            <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · EXECUTIVE SUMMARY</div>
-            <div>Risk 72.4/100. Three critical findings block release: hardcoded key, SQLi in provider, permissive WebView.</div>
-            <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 02 · MITIGATION PLAYBOOK — mandatory section</div>
-            <div class="mitigation">
-              <div class="row" style="align-items:flex-start;gap:10px">${chip("crit")}<div><b>FND-0042 · Hardcoded AES key</b><br>→ Move to Android Keystore, switch to AES/GCM, rotate DEKs, invalidate in-flight ciphertext.</div></div>
-              <div class="row" style="align-items:flex-start;gap:10px">${chip("crit")}<div><b>FND-0043 · SQLi in ContentProvider</b><br>→ Parameterized queries only. Drop android:exported=true. Add signature-level permission.</div></div>
-              <div class="row" style="align-items:flex-start;gap:10px">${chip("crit")}<div><b>FND-0044 · WebView with JS interface</b><br>→ Remove @JavascriptInterface. If unavoidable, sandbox on dedicated WebView with @RequiresApi(17).</div></div>
-              <div class="row" style="align-items:flex-start;gap:10px">${chip("high")}<div><b>FND-0045 · Legacy TrustManager pinning</b><br>→ Switch to OkHttp CertificatePinner + Network Security Config. Pin leaf + intermediate.</div></div>
+          <div class="panel-head" id="report-preview-head">// PREVIEW</div>
+          <div class="panel-body col" style="gap:12px;background:#050505" id="report-preview">
+            <div class="empty-state">
+              <span class="muted small uppercase">no project picked yet</span>
+              <div class="muted small" style="margin-top:6px">scan an APK at <a href="#/scan">/#/scan</a>, then come back to render its real Mitigation Playbook here.</div>
             </div>
-            <div class="muted small">§ 03 · FINDINGS DETAIL (37 findings, grouped by category, each ships with evidence + mitigation)</div>
-            <div class="muted small">§ 04 · OWASP MASVS COMPLIANCE MATRIX · § 05 · EVIDENCE PACKAGE · § 06 · REPRO STEPS</div>
           </div>
         </section>
       </div>
@@ -1004,49 +912,38 @@ function view_boot() {
  *  Finding Detail (full-screen, mimics the drawer in the Pencil deck)
  * ═══════════════════════════════════════════════════════════════════════════ */
 function view_finding_detail(ctx) {
-    const id = ctx.params.fid || ctx.params.id || "FND-0042";
+    const id = ctx.params.fid || ctx.params.id;
+    if (!id) { location.hash = "#/projects"; return ""; }
+    // Empty shell — mount_finding_detail fetches /v1/findings/{id} and fills.
     return h`
     <div class="main">
-      <div class="row muted small"><a href="#/projects">← back</a><span>· 21 · Finding Detail</span></div>
-      <div class="finding" style="max-width:900px">
+      <div class="row muted small">
+        <a href="#/projects">← projects</a>
+        <span>·</span>
+        <span id="finding-breadcrumb">finding ${id}</span>
+      </div>
+      <div class="finding" style="max-width:900px" id="finding-card">
         <div class="head">
-          <span class="tag">${id}</span>
-          ${chip("crit")}
-          <span class="tag" style="color:var(--magenta)">CWE-798</span>
-          <span class="tag" style="color:var(--magenta)">OWASP M10</span>
+          <span class="tag" id="finding-id">${id}</span>
+          <span id="finding-chip"></span>
+          <span class="tag" style="color:var(--magenta)" id="finding-cwe"></span>
+          <span class="tag" style="color:var(--magenta)" id="finding-owasp"></span>
           <span class="grow"></span>
-          <span class="badge connected"><span class="dot">●</span>CONFIRMED</span>
+          <span class="badge" id="finding-state"></span>
         </div>
-        <div class="title" style="font-size:20px">Hardcoded AES key in KeyManager.loadKey()</div>
-        <div class="meta">The key you used to encrypt is also in .rodata. Attackers read both.</div>
+        <div class="title" style="font-size:20px" id="finding-title">loading…</div>
+        <div class="meta" id="finding-desc"></div>
         <div style="height:1px;background:var(--border);margin:8px 0"></div>
         <div class="block-label">// EVIDENCE</div>
-        <pre class="code"><span class="ln">42</span>  public static SecretKeySpec loadKey() {
-<span class="ln">43</span>      <span class="crit">byte[] key = "MedusaSays\u0000\u0000".getBytes();</span>
-<span class="ln">44</span>      return new SecretKeySpec(key, "AES");
-<span class="ln">45</span>  }
-<span class="comment">// Ghidra cross-ref: libcrypto.so .rodata 0x1A2F contains the same 12 bytes.</span></pre>
-        <div class="block-label">// AUTO-HOOK (frida)</div>
-        <pre class="code">Java.perform(function () {
-  var KM = Java.use('com.target.crypto.KeyManager');
-  KM.loadKey.implementation = function () {
-    var k = this.loadKey();
-    console.log('[NEXUS] key=' + hex(k.getEncoded()));
-    return k;
-  };
-});</pre>
+        <pre class="code" id="finding-evidence"></pre>
+        <div class="block-label" id="finding-hook-label" style="display:none">// AUTO-HOOK (frida)</div>
+        <pre class="code" id="finding-hook" style="display:none"></pre>
         <div class="row"><div class="block-label mitigation-label">// MITIGATION</div><span class="muted small">— code-level, not vibes</span></div>
-        <div class="mitigation">
-          <div><b>01</b> Delete the hardcoded constant. Generate the key at first run and store it in Android Keystore via <code>KeyGenParameterSpec</code> (StrongBox-backed where available). The key never leaves TEE.</div>
-          <div><b>02</b> If the key must be shared with a backend, use envelope encryption: fetch a DEK over mTLS, wrap it with a Keystore-held KEK. Rotate DEKs per session.</div>
-          <div><b>03</b> Replace AES/CBC with AES/GCM (authenticated). Generate a fresh random IV per message and prepend it to ciphertext. Never static.</div>
-          <div><b>04</b> Invalidate in-flight ciphertext encrypted under the leaked key. Rotate backend-side. Add detection for the old marker bytes and reject.</div>
-        </div>
-        <div class="row">
-          <button class="btn primary">[ RUN HOOK ]</button>
-          <button class="btn">[ COPY REMEDIATION ]</button>
+        <div class="mitigation" id="finding-mitigation"></div>
+        <div class="row" id="finding-actions" style="display:none">
+          <button class="btn primary" id="finding-run-hook">[ RUN HOOK ]</button>
+          <button class="btn" id="finding-copy-mitigation">[ COPY MITIGATION ]</button>
           <span class="grow"></span>
-          <button class="btn danger">[ DISMISS ]</button>
         </div>
       </div>
     </div>`;
@@ -1813,129 +1710,243 @@ function bar(n, max) {
 
 async function mount_project_static(ctx) {
     const id = ctx.params.id;
-    let findings = [];
-    try {
-        findings = await getJSON(`/v1/projects/${encodeURIComponent(id)}/findings`);
-    } catch (e) { /* empty */ }
+    const [project, findings] = await Promise.all([
+        getJSON(`/v1/projects/${encodeURIComponent(id)}`).catch(() => null),
+        getJSON(`/v1/projects/${encodeURIComponent(id)}/findings`).catch(() => []),
+    ]);
 
-    const panel = $$(".panel")[2];  // the findings panel is the 3rd in the Static layout
-    if (!panel) return;
-    const body = panel.querySelector(".panel-body");
-    if (!body) return;
-    if (!findings.length) {
-        body.innerHTML = `<div class="empty-state">no findings yet — static engines are still stubs. JADX/MobSF/Ghidra run on upload but currently emit []. <a href="#/scan">Ingest an APK</a> and check back once detection rules land.</div>`;
-        return;
+    const crumb = $("#static-breadcrumb");
+    if (project && crumb) {
+        crumb.textContent = `🔱 NEXUS / ${id} / static · ${project.package_name || "—"} v${project.version_name || "?"} · sha-256 ${(project.apk_sha256 || "").slice(0, 12)}…`;
     }
-    body.innerHTML = findings.slice(0, 10).map((f) => `
-        <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
-          <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine || "?"}]</span></div>
-          <div class="title">${f.title}</div>
-          <div class="meta">${f.location || "?"} · ${f.cwe_id || ""} ${f.owasp_mobile || ""}</div>
-        </a>`).join("");
+
+    // SDK fingerprint
+    const surface = (project && project.attack_surface) || {};
+    const sdks = surface.sdk_fingerprint || {};
+    const sdkEl = $("#static-sdks");
+    if (sdkEl) {
+        const keys = Object.keys(sdks);
+        if (!keys.length) sdkEl.innerHTML = `<div class="muted small">none recognized — DEX strings didn't match any signature</div>`;
+        else sdkEl.innerHTML = keys.map((k) => `<div class="row"><span class="t-mono" style="color:var(--cyan);flex:1">${k}</span><span class="muted small">${sdks[k]}</span></div>`).join("");
+    }
+
+    // Crypto ops
+    const ops = surface.crypto_operations || [];
+    const cryptoEl = $("#static-crypto");
+    if (cryptoEl) {
+        if (!ops.length) cryptoEl.innerHTML = `<div class="muted small">no cryptographic operations indexed</div>`;
+        else cryptoEl.innerHTML = ops.slice(0, 12).map((op) => `
+            <div class="row" style="padding:4px 0;border-bottom:1px dashed var(--border)">
+              <span class="t-mono small" style="color:${(op.algorithm || "").includes("ECB") ? "var(--sev-crit)" : "var(--cyan)"};flex:1;overflow:hidden;text-overflow:ellipsis">${op.algorithm || "?"}</span>
+              <span class="muted small">${op.key_source || "?"}</span>
+            </div>`).join("");
+    }
+
+    // Findings — with click-to-filter buttons
+    const cnt = $("#static-count");
+    if (cnt) cnt.textContent = `${findings.length} finding(s)`;
+    let activeSev = "";
+    const renderFindings = () => {
+        const list = activeSev ? findings.filter((f) => (f.severity || "").toLowerCase() === activeSev) : findings;
+        const el = $("#static-findings");
+        if (!el) return;
+        $("#static-active-filter").textContent = activeSev ? `severity: ${activeSev}` : "all severities";
+        if (!list.length) {
+            el.innerHTML = `<div class="empty-state">no findings ${activeSev ? "at this severity" : "— ingest an APK or rescan"}</div>`;
+            return;
+        }
+        el.innerHTML = list.map((f) => `
+            <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
+              <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine || "?"}]</span>${f.confirmed ? '<span class="badge connected" style="font-size:9px;padding:2px 6px"><span class="dot">●</span>CONFIRMED</span>' : ""}</div>
+              <div class="title">${f.title}</div>
+              <div class="meta">${f.location || "—"} · ${f.cwe_id || ""} ${f.owasp_mobile || ""} ${f.masvs ? "· " + f.masvs : ""}</div>
+            </a>`).join("");
+    };
+    renderFindings();
+    $$('[data-fsev]').forEach((btn) => btn.addEventListener("click", () => {
+        activeSev = btn.dataset.fsev;
+        $$('[data-fsev]').forEach((b) => b.classList.toggle("primary", b === btn));
+        renderFindings();
+    }));
 }
 
 async function mount_project_dynamic(ctx) {
     const id = ctx.params.id;
-    // Auto-hooks first; fall back to recipes.
-    let hooks = [];
-    if (id) {
-        try { hooks = await getJSON(`/v1/projects/${encodeURIComponent(id)}/hooks`); }
-        catch (e) { /* empty */ }
-    }
-    if (!hooks.length) {
-        try {
-            const recipes = await getJSON("/v1/recipes");
-            hooks = recipes.map((r) => ({ name: r.name, description: r.description, source_finding_id: null }));
-        } catch (e) { /* empty */ }
+    if (!id) return;
+    const [project, hooks] = await Promise.all([
+        getJSON(`/v1/projects/${encodeURIComponent(id)}`).catch(() => null),
+        getJSON(`/v1/projects/${encodeURIComponent(id)}/hooks`).catch(() => []),
+    ]);
+
+    // Breadcrumb with the real package name.
+    const crumb = $("#dyn-breadcrumb");
+    if (crumb && project) {
+        crumb.innerHTML = `🔱 NEXUS / ${id} / dynamic · <span class="t-mono" style="color:var(--cyan)">${escapeHtml(project.package_name || "")}</span>`;
     }
 
-    const panels = $$(".panel");
-    const hooksPanel = panels[0];
-    if (hooksPanel) {
-        const body = hooksPanel.querySelector(".panel-body");
-        if (body) {
+    // Hooks list.
+    const hookEl = $("#dyn-hooks");
+    if (hookEl) {
+        if (!hooks.length) {
+            hookEl.innerHTML = `<div class="muted small">no auto-hooks generated yet — needs at least one CRYPTO / SSL / ROOT / AUTH finding. <a href="#/project/${id}/static">view findings</a></div>`;
+        } else {
             const checked = new Set(hooks.slice(0, Math.min(3, hooks.length)).map((h) => h.name));
-            body.innerHTML = `<div class="muted small">Auto-hooks generated from this project's surface. Untick at your own risk.</div>`
+            hookEl.innerHTML = `<div class="muted small" style="margin-bottom:6px">Generated from this project's surface — ${hooks.length} hook(s).</div>`
                 + hooks.map((h) => {
                     const on = checked.has(h.name);
+                    const isAuto = !!h.source_finding_id;
                     return `
-                    <label class="row" data-hook="${h.name}" style="padding:6px 10px;background:${on ? "var(--bg-accent-panel)" : "var(--bg-panel)"};border:1px solid ${on ? "var(--border-accent)" : "var(--border)"};border-radius:2px;cursor:pointer">
+                    <label class="row" data-hook="${escapeHtml(h.name)}" style="padding:6px 10px;background:${on ? "var(--bg-accent-panel)" : "var(--bg-panel)"};border:1px solid ${on ? "var(--border-accent)" : "var(--border)"};border-radius:2px;cursor:pointer">
                       <input type="checkbox" ${on ? "checked" : ""} style="accent-color:var(--acid)">
-                      <span class="t-mono" style="color:${on ? "var(--acid)" : "var(--muted)"};flex:1">${h.name}</span>
-                      <span class="muted small">${h.source_finding_id ? "auto" : "recipe"}</span>
+                      <span class="t-mono small" style="color:${on ? "var(--acid)" : "var(--cyan)"};flex:1;overflow:hidden;text-overflow:ellipsis">${escapeHtml(h.name)}</span>
+                      <span class="muted small" title="${escapeHtml(h.description || "")}">${isAuto ? "auto" : "recipe"}</span>
                     </label>`;
-                }).join("")
-                + `<div class="row" style="margin-top:10px;gap:8px">
-                     <button class="btn primary" id="dyn-start">[ START SESSION ]</button>
-                     <button class="btn" id="dyn-stop">[ STOP ]</button>
-                     <a class="btn" href="#/recipes">[ + RECIPES ]</a>
-                   </div>`;
+                }).join("");
         }
     }
 
+    // Console — empty until session starts.
+    const consoleEl = $("#dyn-console");
+    if (consoleEl) {
+        const pkg = project?.package_name || "?";
+        consoleEl.innerHTML = `<span class="muted">[NEXUS] target: ${escapeHtml(pkg)} · ${hooks.length} auto-hook(s) ready</span>
+<span class="muted">[NEXUS] click [ START SESSION ] to attach (mock — Frida bindings ship in iter 3)</span>`;
+    }
+
     let activeSession = null;
-    const consolePanel = panels[1];
-    const consoleEl = consolePanel?.querySelector(".panel-body.console");
     const renderLog = (lines) => {
         if (!consoleEl) return;
         consoleEl.innerHTML = lines.map((l) => `<div><span class="${classifyTraceClass(l.channel)}">${escapeHtml(l.line)}</span></div>`).join("")
             || `<span class="muted">no events</span>`;
     };
 
-    const startBtn = $("#dyn-start");
-    const stopBtn = $("#dyn-stop");
-    if (startBtn && id) {
-        startBtn.addEventListener("click", async () => {
-            const selected = $$('label[data-hook] input[type="checkbox"]')
-                .map((c, i) => c.checked ? $$('label[data-hook]')[i].dataset.hook : null)
-                .filter(Boolean);
-            startBtn.textContent = "[ STARTING… ]";
-            const fd = new FormData(); fd.append("hooks", selected.join(","));
-            const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/start`, { method: "POST", body: fd });
-            const j = await r.json();
-            if (!r.ok) { startBtn.textContent = "[ FAILED ]"; startBtn.style.color = "var(--sev-crit)"; return; }
-            activeSession = j.session_id;
-            startBtn.textContent = `[ ATTACHED · ${activeSession} ]`;
-            startBtn.style.color = "var(--acid)";
+    $("#dyn-start")?.addEventListener("click", async () => {
+        const selected = [];
+        $$('label[data-hook]').forEach((label) => {
+            const cb = label.querySelector('input[type="checkbox"]');
+            if (cb && cb.checked) selected.push(label.dataset.hook);
+        });
+        const btn = $("#dyn-start");
+        btn.textContent = "[ STARTING… ]";
+        const fd = new FormData(); fd.append("hooks", selected.join(","));
+        const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/start`, { method: "POST", body: fd });
+        const j = await r.json();
+        if (!r.ok) { btn.textContent = "[ FAILED ]"; btn.style.color = "var(--sev-crit)"; return; }
+        activeSession = j.session_id;
+        btn.textContent = `[ ATTACHED · ${activeSession} ]`;
+        btn.style.color = "var(--acid)";
+        renderLog(j.log);
+    });
+    $("#dyn-stop")?.addEventListener("click", async () => {
+        if (!activeSession) return;
+        const fd = new FormData(); fd.append("session_id", activeSession);
+        const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/stop`, { method: "POST", body: fd });
+        const j = await r.json();
+        if (r.ok) {
+            $("#dyn-stop").textContent = "[ DETACHED ]";
             renderLog(j.log);
-        });
-    }
-    if (stopBtn && id) {
-        stopBtn.addEventListener("click", async () => {
-            if (!activeSession) return;
-            const fd = new FormData(); fd.append("session_id", activeSession);
-            const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/stop`, { method: "POST", body: fd });
-            const j = await r.json();
-            if (r.ok) { stopBtn.textContent = "[ DETACHED ]"; renderLog(j.log); }
-        });
-    }
+        }
+    });
 }
 
 async function mount_project_network(ctx) {
     const id = ctx.params.id;
-    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/traffic`).catch(() => null);
-    if (!data) return;
-    if (!data.captured.length) return; // keep the demo rows from the view
-    const panel = $$(".panel")[0];
-    const body = panel?.querySelector(".panel-body.tight");
-    if (!body) return;
-    body.innerHTML = `
-      <div class="table-hdr" style="grid-template-columns: 50px 180px 1fr 70px 80px 60px 90px">
-        <span>M</span><span>HOST</span><span>PATH</span><span>STATUS</span><span>SIZE</span><span>MS</span><span>FLAGS</span>
-      </div>` + data.captured.map((row) => {
-        const m = row.method || "GET";
-        const sev = row.severity || "info";
-        return `
-          <a class="table-row" href="#/project/${encodeURIComponent(id)}/api-map" style="grid-template-columns: 50px 180px 1fr 70px 80px 60px 90px;text-decoration:none;color:inherit">
-            <span class="t-mono" style="color:${m === "POST" ? "var(--acid)" : "var(--cyan)"};font-weight:700">${m}</span>
-            <span class="t-mono" style="color:var(--cyan)">${row.host || "?"}</span>
-            <span class="t-mono" style="color:var(--cyan)">${row.path || "/"}</span>
-            <span class="t-mono" style="color:var(--${(row.status || 0) < 300 ? "acid" : (row.status || 0) < 500 ? "sev-high" : "sev-crit"});font-weight:700">${row.status || "—"}</span>
-            <span class="t-muted">${fmtBytes(row.size || 0)}</span>
-            <span class="t-muted">${row.ms || "—"}</span>
-            <span style="font-size:9px;color:var(--sev-${sev});font-weight:700">${(row.flags || []).map((f) => "[" + f + "]").join("")}</span>
-          </a>`;
-    }).join("");
+    if (!id) return;
+    const [project, apimap, sslmap, traffic, findings] = await Promise.all([
+        getJSON(`/v1/projects/${encodeURIComponent(id)}`).catch(() => null),
+        getJSON(`/v1/projects/${encodeURIComponent(id)}/api-map`).catch(() => ({tree: {}, endpoints: [], flagged: []})),
+        getJSON(`/v1/projects/${encodeURIComponent(id)}/ssl-map`).catch(() => ({pinning_detected: false, library: "—", rows: []})),
+        getJSON(`/v1/projects/${encodeURIComponent(id)}/traffic`).catch(() => ({captured: []})),
+        getJSON(`/v1/projects/${encodeURIComponent(id)}/findings?category=network-security`).catch(() => []),
+    ]);
+
+    const surface = (project && project.attack_surface) || {};
+    const cleartext = (project?.uses_cleartext_traffic === true) || surface.uses_cleartext_traffic === true
+        // The project model doesn't store the manifest flag separately — derive
+        // from whether any apktool finding flagged it.
+        || (findings.some((f) => /cleartext/i.test(f.title || "")));
+
+    // Breadcrumb
+    const crumb = $("#net-breadcrumb");
+    if (crumb && project) {
+        crumb.innerHTML = `🔱 NEXUS / ${id} / network · <span class="t-mono" style="color:var(--cyan)">${escapeHtml(project.package_name || "")}</span>`;
+    }
+
+    // Metric cards
+    const ec = (apimap.endpoints || []).length;
+    $("#net-endpoints-count").textContent = String(ec).padStart(2, "0");
+    $("#net-endpoints-count").className = "metric-value " + (ec ? "cyan" : "");
+    $("#net-endpoints-sub").textContent = ec ? `${Object.keys(apimap.tree || {}).length} host(s)` : "none — needs Burp capture or static URL extraction";
+
+    const tc = (traffic.captured || []).length;
+    $("#net-traffic-count").textContent = String(tc).padStart(2, "0");
+    $("#net-traffic-count").className = "metric-value " + (tc ? "acid" : "");
+    $("#net-traffic-sub").textContent = tc ? "captured" : "no Burp data yet";
+
+    const sslMetric = $("#net-ssl");
+    sslMetric.textContent = sslmap.pinning_detected ? "ON" : "—";
+    sslMetric.className = "metric-value " + (sslmap.pinning_detected ? "acid" : "");
+    $("#net-ssl-sub").textContent = sslmap.library || "none";
+
+    const ctMetric = $("#net-cleartext");
+    ctMetric.textContent = cleartext ? "YES" : "no";
+    ctMetric.className = "metric-value " + (cleartext ? "crit" : "acid");
+    $("#net-cleartext-sub").textContent = cleartext ? "android:usesCleartextTraffic=true" : "TLS only";
+
+    // Endpoints panel — host tree if we have any.
+    const epEl = $("#net-endpoints");
+    const tree = apimap.tree || {};
+    const hosts = Object.keys(tree).sort();
+    if (!hosts.length) {
+        epEl.innerHTML = `<div class="empty-state">no API endpoints discovered yet — drop a Burp session into the workspace or wait for static URL extraction (iter 3).</div>`;
+    } else {
+        epEl.innerHTML = hosts.map((host) => {
+            const paths = Object.keys(tree[host]).sort();
+            return `
+              <div style="margin-bottom:10px">
+                <div class="t-mono" style="color:var(--cyan);font-weight:700">▾ ${escapeHtml(host)}</div>
+                ${paths.slice(0, 12).map((p) => `<div class="t-mono small" style="padding-left:18px">${tree[host][p].map((m) => `<span class="chip ${m === "POST" ? "high" : "info"}" style="font-size:9px">${m}</span>`).join(" ")} ${escapeHtml(p)}</div>`).join("")}
+              </div>`;
+        }).join("");
+    }
+
+    // Traffic panel
+    const tEl = $("#net-traffic");
+    $("#net-traffic-meta").textContent = tc ? `${tc} request(s)` : "no traffic captured yet";
+    if (!tc) {
+        tEl.innerHTML = `<div class="empty-state">no captured traffic — start a Burp session and proxy the device through it. The events will land in the dynamic_events table and surface here.</div>`;
+    } else {
+        tEl.innerHTML = `
+          <div class="table-hdr" style="grid-template-columns: 60px 180px 1fr 70px 80px 60px 100px">
+            <span>M</span><span>HOST</span><span>PATH</span><span>STATUS</span><span>SIZE</span><span>MS</span><span>FLAGS</span>
+          </div>` + traffic.captured.map((row) => {
+            const m = row.method || "GET";
+            const sev = row.severity || "info";
+            return `
+              <div class="table-row" style="grid-template-columns: 60px 180px 1fr 70px 80px 60px 100px">
+                <span class="t-mono" style="color:${m === "POST" ? "var(--acid)" : "var(--cyan)"};font-weight:700">${escapeHtml(m)}</span>
+                <span class="t-mono" style="color:var(--cyan)">${escapeHtml(row.host || "?")}</span>
+                <span class="t-mono" style="color:var(--cyan)">${escapeHtml(row.path || "/")}</span>
+                <span class="t-mono" style="color:var(--${(row.status || 0) < 300 ? "acid" : (row.status || 0) < 500 ? "sev-high" : "sev-crit"});font-weight:700">${row.status || "—"}</span>
+                <span class="t-muted">${fmtBytes(row.size || 0)}</span>
+                <span class="t-muted">${row.ms || "—"}</span>
+                <span style="font-size:9px;color:var(--sev-${sev});font-weight:700">${(row.flags || []).map((f) => "[" + escapeHtml(f) + "]").join("")}</span>
+              </div>`;
+        }).join("");
+    }
+
+    // Findings panel
+    const fEl = $("#net-findings");
+    if (!findings.length) {
+        fEl.innerHTML = `<div class="empty-state">no network-category findings</div>`;
+    } else {
+        fEl.innerHTML = findings.map((f) => `
+          <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
+            <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
+            <div class="title">${escapeHtml(f.title)}</div>
+            <div class="meta">${escapeHtml(f.location || "—")} · ${f.cwe_id || ""} ${f.owasp_mobile || ""}</div>
+          </a>`).join("");
+    }
 }
 
 async function mount_device_pull() {
@@ -2203,7 +2214,7 @@ function view_adb() {
       ${sectionHeader("A", "ADB // CONTROL PANEL", "ANDROID DEBUG BRIDGE")}
       <div id="adb-bar"></div>
 
-      <div class="row" style="align-items:flex-start;gap:14px">
+      <div class="split-with-aside">
         <div class="col grow" style="min-width:0">
 
           <section class="panel">
@@ -2388,8 +2399,8 @@ function view_adb() {
 
         </div>
 
-        <!-- COMMAND LOG (sticky right pane) -->
-        <section class="panel" style="width:460px;flex:none;position:sticky;top:12px">
+        <!-- COMMAND LOG (right pane on wide screens, drops below on narrow) -->
+        <section class="panel aside">
           <div class="panel-head"><span>// COMMAND LOG · live</span><span class="spacer"></span><button class="btn" id="adb-log-clear">[ CLEAR ]</button><label class="row" style="gap:4px;margin-left:8px"><input type="checkbox" id="adb-log-auto" checked style="accent-color:var(--acid)"><span class="muted small">auto-poll · 2s</span></label></div>
           <div class="panel-body" id="adb-log-body" style="max-height:80vh;overflow:auto;font-size:11px;line-height:1.45"></div>
         </section>
@@ -3118,55 +3129,84 @@ async function mount_settings() {
 
 async function mount_finding_detail(ctx) {
     const fid = ctx.params.fid || ctx.params.id;
-    let finding = null;
+    if (!fid) return;
+
+    // Try to fetch the real finding. If it 404s, render an honest empty state
+    // instead of letting the demo placeholder linger.
+    let finding;
     try {
         finding = await getJSON(`/v1/findings/${encodeURIComponent(fid)}`);
-        const title = $(".finding .title");
-        const meta = $(".finding .meta");
-        const code = $$(".finding .code")[0];
-        const hookCode = $$(".finding .code")[1];
-        const mit = $(".finding .mitigation");
-        if (title) title.textContent = finding.title;
-        if (meta) meta.textContent = `${finding.location || ""} · ${finding.cwe_id || ""} ${finding.owasp_mobile || ""} · engine: ${finding.source_engine}`;
-        if (code) code.textContent = finding.evidence || "(no evidence)";
-        if (hookCode && finding.suggested_hook) hookCode.textContent = finding.suggested_hook;
-        if (mit && finding.remediation) {
-            mit.innerHTML = finding.remediation.split("\n").map((line, i) => `<div><b>${String(i + 1).padStart(2, "0")}</b> ${escapeHtml(line)}</div>`).join("");
+    } catch (e) {
+        const card = $("#finding-card");
+        if (card) {
+            card.innerHTML = `
+              <div class="head"><span class="tag" style="color:var(--sev-crit)">404</span><span>finding not found</span></div>
+              <div class="meta">no finding with id <code>${fid}</code> in any stored project. <a href="#/projects">back to projects</a></div>`;
         }
-        // Confirmed badge
-        const confirmedBadge = $(".finding .badge");
-        if (confirmedBadge) {
-            confirmedBadge.classList.toggle("connected", !!finding.confirmed);
-            confirmedBadge.classList.toggle("scanning", !finding.confirmed);
-            confirmedBadge.innerHTML = `<span class="dot">●</span>${finding.confirmed ? "CONFIRMED" : "STATIC ONLY"}`;
-        }
-    } catch (e) { /* fall back to demo content */ }
+        return;
+    }
 
-    // Wire action buttons regardless of whether we got real data.
-    const buttons = $$(".finding .btn");
-    buttons.forEach((btn) => {
-        const t = btn.textContent.trim().toUpperCase();
-        if (t.includes("RUN HOOK")) {
-            btn.addEventListener("click", () => {
-                const hookCode = $$(".finding .code")[1];
-                if (!hookCode || !hookCode.textContent.trim()) { btn.textContent = "[ NO HOOK ]"; return; }
-                btn.textContent = "[ HOOK PUSHED ]";
-                btn.style.color = "var(--acid)";
-            });
-        } else if (t.includes("COPY REMEDIATION")) {
-            btn.addEventListener("click", async () => {
-                const text = $(".finding .mitigation")?.innerText || "";
-                try { await navigator.clipboard.writeText(text); btn.textContent = "[ COPIED ✓ ]"; btn.style.color = "var(--acid)"; }
-                catch (e) { btn.textContent = "[ CLIPBOARD BLOCKED ]"; btn.style.color = "var(--sev-high)"; }
-            });
-        } else if (t.includes("DISMISS")) {
-            btn.addEventListener("click", async () => {
-                const r = await fetch(`/v1/findings/${encodeURIComponent(fid)}/dismiss`, { method: "POST" });
-                if (r.ok) { btn.textContent = "[ DISMISSED ]"; btn.style.color = "var(--muted)"; }
-                else { btn.textContent = "[ FAILED ]"; }
-            });
+    const sev = (finding.severity || "info").toLowerCase();
+    const sevClass = ["crit", "high", "med", "low", "info"].includes(sev) ? sev :
+                     (sev === "critical" ? "crit" : sev === "medium" ? "med" : "info");
+
+    setText("finding-id", finding.id);
+    setText("finding-title", finding.title);
+    setText("finding-desc", finding.description || "");
+    setText("finding-cwe", finding.cwe_id ? finding.cwe_id : "");
+    setText("finding-owasp", finding.owasp_mobile ? `OWASP ${finding.owasp_mobile}` : "");
+
+    const chipEl = $("#finding-chip");
+    if (chipEl) chipEl.innerHTML = `<span class="chip ${sevClass}">${sevClass.toUpperCase()}</span>`;
+
+    const stateEl = $("#finding-state");
+    if (stateEl) {
+        stateEl.classList.toggle("connected", !!finding.confirmed);
+        stateEl.classList.toggle("scanning", !finding.confirmed);
+        stateEl.innerHTML = `<span class="dot">●</span>${finding.confirmed ? "CONFIRMED" : "STATIC ONLY"}`;
+    }
+
+    const evidenceEl = $("#finding-evidence");
+    if (evidenceEl) evidenceEl.textContent = finding.evidence || "(no evidence captured)";
+
+    if (finding.suggested_hook) {
+        const hl = $("#finding-hook-label"); if (hl) hl.style.display = "";
+        const hookEl = $("#finding-hook");
+        if (hookEl) { hookEl.style.display = ""; hookEl.textContent = finding.suggested_hook; }
+    }
+
+    const mitEl = $("#finding-mitigation");
+    if (mitEl) {
+        if (finding.remediation && finding.remediation.trim()) {
+            mitEl.innerHTML = finding.remediation
+                .split("\n").filter((l) => l.trim())
+                .map((line, i) => `<div><b>${String(i + 1).padStart(2, "0")}</b> ${escapeHtml(line)}</div>`).join("");
+        } else {
+            mitEl.innerHTML = `<div class="muted small">— no remediation captured (low/info finding).</div>`;
         }
+    }
+
+    const actions = $("#finding-actions");
+    if (actions) actions.style.display = "";
+
+    const runHookBtn = $("#finding-run-hook");
+    if (runHookBtn) runHookBtn.addEventListener("click", () => {
+        if (!finding.suggested_hook) { runHookBtn.textContent = "[ NO HOOK ]"; return; }
+        runHookBtn.textContent = "[ HOOK READY · paste into /#/dynamic ]";
+        runHookBtn.style.color = "var(--acid)";
     });
+
+    const copyBtn = $("#finding-copy-mitigation");
+    if (copyBtn) copyBtn.addEventListener("click", async () => {
+        const text = finding.remediation || "";
+        try { await navigator.clipboard.writeText(text); copyBtn.textContent = "[ COPIED ✓ ]"; copyBtn.style.color = "var(--acid)"; }
+        catch { copyBtn.textContent = "[ CLIPBOARD BLOCKED ]"; copyBtn.style.color = "var(--sev-high)"; }
+    });
+}
+
+function setText(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
 }
 
 async function mount_report(ctx) {
@@ -3176,14 +3216,58 @@ async function mount_report(ctx) {
     let targetId = (queryProj && decodeURIComponent(queryProj))
         || ctx.params.id
         || projects[0]?.id;
+    let activeTemplate = "technical";
     if (!targetId && !projects.length) {
         const main = $(".main");
         if (main) main.insertAdjacentHTML("afterbegin", `<div class="empty-state" style="margin-bottom:8px;color:var(--sev-high)">no projects yet — <a href="#/scan">ingest one</a></div>`);
     }
 
+    // ── live report preview from the chosen project ──
+    const previewHead = $("#report-preview-head");
+    const preview = $("#report-preview");
+    if (preview) {
+        if (!targetId) {
+            preview.innerHTML = `<div class="empty-state"><span class="muted small uppercase">no project picked yet</span></div>`;
+        } else {
+            try {
+                const project = await getJSON(`/v1/projects/${encodeURIComponent(targetId)}`);
+                const findings = (project.attack_surface?.findings || []);
+                const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+                const top = findings
+                    .filter((f) => f.remediation && f.remediation.trim())
+                    .sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9))
+                    .slice(0, 8);
+
+                if (previewHead) previewHead.textContent = `// PREVIEW · ${project.package_name} v${project.version_name} · ${findings.length} findings`;
+
+                preview.innerHTML = `
+                  <div style="font-size:20px;color:var(--cyan);font-weight:700;letter-spacing:2px">MEDUSA NEXUS // ${activeTemplate.toUpperCase()} ASSESSMENT</div>
+                  <div class="muted small">target: ${project.package_name} v${project.version_name} · SHA-256 ${(project.apk_sha256 || "").slice(0, 16)}… · ${(project.created_at || "").slice(0, 10)}</div>
+                  <div class="gradient-underline"></div>
+                  <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · EXECUTIVE SUMMARY</div>
+                  <div>Risk ${(project.risk_score ?? 0).toFixed(1)}/100. ${
+                      Object.entries(project.findings_by_severity || {})
+                          .filter(([, n]) => n)
+                          .map(([sev, n]) => `${n} ${sev}`).join(", ") || "no findings"
+                  }.</div>
+                  <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 02 · MITIGATION PLAYBOOK — mandatory section</div>
+                  <div class="mitigation">
+                    ${top.length ? top.map((f) => {
+                        const sev = (f.severity || "info").toLowerCase();
+                        const cls = sev === "critical" ? "crit" : sev === "medium" ? "med" : sev;
+                        const firstLine = f.remediation.split("\n").find((l) => l.trim()) || "";
+                        return `<div class="row" style="align-items:flex-start;gap:10px"><span class="chip ${cls}">${cls.toUpperCase()}</span><div><b>${f.id} · ${f.title}</b><br>→ ${escapeHtml(firstLine)}</div></div>`;
+                    }).join("") : `<div class="muted small">no actionable findings yet — run static engines.</div>`}
+                  </div>
+                  <div class="muted small">§ 03 · FINDINGS DETAIL · § 04 · OWASP MASVS COMPLIANCE MATRIX · § 05 · EVIDENCE PACKAGE · § 06 · REPRO STEPS</div>`;
+            } catch (e) {
+                preview.innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">failed to load project ${targetId}: ${e.message}</span></div>`;
+            }
+        }
+    }
+
     // Template selector — make all rows clickable.
     const tmplRows = $$(".panel:first-of-type .panel-body .row");
-    let activeTemplate = "technical";
     tmplRows.forEach((row) => {
         const txt = row.textContent.trim().toLowerCase();
         const tmpl = txt.includes("executive") ? "executive"
@@ -4097,6 +4181,9 @@ async function renderRoute() {
     if (typeof hit.route.mount === "function") {
         try { await hit.route.mount(ctx); } catch (e) { console.error("mount failed:", e); }
     }
+    // Project-scoped routes share a tab bar with rescan/refresh buttons —
+    // bind them once after every mount has finished rebuilding the DOM.
+    if (pathPart.startsWith("project/")) bindProjectTabActions();
     document.title = `🔱 MEDUSA::NEXUS / ${pathPart}`;
 }
 
@@ -4110,10 +4197,95 @@ function tickClock() {
     if (el) el.textContent = `${iso} · ${t} UTC`;
 }
 
+/* ─── sidebar toggle (collapsed / open / hidden) ───
+ *
+ * Three modes share one element:
+ *   - desktop wide       : default `open`     — full 260px sidebar
+ *   - desktop narrow     : `collapsed`        — icon-only 60px rail
+ *   - mobile (<=768px)   : `collapsed/hidden` = drawer closed
+ *                          (no class)        = drawer open (slides in)
+ *
+ * The CSS handles all three via `.collapsed` / `.hidden` modifiers on
+ * `#body-grid`. We persist the desktop preference in localStorage; on mobile
+ * the drawer always boots closed.
+ */
+const SIDEBAR_KEY = "nexus.sidebar";
+
+function isMobileViewport() {
+    return window.matchMedia("(max-width: 768px)").matches;
+}
+
+function applySidebarState(state) {
+    const grid = $("#body-grid");
+    if (!grid) return;
+    grid.classList.toggle("collapsed", state === "collapsed");
+    grid.classList.toggle("hidden",    state === "hidden");
+}
+
+function loadSidebarState() {
+    if (isMobileViewport()) return "collapsed"; // boot the drawer closed
+    try { return localStorage.getItem(SIDEBAR_KEY) || "open"; }
+    catch (e) { return "open"; }
+}
+
+function toggleSidebar() {
+    const grid = $("#body-grid");
+    if (!grid) return;
+    const mobile = isMobileViewport();
+    let next;
+    if (mobile) {
+        // Mobile: cycle drawer open ↔ closed.
+        next = grid.classList.contains("collapsed") || grid.classList.contains("hidden")
+            ? "open" : "collapsed";
+    } else {
+        // Desktop: cycle collapsed ↔ open.
+        next = grid.classList.contains("collapsed") ? "open" : "collapsed";
+        try { localStorage.setItem(SIDEBAR_KEY, next); } catch (e) {}
+    }
+    applySidebarState(next);
+}
+
+function initSidebar() {
+    applySidebarState(loadSidebarState());
+    $("#sidebar-toggle")?.addEventListener("click", toggleSidebar);
+
+    // ⌘B / ctrl+B keyboard toggle.
+    window.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b" && !e.shiftKey) {
+            e.preventDefault(); toggleSidebar();
+        }
+    });
+
+    // On mobile: tapping a nav item closes the drawer; tapping the backdrop too.
+    $$('.sidebar .nav-item').forEach((el) => el.addEventListener("click", () => {
+        if (isMobileViewport()) applySidebarState("collapsed");
+    }));
+    document.addEventListener("click", (e) => {
+        if (!isMobileViewport()) return;
+        const grid = $("#body-grid");
+        if (!grid || grid.classList.contains("collapsed") || grid.classList.contains("hidden")) return;
+        // If the click was outside both the sidebar and the toggle, close.
+        if (e.target.closest(".sidebar")) return;
+        if (e.target.closest("#sidebar-toggle")) return;
+        applySidebarState("collapsed");
+    });
+
+    // Re-evaluate on resize (going from mobile→desktop should restore the
+    // user's previous desktop preference instead of leaving the drawer open).
+    let lastMobile = isMobileViewport();
+    window.addEventListener("resize", () => {
+        const mobile = isMobileViewport();
+        if (mobile === lastMobile) return;
+        lastMobile = mobile;
+        applySidebarState(loadSidebarState());
+    });
+}
+
 /* ─── bootstrap ─── */
 window.addEventListener("hashchange", renderRoute);
 window.addEventListener("DOMContentLoaded", () => {
     if (!location.hash) location.replace("#/dashboard");
+    initSidebar();
     renderRoute();
     tickClock();
     setInterval(tickClock, 1000);
