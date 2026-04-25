@@ -65,3 +65,26 @@ def test_devices_shell_form_required(isolated_client: TestClient) -> None:
     """`cmd` is mandatory."""
     r = isolated_client.post("/v1/devices/anything/shell")
     assert r.status_code == 422
+
+
+def test_screencap_returns_503_with_diagnostics_when_no_device(isolated_client: TestClient) -> None:
+    """Pin the diagnostic envelope so the SPA banner has the keys it expects."""
+    r = isolated_client.get("/v1/devices/totally-fake-serial/screencap.png")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["detail"]["error"] == "screencap_failed"
+    assert "exec_out" in body["detail"]
+    assert "temp_file" in body["detail"]
+    assert "hint" in body["detail"]
+
+
+def test_screencap_debug_returns_both_path_attempts(isolated_client: TestClient) -> None:
+    """The debug endpoint must report exec-out + temp-file diag, even on failure."""
+    r = isolated_client.get("/v1/devices/totally-fake-serial/screencap-debug")
+    assert r.status_code == 200
+    body = r.json()
+    for key in ("exec_out", "temp_file", "picked"):
+        assert key in body
+    assert body["exec_out"]["ok"] is False
+    assert body["temp_file"]["ok"] is False
+    assert body["picked"] == "none"
