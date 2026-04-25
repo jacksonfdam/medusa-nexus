@@ -64,37 +64,66 @@ body::before {
 
 /* ─── layout shell ─── */
 .topbar {
-    position: sticky; top: 0; z-index: 10;
-    display: flex; align-items: center; gap: 24px;
+    position: sticky; top: 0; z-index: 50;
+    display: flex; align-items: center; gap: 16px;
     padding: 12px 20px;
     background: var(--bg-base);
     border-bottom: 1px solid var(--border);
 }
+.sidebar-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--cyan);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    text-decoration: none;
+    flex: none;
+    transition: border-color 120ms, background 120ms;
+}
+.sidebar-toggle:hover { border-color: var(--border-hover); background: var(--bg-panel-hover); }
 .brand {
     font-weight: 700; letter-spacing: 3px; font-size: 16px;
     color: var(--cyan); text-shadow: 0 0 8px rgba(0, 255, 255, 0.5);
     text-decoration: none;
+    white-space: nowrap;
 }
-.version { font-size: 11px; letter-spacing: 1px; color: var(--muted); }
+.version { font-size: 11px; letter-spacing: 1px; color: var(--muted); white-space: nowrap; }
 .spacer { flex: 1; }
-.clock { font-size: 12px; letter-spacing: 1px; color: var(--muted); }
+.clock { font-size: 12px; letter-spacing: 1px; color: var(--muted); white-space: nowrap; }
 
+/* ─── two layout modes share `.body-grid`. Width transitions for the open/close animation. */
 .body-grid {
     display: grid;
     grid-template-columns: 260px 1fr;
     min-height: calc(100vh - 49px);
+    transition: grid-template-columns 220ms ease;
 }
+.body-grid.collapsed { grid-template-columns: 60px 1fr; }
+.body-grid.hidden    { grid-template-columns: 0 1fr; }
 
 .sidebar {
     background: var(--bg-base);
     border-right: 1px solid var(--border);
     padding: 20px;
     display: flex; flex-direction: column; gap: 8px;
+    overflow: hidden;
+    transition: padding 220ms ease;
+    min-width: 0;
 }
+.body-grid.collapsed .sidebar { padding: 16px 8px; }
+.body-grid.hidden    .sidebar { padding: 0; border-right: 0; }
+
 .sidebar-label {
     font-size: 10px; font-weight: 700; letter-spacing: 3px;
     color: var(--muted); margin-bottom: 4px;
+    white-space: nowrap;
 }
+.body-grid.collapsed .sidebar-label { display: none; }
+
 .nav-item {
     display: flex; align-items: center; gap: 10px;
     padding: 10px 14px;
@@ -105,6 +134,8 @@ body::before {
     border-radius: var(--radius);
     cursor: pointer;
     text-decoration: none;
+    overflow: hidden;
+    white-space: nowrap;
 }
 .nav-item:hover { background: var(--bg-panel-hover); border-color: var(--border-hover); }
 .nav-item.active {
@@ -112,12 +143,46 @@ body::before {
     border-color: var(--border-accent);
     color: var(--acid);
 }
-.nav-item .arrow { display: inline-block; width: 14px; font-weight: 700; }
-.nav-item .name { flex: 1; }
-.nav-item .count { font-size: 10px; font-weight: 700; }
+.nav-item .arrow { display: inline-block; width: 14px; font-weight: 700; flex: none; }
+.nav-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.nav-item .count { font-size: 10px; font-weight: 700; flex: none; }
 .nav-item.active .count { color: var(--acid); }
 
-.main { padding: 24px; display: flex; flex-direction: column; gap: 24px; }
+/* Collapsed sidebar: icon-only nav items.
+   Text + count slide out, the row becomes a square. */
+.body-grid.collapsed .nav-item {
+    padding: 10px 0;
+    justify-content: center;
+}
+.body-grid.collapsed .nav-item .name { display: none; }
+.body-grid.collapsed .nav-item .count { display: none; }
+.body-grid.collapsed .nav-item .arrow { width: auto; }
+
+/* Tooltip (uses native title attr — set in JS — but we make it pretty). */
+.body-grid.collapsed .nav-item { position: relative; }
+.body-grid.collapsed .nav-item:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    left: calc(100% + 8px);
+    top: 50%;
+    transform: translateY(-50%);
+    padding: 4px 10px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-accent);
+    border-radius: var(--radius);
+    color: var(--acid);
+    font-size: 11px;
+    letter-spacing: 2px;
+    white-space: nowrap;
+    z-index: 60;
+    pointer-events: none;
+}
+
+.main {
+    padding: 24px;
+    display: flex; flex-direction: column; gap: 24px;
+    min-width: 0; /* lets children with overflow shrink properly inside the grid */
+}
 
 .footer {
     text-align: center; padding: 24px;
@@ -552,11 +617,147 @@ body::before {
 }
 .key-grid .btn { padding: 6px; font-size: 11px; }
 
-/* ─── responsive ─── */
-@media (max-width: 900px) {
+/* ─── responsive ──────────────────────────────────────────────────────
+ * Breakpoints: 1280 / 1024 / 768 / 540.
+ * The sidebar can be collapsed manually at any width via the [☰] button;
+ * below 768px it switches to "drawer" mode and slides over the content.
+ */
+
+/* fluid grids — work everywhere, scale with available width */
+.metrics       { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.projects      { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.recipes-grid  { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+
+/* tabs: scroll horizontally instead of wrapping into garbage */
+.tab-bar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    scrollbar-width: thin;
+}
+.tab { white-space: nowrap; flex: none; }
+
+/* keep the right-pane sticky panels (e.g. ADB log) in their own column,
+   but allow them to drop below content on narrow screens */
+.split-with-aside { display: flex; gap: 14px; align-items: flex-start; }
+.split-with-aside > .aside { width: 460px; flex: none; position: sticky; top: 12px; }
+
+/* Tablet ── narrower sidebar, smaller panel padding */
+@media (max-width: 1280px) {
+    .body-grid { grid-template-columns: 220px 1fr; }
+    .body-grid.collapsed { grid-template-columns: 60px 1fr; }
+    .main { padding: 20px; gap: 18px; }
+    .section-header .ascii { font-size: 56px; }
+    .section-header .title { font-size: 20px; }
+}
+
+/* Small laptop ── ADB panel becomes column-stacked, tighter typography */
+@media (max-width: 1024px) {
+    .topbar { gap: 12px; padding: 10px 14px; }
+    .body-grid { grid-template-columns: 200px 1fr; }
+    .main { padding: 16px; gap: 16px; }
+
+    /* Right-aside sticky panels (ADB log etc.) collapse below the main column */
+    .split-with-aside { flex-direction: column; }
+    .split-with-aside > .aside { width: 100%; position: static; }
+
+    /* Compact panel padding */
+    .panel-body { padding: 12px; }
+    .panel-head { padding: 8px 12px; }
+    .table-hdr, .table-row { padding: 8px 12px; gap: 8px; }
+}
+
+/* device-detail (mirror beside metadata) → stacks under tablet width */
+@media (max-width: 1024px) {
+    .device-detail { grid-template-columns: 1fr; }
+    .key-grid { grid-template-columns: repeat(6, 1fr); }
+}
+@media (max-width: 540px) {
+    .key-grid { grid-template-columns: repeat(4, 1fr); }
+}
+
+/* Tablet portrait ── sidebar slides in as overlay drawer.
+ * The grid collapses to a single column; the sidebar is positioned-fixed
+ * and slides in from the left when the toggle is clicked. */
+@media (max-width: 768px) {
     .body-grid { grid-template-columns: 1fr; }
-    .sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
-    .metrics { grid-template-columns: repeat(2, 1fr); }
-    .projects, .recipes-grid { grid-template-columns: 1fr; }
-    .owasp-row { grid-template-columns: 1fr; }
+    .body-grid.collapsed { grid-template-columns: 1fr; }
+    .body-grid.hidden { grid-template-columns: 1fr; }
+
+    .sidebar {
+        position: fixed;
+        top: 49px;
+        left: 0;
+        bottom: 0;
+        width: 240px;
+        z-index: 40;
+        transform: translateX(-100%);
+        transition: transform 220ms ease;
+        box-shadow: 4px 0 16px rgba(0, 0, 0, 0.6);
+        padding: 16px;
+    }
+    .body-grid:not(.collapsed):not(.hidden) .sidebar { transform: translateX(0); }
+    .body-grid.collapsed .sidebar { transform: translateX(-100%); }
+    .body-grid.hidden    .sidebar { transform: translateX(-100%); }
+
+    /* On mobile, the [☰] toggle never produces an icon-only sidebar — it's
+       either fully open as a drawer, or fully hidden. Restore label visibility. */
+    .body-grid .nav-item .name,
+    .body-grid .nav-item .count { display: inherit; }
+    .body-grid .nav-item { padding: 10px 14px; justify-content: flex-start; }
+    .body-grid .nav-item .arrow { width: 14px; }
+    .body-grid .sidebar-label { display: block; }
+
+    /* backdrop while drawer is open */
+    .body-grid:not(.collapsed):not(.hidden)::before {
+        content: "";
+        position: fixed;
+        inset: 49px 0 0 0;
+        background: rgba(0, 0, 0, 0.55);
+        z-index: 30;
+    }
+
+    /* Tighter chrome */
+    .topbar { gap: 10px; padding: 10px 12px; }
+    .brand { font-size: 14px; letter-spacing: 2px; }
+    .version, .clock { display: none; }
+
+    /* Project tabs are horizontally scrollable already; the page chrome */
+    .section-header { flex-wrap: wrap; align-items: center; }
+    .section-header .ascii { font-size: 40px; letter-spacing: -2px; }
+    .section-header .title { font-size: 16px; letter-spacing: 1px; }
+
+    /* Metric cards lay out 2-up */
+    .metrics { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .metric-value { font-size: 28px; }
+
+    /* Dropzone shrinks */
+    .dropzone { padding: 24px; min-height: 220px; }
+    .dropzone .heading { font-size: 18px; letter-spacing: 2px; }
+
+    /* Tables: drop the typed grid templates and let cells stack — call sites
+       set inline grid-template-columns; we override globally to wrap. */
+    .table-hdr, .table-row { font-size: 11px; }
+    .table-row { row-gap: 4px; }
+
+    /* Risk gauge shrinks */
+    .risk-gauge { width: 160px; height: 160px; }
+    .risk-gauge .value { font-size: 36px; }
+}
+
+/* Phone ── single column, no inline KPI rows */
+@media (max-width: 540px) {
+    .main { padding: 12px; gap: 12px; }
+    .panel-body { padding: 10px; }
+    .panel-head { font-size: 9px; letter-spacing: 2px; }
+    .metrics { grid-template-columns: 1fr; }
+    .btn { padding: 6px 10px; font-size: 11px; }
+    .tab { padding: 6px 10px; font-size: 11px; }
+    .badge { font-size: 10px; padding: 3px 6px; }
+}
+
+/* ─── high-density screens: punch a few sizes up so they aren't lost */
+@media (min-width: 1600px) {
+    .body-grid { grid-template-columns: 280px 1fr; }
+    .main { padding: 28px; }
 }
