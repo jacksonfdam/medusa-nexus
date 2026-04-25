@@ -88,3 +88,18 @@ def test_screencap_debug_returns_both_path_attempts(isolated_client: TestClient)
     assert body["exec_out"]["ok"] is False
     assert body["temp_file"]["ok"] is False
     assert body["picked"] == "none"
+
+
+def test_mjpeg_stream_advertises_multipart_content_type(isolated_client: TestClient) -> None:
+    """The MJPEG endpoint streams multipart/x-mixed-replace.
+
+    Headers are set immediately; the generator only yields once a frame is
+    captured. With no real device, we expect no frames — but the response
+    headers must announce the correct content type up front so the browser
+    knows it's getting a multipart stream.
+    """
+    with isolated_client.stream("GET", "/v1/devices/fake-serial/screen.mjpeg?fps=2") as r:
+        assert r.status_code == 200
+        assert "multipart/x-mixed-replace" in r.headers["content-type"]
+        assert r.headers.get("X-MNexus-Stream") == "mjpeg-png"
+        # Don't drain the body — that'd block until adb finally fails enough times.
