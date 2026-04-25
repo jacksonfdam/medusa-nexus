@@ -90,6 +90,48 @@ def test_screencap_debug_returns_both_path_attempts(isolated_client: TestClient)
     assert body["picked"] == "none"
 
 
+def test_install_project_404_when_project_unknown(isolated_client: TestClient) -> None:
+    """install-project must reject a missing project_id with 404 (no silent install)."""
+    r = isolated_client.post(
+        "/v1/devices/fake-serial/install-project",
+        data={"project_id": "PRJ-DOES-NOT-EXIST"},
+    )
+    assert r.status_code == 404
+
+
+def test_install_project_404_when_apk_file_missing(
+    isolated_client: TestClient, tmp_path: Path
+) -> None:
+    """If the project exists but the APK file was wiped, return a structured 404."""
+    import io
+
+    # Upload, then delete the APK behind its back.
+    up = isolated_client.post(
+        "/v1/apks/upload",
+        files={"file": ("a.apk", io.BytesIO(b"PK\x03\x04"))},
+        data={"package": "com.example", "version": "1.0"},
+    )
+    assert up.status_code == 200
+    pid = up.json()["project_id"]
+    detail = isolated_client.get(f"/v1/projects/{pid}").json()
+    apk_disk_path = Path(detail["apk_path"])
+    apk_disk_path.unlink()
+
+    r = isolated_client.post(
+        f"/v1/devices/fake-serial/install-project",
+        data={"project_id": pid},
+    )
+    assert r.status_code == 404
+    body = r.json()
+    assert body["detail"]["error"] == "apk_missing_on_disk"
+    assert "expected_path" in body["detail"]
+
+
+def test_install_project_form_required(isolated_client: TestClient) -> None:
+    r = isolated_client.post("/v1/devices/fake/install-project")
+    assert r.status_code == 422
+
+
 def test_mjpeg_stream_advertises_multipart_content_type(isolated_client: TestClient) -> None:
     """The MJPEG endpoint streams multipart/x-mixed-replace.
 
