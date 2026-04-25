@@ -17,14 +17,30 @@
 
 ## Status
 
-**Pre-alpha.** The repo contains:
+**Pre-alpha — but you can scan APKs end-to-end today.** The repo contains:
 
-- Full product spec ([`docs/SPEC.md`](docs/SPEC.md)) and visual design language ([`docs/DESIGN_LANGUAGE.md`](docs/DESIGN_LANGUAGE.md)).
-- 31-screen Pencil UI deck with 14 screens at hero fidelity ([`design/INDEX.md`](design/INDEX.md)).
-- Python package scaffold: `Finding` / `AttackSurface` / `Project` models, `BaseEngine` ABC with 7 engine stubs, orchestrator, SQLite artifact store, intelligence layer (correlator + auto-hook generator), reporting with a mandatory Mitigation Playbook, Click CLI, FastAPI skeleton.
-- 7 passing tests enforcing the "no finding without mitigation" invariant.
+- Full product spec ([`docs/SPEC.md`](docs/SPEC.md)), 60-second quickstart
+  ([`docs/QUICKSTART.md`](docs/QUICKSTART.md)), and visual design language
+  ([`docs/DESIGN_LANGUAGE.md`](docs/DESIGN_LANGUAGE.md)).
+- 31-screen Pencil UI deck — every screen wired to the API
+  ([`design/INDEX.md`](design/INDEX.md)).
+- Python package: `Finding` / `AttackSurface` / `Project` models,
+  `BaseEngine` ABC with 7 engines, orchestrator with a 4-phase pipeline,
+  SQLite artifact store, intelligence layer (correlator + auto-hook
+  generator), reporting with a mandatory Mitigation Playbook, an interactive
+  Click + Rich + prompt_toolkit CLI, FastAPI server with 60+ endpoints.
+- **Built-in scan path** — every static engine ships a fallback scanner
+  (zip + binary AXML for apktool, DEX-string regex for jadx, ELF-string
+  scan for ghidra) so a fresh checkout can produce real findings without
+  any external tools installed. Drop in real `apktool`, `jadx`, `ghidra`
+  binaries and the orchestrator picks them up automatically.
+- 35+ passing tests across API routes, upload/data flow, mitigation
+  invariants, report generation, multi-device endpoints, Burp probe planning.
 
-Most engine `execute()` methods still return `[]`. React frontend is 0% written. Detection rules are not yet shipped. See the honest gap list in the repo issues / the assistant's notes.
+What's still pending: real Frida session execution (`/v1/projects/{id}/dynamic/start`
+currently returns a synthesized log); HTML/PDF report renderers (Markdown
+and JSON ship today); React frontend (the SPA is hand-rolled vanilla JS —
+intentional, but documented as a follow-up).
 
 ## Requirements
 
@@ -38,14 +54,26 @@ Most engine `execute()` methods still return `[]`. React frontend is 0% written.
 
 ## Quick start
 
+The shortest path:
+
 ```bash
 git clone https://github.com/jacksonmafra-umain/medusa-nexus.git
 cd medusa-nexus
+./scripts/dev.sh             # bootstrap → doctor → server (auto-reload + browser open)
+```
 
-./scripts/setup.sh           # full install — brews / apts, venv, ch0pin, Ghidra, MobSF docker
-# or
+`dev.sh` ensures the venv exists, installs the package in editable mode, runs
+`mnexus doctor`, starts uvicorn with `--reload`, and watches `/v1/health` so
+every reload prints a `✓` or `✕`. If you'd rather see the full installer with
+brews / apts / Ghidra / MobSF docker / Stheno / frida-server staging:
+
+```bash
+./scripts/setup.sh           # full install
 ./scripts/setup.sh --minimal # skip Ghidra (~400 MB), MobSF docker, frida-server push
 ```
+
+For the 60-second tour with screenshots and slash-command reference, see
+[`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
 What the script does:
 
@@ -160,35 +188,101 @@ mnexus doctor
 
 `mnexus doctor` prints a table of engines with `OK` / `MISSING` + version + path. Any `MISSING` row is actionable — the `note` column tells you what to do.
 
-### CLI commands
+### Interactive REPL
+
+Run `mnexus` with no arguments and you get a Claude/Gemini-style terminal app:
+banner, slash commands, autocomplete, history, project context shown in the
+prompt.
 
 ```bash
-# Static scan an APK — runs every static engine in parallel,
-# builds the attack surface, stores the project in SQLite.
+$ mnexus
+🔱 nexus ❯ /scan ~/Downloads/target.apk
+🔱 nexus PRJ-A1B2C3D4 ❯ /findings critical
+🔱 nexus PRJ-A1B2C3D4 ❯ /report markdown
+🔱 nexus PRJ-A1B2C3D4 ❯ /serve
+🔱 nexus PRJ-A1B2C3D4 ❯ /open
+```
+
+Slash commands (prefix-matched, so `/doc` resolves to `/doctor`):
+
+| command            | description                                                           |
+|--------------------|-----------------------------------------------------------------------|
+| `/help`            | Show every command in a table.                                        |
+| `/doctor`          | Run engine health checks with a live spinner.                         |
+| `/scan <apk>`      | Static scan — auto-detects package + version.                         |
+| `/projects`        | List stored projects with risk scores.                                |
+| `/use <id>`        | Set the active project for subsequent commands.                       |
+| `/findings [sev]`  | List findings, optionally filtered by severity.                       |
+| `/rescan`          | Re-run the static fan-out on the active project.                      |
+| `/report [fmt]`    | Generate a report (`markdown`/`json`/`html`/`pdf`).                   |
+| `/serve [port]`    | Start the FastAPI server in the background.                           |
+| `/stop` `/open` `/url` | Background server control.                                        |
+| `/devices`, `/adb` | Quick `adb devices -l` + one-shot `adb` commands.                    |
+| `/clear`, `/exit`  | UI plumbing.                                                          |
+
+### One-shot CLI (for scripts and CI)
+
+Every slash command has a flat equivalent:
+
+```bash
+# Engine health check — exits non-zero if anything's missing
+mnexus doctor
+
+# Static scan an APK — auto-detects package + version
+mnexus scan ./target.apk
 mnexus scan ./target.apk --package com.target.app --version 4.12.0
 
-# Dynamic session (stubbed in this revision; will run Frida + Medusa recipes).
-mnexus dynamic --package com.target.app --modules ssl_bypass,root_bypass,crypto_log
-
-# Generate a report — every template ships a Mitigation Playbook.
+# Generate a report — every template ships a Mitigation Playbook
 mnexus report --project PRJ-ABCD1234 \
               --template technical --format markdown \
               --output ./report.md
 
-# Start the FastAPI backend + (eventually) serve the React UI at 127.0.0.1:8765.
-mnexus serve --port 8765
+# Production-style serve (no reload)
+mnexus serve --host 127.0.0.1 --port 8765
+
+# Dev-style serve — boots faster than dev.sh; for an already-set-up venv
+mnexus dev --port 8765
 ```
 
 ### Web UI
 
-`mnexus serve` exposes:
+`mnexus serve` (or `./scripts/dev.sh`) mounts a single-page app at `/` plus
+a JSON API that the SPA + external tooling can both consume. Highlights:
 
-- `GET /v1/health` — liveness probe.
-- `GET /v1/doctor` — same data as `mnexus doctor`, as JSON.
-- `GET /v1/projects` — list stored projects.
-- `GET /v1/projects/{id}` — full project JSON.
+- **Dashboard / Projects / Scan** — drag-and-drop APK upload, recent imports,
+  live engine status, project cards with risk scores.
+- **Per-project tabs** — OVERVIEW / STATIC / DYNAMIC / NETWORK / REPORT, each
+  populated from real APK data after a scan. `⟳ RESCAN` and `↻ REFRESH`
+  buttons in the tab bar trigger pipeline re-runs and view re-fetches.
+- **Visualizers** — attack-surface graph, data-flow swimlanes, attack tree,
+  OWASP MASVS matrix, SSL pinning map, API endpoint tree.
+- **ADB Control Panel** at `#/adb` — ADBugger-style command surface with a
+  device dropdown, project package binding, and a sticky right-pane
+  "Command Log" that records every adb call with its full command and output.
+- **Device tools** at `#/device/{bridge,shell,files,screen,logcat,pull}` —
+  device info, interactive shell, file manager (push/pull/delete), screencap,
+  logcat tail with filter.
+- **Recipes / Tools / Settings / Terminal** — the Pencil deck's full 31-screen
+  surface, all wired.
+- **Collapsible sidebar** — `[☰]` toggle in the topbar (or `⌘B` / `Ctrl-B`),
+  state persists across reloads. Phones get a slide-in drawer with backdrop.
 
-The React frontend lives under `mnexus/web/` (not shipped in this revision). Once implemented, `mnexus serve` will mount it at `/`. See [`design/INDEX.md`](design/INDEX.md) for the screen deck driving the UI.
+Key API endpoints (full list at `/docs`):
+
+| endpoint                                          | purpose                                      |
+|---------------------------------------------------|----------------------------------------------|
+| `GET  /v1/health`                                 | Liveness probe.                              |
+| `GET  /v1/doctor`                                 | Engine health (same as `mnexus doctor`).     |
+| `GET  /v1/projects`                               | List stored projects.                        |
+| `GET  /v1/projects/{id}`                          | Full project JSON.                           |
+| `POST /v1/projects/{id}/rescan`                   | Re-run the static fan-out in place.          |
+| `GET  /v1/projects/{id}/{secrets,components,native,api-map,ssl-map,owasp,attack-tree,dataflow,surface}` | Per-screen views over the attack surface. |
+| `GET  /v1/projects/{id}/hooks`                    | Auto-generated Frida hooks.                  |
+| `POST /v1/apks/upload`                            | Upload an APK and ingest it.                 |
+| `POST /v1/projects/{id}/report`                   | Generate a report (PDF/HTML/MD/JSON).        |
+| `GET  /v1/devices`                                | `adb devices -l` parsed.                     |
+| `POST /v1/devices/{serial}/{shell,install,uninstall,clear,start,stop,monkey,reboot,...}` | Per-device commands. |
+| `GET  /v1/adb/log`                                | Audit trail of every adb call.               |
 
 ### Device setup after first run
 
@@ -205,10 +299,25 @@ adb shell su -c '/data/local/tmp/frida-server &'
 
 ## Development
 
+The fastest loop:
+
+```bash
+./scripts/dev.sh                         # one-shot bootstrap + reload server
+./scripts/dev.sh --check                 # bootstrap + doctor only (no server)
+./scripts/dev.sh --port 9090 --no-browser
+```
+
+`dev.sh` is idempotent — re-running it just re-verifies + restarts. The
+inner uvicorn watches `mnexus/`, so editing any `.py` triggers a sub-second
+reload. A background watchdog polls `/v1/health` and prints `✓` / `✕` on
+each state change.
+
+Manual flow if you'd rather not use the script:
+
 ```bash
 source .venv/bin/activate
 
-# run the test suite (7 tests, covers the mitigation invariants)
+# run the full test suite (35+ tests across API, models, engines, reporting)
 pytest
 
 # lint + type-check (dev extras install these)
@@ -216,7 +325,9 @@ ruff check .
 mypy mnexus
 
 # launch the CLI in editable mode without reinstalling
-python -m mnexus.cli doctor
+python -m mnexus.cli                # interactive REPL
+python -m mnexus.cli doctor          # one-shot
+python -m mnexus.cli dev             # serve with reload
 ```
 
 ## Structure
