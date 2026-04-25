@@ -362,6 +362,7 @@ function view_device_pull() {
     return h`
     <div class="main">
       ${sectionHeader("P", "05 // INTAKE", "PULL FROM DEVICE")}
+      ${deviceTabs("pull")}
       <section class="row">
         <div class="input grow"><span class="prompt">&gt;</span><input placeholder="pm list packages | grep target"><span class="cursor">_</span></div>
         <span class="badge connected"><span class="dot">●</span>Pixel 6 · android 14</span>
@@ -388,24 +389,34 @@ function view_device_pull() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  SCREEN 06 — Device Bridge
+ *  SCREEN 06 — Device Bridge (tabs: INFO · SHELL · FILES · SCREEN · LOGCAT)
  * ═══════════════════════════════════════════════════════════════════════════ */
+function deviceTabs(active) {
+    const tabs = [
+        ["bridge",  "INFO"],
+        ["shell",   "SHELL"],
+        ["files",   "FILES"],
+        ["screen",  "SCREEN"],
+        ["logcat",  "LOGCAT"],
+        ["pull",    "PULL APK"],
+    ];
+    return `
+    <div class="tab-bar">
+      ${tabs.map(([k, label]) => `<a class="tab ${k === active ? "active" : ""}" href="#/device/${k}">${k === active ? "> " : "  "}${label}</a>`).join("")}
+    </div>`;
+}
+
 function view_device_bridge() {
     return h`
     <div class="main">
       ${sectionHeader("B", "06 // INTAKE", "DEVICE BRIDGE")}
-      <section class="row" style="gap:16px">
+      ${deviceTabs("bridge")}
+      <section class="row" style="gap:16px;align-items:flex-start">
         <section class="panel grow">
-          <div class="panel-head">// DEVICE</div>
-          <div class="panel-body col">
-            <div class="row"><span class="muted small" style="width:120px">MODEL</span><span class="t-mono">Pixel 6</span></div>
-            <div class="row"><span class="muted small" style="width:120px">ANDROID</span><span class="t-mono">14 (API 34)</span></div>
-            <div class="row"><span class="muted small" style="width:120px">ABI</span><span class="t-mono">arm64-v8a</span></div>
-            <div class="row"><span class="muted small" style="width:120px">ROOTED</span><span class="t-mono" style="color:var(--acid)">yes · RootBeer v0.0.9 bypass-able</span></div>
-            <div class="row"><span class="muted small" style="width:120px">FRIDA-SERVER</span><span class="t-mono" style="color:var(--sev-high)">staged · not running</span></div>
-          </div>
+          <div class="panel-head"><span>// DEVICE</span><span class="spacer"></span><span class="badge connected" id="bridge-badge"><span class="dot">●</span>loading…</span></div>
+          <div class="panel-body col" id="bridge-info" style="gap:6px">loading…</div>
         </section>
-        <section class="panel grow">
+        <section class="panel" style="width:280px;flex:none">
           <div class="panel-head">// ACTIONS</div>
           <div class="panel-body col">
             <button class="btn primary">[ START FRIDA-SERVER ]</button>
@@ -415,17 +426,19 @@ function view_device_bridge() {
           </div>
         </section>
       </section>
-      <section class="panel">
-        <div class="panel-head">// ADB CONSOLE</div>
-        <div class="panel-body console">
-<span class="nexus">$ adb shell getprop ro.build.version.release</span>
-14
-<span class="nexus">$ adb shell getprop ro.product.cpu.abi</span>
-arm64-v8a
-<span class="nexus">$ adb shell id</span>
-uid=2000(shell) gid=2000(shell)
-<span class="nexus">$ _</span>
-        </div>
+      <section class="row" style="gap:16px;align-items:flex-start">
+        <section class="panel grow">
+          <div class="panel-head">// BATTERY</div>
+          <div class="panel-body col" id="bridge-battery">loading…</div>
+        </section>
+        <section class="panel grow">
+          <div class="panel-head">// MEMORY</div>
+          <div class="panel-body col" id="bridge-memory">loading…</div>
+        </section>
+        <section class="panel grow">
+          <div class="panel-head">// STORAGE</div>
+          <div class="panel-body" id="bridge-storage">loading…</div>
+        </section>
       </section>
     </div>`;
 }
@@ -1191,13 +1204,16 @@ function openDeviceDetail(serial, d) {
     host.innerHTML = `
       <div class="device-detail">
         <div class="device-mirror" id="mirror">
-          <img id="mirror-img" alt="screen mirror" data-w="${w}" data-h="${h}" />
+          <div class="mirror-stage">
+            <img id="mirror-img" alt="screen mirror" data-w="${w}" data-h="${h}" />
+            <img id="mirror-img-b" alt="" aria-hidden="true" />
+          </div>
           <div class="mirror-foot">
             <span>MIRROR · ${w}×${h}</span>
             <span>·</span>
-            <span>polling 800ms (ffmpeg stream → iter 2)</span>
+            <span>mjpeg primary · poll fallback</span>
             <span class="spacer"></span>
-            <span id="mirror-status" style="color:var(--acid)">live</span>
+            <span id="mirror-status" style="color:var(--acid)">connecting…</span>
           </div>
         </div>
         <div class="col">
@@ -1259,65 +1275,120 @@ function openDeviceDetail(serial, d) {
 }
 
 function bindMirror(serial, w, h) {
-    const img = $("#mirror-img");
-    if (!img) return;
-    const status = $("#mirror-status");
     const mirror = $("#mirror");
-    let fails = 0;
-    let lastBlobUrl = null;
+    const imgA = $("#mirror-img");          // primary
+    const imgB = $("#mirror-img-b");        // backbuffer (polling fallback)
+    if (!mirror || !imgA) return;
+    const status = $("#mirror-status");
+    const fps = 6;
 
-    async function tick() {
-        const url = `/v1/devices/${encodeURIComponent(serial)}/screencap.png?t=${Date.now()}`;
+    // ── 1. PRIMARY: MJPEG stream — browser renders multipart natively ────────
+    // No JS polling, no <img> swap → no flicker, single TCP connection.
+    let usingMjpeg = true;
+    let pollTimer = null;
+    let inFlight = false;
+    let fails = 0;
+    let active = 0;
+
+    function setStatus(text, color) {
+        if (!status) return;
+        status.textContent = text;
+        status.style.color = color || "var(--acid)";
+    }
+
+    imgA.style.opacity = "1";
+    imgA.src = `/v1/devices/${encodeURIComponent(serial)}/screen.mjpeg?fps=${fps}&_=${Date.now()}`;
+    setStatus(`live · mjpeg @ ${fps}fps`);
+    hideMirrorError(mirror);
+
+    // If no frame painted in 4s, assume mjpeg failed → fall back.
+    const mjpegStallTimer = setTimeout(() => {
+        if (imgA.naturalWidth === 0) imgA.dispatchEvent(new Event("error"));
+    }, 4000);
+    imgA.addEventListener("load", () => clearTimeout(mjpegStallTimer), { once: true });
+    imgA.addEventListener("error", () => {
+        if (!usingMjpeg) return;
+        clearTimeout(mjpegStallTimer);
+        setStatus("mjpeg unavailable → polling", "var(--sev-high)");
+        startPolling();
+    }, { once: true });
+
+    // ── 2. FALLBACK: double-buffered PNG polling ─────────────────────────────
+    async function pollOnce() {
+        if (inFlight) return;            // skip overlapping ticks
+        inFlight = true;
         try {
+            const url = `/v1/devices/${encodeURIComponent(serial)}/screencap.png?t=${Date.now()}`;
             const r = await fetch(url, { cache: "no-store" });
             if (!r.ok) {
                 fails++;
-                if (fails > 2 && status) {
-                    status.textContent = "stalled";
-                    status.style.color = "var(--sev-crit)";
+                if (fails > 2) {
+                    setStatus("stalled · polling", "var(--sev-crit)");
                     showMirrorError(mirror, await safeJSON(r));
                 }
                 return;
             }
             const blob = await r.blob();
-            const obj = URL.createObjectURL(blob);
-            img.src = obj;
-            if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
-            lastBlobUrl = obj;
-            fails = 0;
-            if (status) {
-                const path = r.headers.get("X-MNexus-Path") || "?";
-                status.textContent = `live · ${path}`;
-                status.style.color = "var(--acid)";
+            const buffers = [imgA, imgB];
+            const next = buffers[1 - active];
+            if (!next) {
+                // Backbuffer not present → just swap on the primary (might flicker).
+                const obj0 = URL.createObjectURL(blob);
+                const old0 = imgA.dataset.lastUrl;
+                imgA.src = obj0;
+                if (old0) URL.revokeObjectURL(old0);
+                imgA.dataset.lastUrl = obj0;
+            } else {
+                const oldUrl = next.dataset.lastUrl;
+                const obj = URL.createObjectURL(blob);
+                next.src = obj;
+                try { await next.decode(); } catch { /* swap anyway */ }
+                buffers[active].style.opacity = "0";
+                next.style.opacity = "1";
+                next.dataset.lastUrl = obj;
+                if (oldUrl) URL.revokeObjectURL(oldUrl);
+                active = 1 - active;
             }
+            fails = 0;
+            const path = r.headers.get("X-MNexus-Path") || "?";
+            setStatus(`live · poll · ${path}`);
             hideMirrorError(mirror);
         } catch (e) {
             fails++;
-            if (fails > 2 && status) {
-                status.textContent = "stalled";
-                status.style.color = "var(--sev-crit)";
+            if (fails > 2) {
+                setStatus("stalled · polling", "var(--sev-crit)");
                 showMirrorError(mirror, { error: "network", detail: e.message });
             }
+        } finally {
+            inFlight = false;
         }
     }
 
-    tick();
-    clearInterval(_mirrorTimer);
-    _mirrorTimer = setInterval(() => {
-        if (!location.hash.startsWith("#/devices")) { clearInterval(_mirrorTimer); return; }
-        if (_activeSerial !== serial) { clearInterval(_mirrorTimer); return; }
-        tick();
-    }, 800);
+    function startPolling() {
+        usingMjpeg = false;
+        pollOnce();
+        clearInterval(pollTimer);
+        pollTimer = setInterval(() => {
+            if (!location.hash.startsWith("#/devices")) { clearInterval(pollTimer); return; }
+            if (_activeSerial !== serial) { clearInterval(pollTimer); return; }
+            pollOnce();
+        }, 800);
+        _mirrorTimer = pollTimer;
+    }
 
-    img.addEventListener("click", async (ev) => {
-        const rect = img.getBoundingClientRect();
+    // ── 3. tap-to-click ──────────────────────────────────────────────────────
+    function tapHandler(ev) {
+        const target = ev.currentTarget;
+        const rect = target.getBoundingClientRect();
         const xRatio = (ev.clientX - rect.left) / rect.width;
         const yRatio = (ev.clientY - rect.top) / rect.height;
         const x = Math.round(xRatio * w);
         const y = Math.round(yRatio * h);
         const fd = new FormData(); fd.append("x", x); fd.append("y", y);
-        await fetch(`/v1/devices/${encodeURIComponent(serial)}/tap`, { method: "POST", body: fd });
-    });
+        fetch(`/v1/devices/${encodeURIComponent(serial)}/tap`, { method: "POST", body: fd });
+    }
+    imgA.addEventListener("click", tapHandler);
+    if (imgB) imgB.addEventListener("click", tapHandler);
 }
 
 async function safeJSON(response) {
@@ -1706,23 +1777,79 @@ async function mount_device_pull() {
 }
 
 async function mount_device_bridge() {
-    const info = await getJSON("/v1/device/info").catch(() => ({connected: false, reason: "network error"}));
-
-    const devicePanel = $$(".panel")[0]?.querySelector(".panel-body");
-    if (devicePanel) {
-        if (!info.connected) {
-            devicePanel.innerHTML = `<div class="empty-state"><div style="color:var(--sev-crit);font-size:18px">NO DEVICE</div><div class="muted small">${info.reason || ""}</div></div>`;
-        } else {
-            devicePanel.innerHTML = `
-              <div class="row"><span class="muted small" style="width:140px">MODEL</span><span class="t-mono">${info.manufacturer || ""} ${info.model || ""}</span></div>
-              <div class="row"><span class="muted small" style="width:140px">ANDROID</span><span class="t-mono">${info.android_release || "?"} (SDK ${info.android_sdk || "?"})</span></div>
-              <div class="row"><span class="muted small" style="width:140px">ABI</span><span class="t-mono">${info.abi || "?"}</span></div>
-              <div class="row"><span class="muted small" style="width:140px">DEBUGGABLE</span><span class="t-mono" style="color:${info.debuggable === "1" ? "var(--sev-high)" : "var(--acid)"}">${info.debuggable === "1" ? "yes" : "no"}</span></div>
-              <div class="row"><span class="muted small" style="width:140px">FRIDA-SERVER</span><span class="t-mono" style="color:var(--${info.frida_server_running ? "acid" : info.frida_server_staged ? "sev-high" : "muted"})">${info.frida_server_running ? "running" : info.frida_server_staged ? "staged · not running" : "not staged"}</span></div>`;
-        }
+    const info = await getJSON("/v1/device/info/full").catch(() => ({connected: false, reason: "network error"}));
+    const badge = $("#bridge-badge");
+    if (badge) {
+        const ok = !!info.connected;
+        badge.classList.toggle("connected", ok);
+        badge.classList.toggle("scanning", !ok);
+        badge.innerHTML = `<span class="dot">●</span>${ok ? "CONNECTED" : "NO DEVICE"}`;
     }
 
-    // Wire every button label.
+    const devicePanel = $("#bridge-info");
+    if (!info.connected) {
+        if (devicePanel) devicePanel.innerHTML = `<div class="empty-state"><div style="color:var(--sev-crit);font-size:18px">NO DEVICE</div><div class="muted small">${info.reason || ""}</div></div>`;
+        const empty = '<div class="muted small">— device offline —</div>';
+        if ($("#bridge-battery")) $("#bridge-battery").innerHTML = empty;
+        if ($("#bridge-memory")) $("#bridge-memory").innerHTML = empty;
+        if ($("#bridge-storage")) $("#bridge-storage").innerHTML = empty;
+    } else if (devicePanel) {
+        const row = (label, val, color) => `<div class="row"><span class="muted small" style="width:160px">${label}</span><span class="t-mono"${color ? ` style="color:${color}"` : ""}>${val || "—"}</span></div>`;
+        const debuggable = info.debuggable === "1";
+        devicePanel.innerHTML = [
+            row("DEVICE", info.device),
+            row("PRODUCT", info.product),
+            row("MODEL", `${info.manufacturer || ""} ${info.model || ""}`.trim()),
+            row("BRAND", info.brand),
+            row("SERIAL NO", info.serial_no),
+            row("PLATFORM", info.platform || info.hardware),
+            row("ABI", info.abi),
+            row("ABI LIST", info.abi_list),
+            row("ANDROID", info.android),
+            row("API LEVEL", info.api_level),
+            row("FINGERPRINT", info.fingerprint),
+            row("SECURITY PATCH", info.security_patch, "var(--cyan)"),
+            row("BUILD DATE", info.build_date),
+            row("BUILD ID", info.build_id),
+            row("RESOLUTION", info.resolution),
+            row("DISPLAY DENSITY", info.display_density ? `${info.display_density} dpi` : ""),
+            row("DEBUGGABLE", debuggable ? "yes" : "no", debuggable ? "var(--sev-high)" : "var(--acid)"),
+        ].join("");
+
+        // Battery
+        const b = info.battery || {};
+        const batRow = (k, v, c) => v == null ? "" : `<div class="row"><span class="muted small" style="width:140px">${k}</span><span class="t-mono"${c ? ` style="color:${c}"` : ""}>${v}</span></div>`;
+        const lvl = parseInt(b.level || "0", 10);
+        const lvlColor = lvl >= 50 ? "var(--acid)" : lvl >= 20 ? "var(--sev-high)" : "var(--sev-crit)";
+        $("#bridge-battery").innerHTML = (Object.keys(b).length === 0)
+            ? `<div class="muted small">battery info unavailable</div>`
+            : [
+                batRow("LEVEL", b.level ? `${b.level}%` : null, lvlColor),
+                batRow("STATUS", b.status),
+                batRow("HEALTH", b.health),
+                batRow("VOLTAGE", b.voltage ? `${b.voltage} mV` : null),
+                batRow("TEMPERATURE", b.temperature ? `${(parseInt(b.temperature, 10) / 10).toFixed(1)} °C` : null),
+                batRow("AC", b.ac_powered),
+                batRow("USB", b.usb_powered),
+                batRow("WIRELESS", b.wireless_powered),
+                batRow("TECHNOLOGY", b.technology),
+            ].join("");
+
+        // Memory
+        const mem = info.memory || {};
+        $("#bridge-memory").innerHTML = Object.keys(mem).length
+            ? Object.entries(mem).map(([k, v]) => `<div class="row"><span class="muted small" style="width:140px">${k}</span><span class="t-mono">${v}</span></div>`).join("")
+            : `<div class="muted small">/proc/meminfo unreadable</div>`;
+
+        // Storage
+        const st = info.storage || [];
+        $("#bridge-storage").innerHTML = st.length
+            ? `<div class="table-hdr" style="grid-template-columns: 1fr 80px 80px 80px 60px 1fr"><span>FS</span><span>SIZE</span><span>USED</span><span>FREE</span><span>%</span><span>MOUNT</span></div>`
+              + st.map((r) => `<div class="table-row" style="grid-template-columns: 1fr 80px 80px 80px 60px 1fr"><span class="t-mono">${r.filesystem}</span><span class="t-mono">${r.size}</span><span class="t-mono">${r.used}</span><span class="t-mono">${r.available}</span><span class="t-mono" style="color:${parseInt(r.use_pct, 10) > 90 ? "var(--sev-crit)" : "var(--cyan)"}">${r.use_pct}</span><span class="t-mono">${r.mounted_on}</span></div>`).join("")
+            : `<div class="muted small">df unavailable</div>`;
+    }
+
+    // Wire action buttons.
     $$(".btn").forEach((btn) => {
         const label = btn.textContent.trim().toUpperCase();
         if (label.includes("START FRIDA")) {
@@ -1740,23 +1867,304 @@ async function mount_device_bridge() {
                 }
             });
         } else if (label.includes("PUSH SCRIPTS")) {
-            btn.addEventListener("click", () => {
-                btn.textContent = "[ NOT WIRED — see /v1/recipes ]";
-                btn.style.color = "var(--sev-high)";
-            });
+            btn.addEventListener("click", () => { btn.textContent = "[ NOT WIRED — see /v1/recipes ]"; btn.style.color = "var(--sev-high)"; });
         } else if (label.includes("PATCH WITH STHENO")) {
-            btn.addEventListener("click", () => {
-                btn.textContent = "[ STHENO BINDING PENDING ]";
-                btn.style.color = "var(--sev-high)";
-            });
+            btn.addEventListener("click", () => { btn.textContent = "[ STHENO BINDING PENDING ]"; btn.style.color = "var(--sev-high)"; });
         } else if (label.includes("FORCE REBOOT")) {
             btn.addEventListener("click", () => {
                 if (!confirm("really reboot the connected device?")) return;
-                btn.textContent = "[ NOT WIRED — adb reboot disabled ]";
-                btn.style.color = "var(--sev-high)";
+                btn.textContent = "[ NOT WIRED — adb reboot disabled ]"; btn.style.color = "var(--sev-high)";
             });
         }
     });
+}
+
+/* SCREEN 06b — Interactive Shell */
+function view_device_shell() {
+    return h`
+    <div class="main">
+      ${sectionHeader("S", "06 // INTAKE", "INTERACTIVE SHELL")}
+      ${deviceTabs("shell")}
+      <section class="panel">
+        <div class="panel-head"><span>// adb shell — read-only blocklist enforced server-side</span><span class="spacer"></span><button class="btn" id="sh-clear">[ CLEAR ]</button></div>
+        <div class="panel-body console" id="sh-out" style="min-height:340px;font-size:12px"></div>
+        <div class="panel-body" style="border-top:1px solid var(--border)">
+          <div class="input grow">
+            <span class="prompt">$</span>
+            <input id="sh-in" placeholder="getprop ro.build.fingerprint   ·   ip a   ·   pm list packages -3" autocomplete="off">
+            <span class="cursor">_</span>
+          </div>
+        </div>
+      </section>
+      <div class="muted small">examples: <code>getprop</code> · <code>ip a</code> · <code>pm list packages -3</code> · <code>cat /proc/cpuinfo</code> · <code>dumpsys SurfaceFlinger | head</code></div>
+    </div>`;
+}
+
+function mount_device_shell() {
+    const out = $("#sh-out");
+    const inp = $("#sh-in");
+    const writeLine = (text, klass = "") => {
+        const div = document.createElement("div");
+        if (klass) div.innerHTML = `<span class="${klass}">${escapeHtml(text)}</span>`;
+        else div.textContent = text;
+        out.appendChild(div);
+        out.scrollTop = out.scrollHeight;
+    };
+    writeLine("[NEXUS] interactive adb shell · refused: rm/dd/pm install/reboot/su/...", "nexus");
+    let history = []; let cursor = -1;
+    inp.addEventListener("keydown", async (e) => {
+        if (e.key === "ArrowUp") {
+            if (history.length && cursor < history.length - 1) { cursor++; inp.value = history[history.length - 1 - cursor]; }
+            e.preventDefault();
+        } else if (e.key === "ArrowDown") {
+            if (cursor > 0) { cursor--; inp.value = history[history.length - 1 - cursor]; }
+            else { cursor = -1; inp.value = ""; }
+            e.preventDefault();
+        } else if (e.key === "Enter") {
+            const cmd = inp.value.trim();
+            if (!cmd) return;
+            history.push(cmd); cursor = -1; inp.value = "";
+            writeLine(`$ ${cmd}`, "nexus");
+            const fd = new FormData(); fd.append("cmd", cmd);
+            try {
+                const r = await fetch("/v1/device/shell", { method: "POST", body: fd });
+                const j = await r.json();
+                if (!r.ok) writeLine(`error: ${j.detail || r.statusText}`, "crit");
+                else (j.output || "(no output)").split("\n").forEach((line) => writeLine(line));
+            } catch (err) { writeLine(`fetch failed: ${err.message}`, "crit"); }
+        }
+    });
+    $("#sh-clear").addEventListener("click", () => { out.innerHTML = ""; });
+    inp.focus();
+}
+
+/* SCREEN 06c — File Manager */
+function view_device_files() {
+    return h`
+    <div class="main">
+      ${sectionHeader("F", "06 // INTAKE", "FILE MANAGER")}
+      ${deviceTabs("files")}
+      <section class="row">
+        <button class="btn" id="fm-up">[ ↑ UP ]</button>
+        <div class="input grow"><span class="prompt">~</span><input id="fm-path" value="/sdcard"><span class="cursor">_</span></div>
+        <button class="btn primary" id="fm-go">[ LIST ]</button>
+        <label class="btn" style="cursor:pointer">[ + UPLOAD ]<input type="file" id="fm-upload" style="display:none"></label>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><span class="t-mono" id="fm-current">/sdcard</span><span class="spacer"></span><span class="muted" id="fm-count">—</span></div>
+        <div class="panel-body tight" id="fm-list">loading…</div>
+      </section>
+      <section class="panel" id="fm-msg" style="display:none">
+        <div class="panel-head">// MESSAGE</div>
+        <div class="panel-body" id="fm-msg-body"></div>
+      </section>
+    </div>`;
+}
+
+function mount_device_files() {
+    const list = $("#fm-list");
+    const pathInp = $("#fm-path");
+    const current = $("#fm-current");
+    const count = $("#fm-count");
+    const msg = $("#fm-msg");
+    const msgBody = $("#fm-msg-body");
+    const showMsg = (text, color = "var(--cyan)") => {
+        msg.style.display = "";
+        msgBody.innerHTML = `<span class="t-mono" style="color:${color}">${escapeHtml(text)}</span>`;
+    };
+
+    const load = async (path) => {
+        pathInp.value = path;
+        current.textContent = path;
+        list.innerHTML = "loading…";
+        try {
+            const data = await getJSON(`/v1/device/files?path=${encodeURIComponent(path)}`);
+            const entries = data.entries || [];
+            count.textContent = `${entries.length} entries`;
+            if (!entries.length) {
+                list.innerHTML = `<div class="empty-state">empty / unreadable</div>`;
+                return;
+            }
+            list.innerHTML = `
+              <div class="table-hdr" style="grid-template-columns: 50px 1fr 100px 100px 160px 120px">
+                <span></span><span>NAME</span><span>SIZE</span><span>OWNER</span><span>MODIFIED</span><span></span>
+              </div>` + entries.map((e) => {
+                const isDir = e.kind === "dir";
+                const icon = isDir ? "📁" : e.kind === "link" ? "🔗" : "📄";
+                return `
+                <div class="table-row" style="grid-template-columns: 50px 1fr 100px 100px 160px 120px">
+                  <span>${icon}</span>
+                  <span class="t-mono" data-name="${e.name}" style="cursor:pointer;color:${isDir ? "var(--cyan)" : "var(--muted-text, #ccc)"}">${e.name}</span>
+                  <span class="t-muted">${e.size || "—"}</span>
+                  <span class="t-muted">${e.owner || "—"}</span>
+                  <span class="t-muted">${e.ts || "—"}</span>
+                  <span style="text-align:right;display:flex;gap:4px;justify-content:flex-end">
+                    ${isDir ? "" : `<button class="btn" data-get="${e.name}" style="padding:2px 8px;font-size:10px">[ GET ]</button>`}
+                    ${isDir || e.name === "." || e.name === ".." ? "" : `<button class="btn danger" data-del="${e.name}" style="padding:2px 8px;font-size:10px">[ × ]</button>`}
+                  </span>
+                </div>`;
+            }).join("");
+            // Click row → enter directory
+            $$('[data-name]').forEach((el) => el.addEventListener("click", () => {
+                const name = el.dataset.name;
+                if (name === "." || name === "..") {
+                    if (name === "..") load(parentDir(path));
+                    return;
+                }
+                const row = el.closest(".table-row");
+                if (row && row.querySelector("span")?.textContent === "📁") load(joinPath(path, name));
+            }));
+            // Get button
+            $$('[data-get]').forEach((b) => b.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                const name = b.dataset.get;
+                const url = `/v1/device/file?path=${encodeURIComponent(joinPath(path, name))}`;
+                window.open(url, "_blank");
+            }));
+            // Delete button
+            $$('[data-del]').forEach((b) => b.addEventListener("click", async (ev) => {
+                ev.stopPropagation();
+                const name = b.dataset.del;
+                const fullPath = joinPath(path, name);
+                if (!confirm(`Delete ${fullPath}?`)) return;
+                const fd = new FormData(); fd.append("path", fullPath); fd.append("confirm", "yes");
+                const r = await fetch("/v1/device/file/delete", { method: "POST", body: fd });
+                if (r.ok) { showMsg(`✓ deleted ${fullPath}`, "var(--acid)"); load(path); }
+                else { const j = await r.json().catch(() => ({})); showMsg(`✕ ${j.detail || r.statusText}`, "var(--sev-crit)"); }
+            }));
+        } catch (err) {
+            list.innerHTML = `<div class="empty-state"><div style="color:var(--sev-crit)">listing failed: ${escapeHtml(err.message)}</div></div>`;
+        }
+    };
+
+    $("#fm-go").addEventListener("click", () => load(pathInp.value || "/sdcard"));
+    $("#fm-up").addEventListener("click", () => load(parentDir(pathInp.value || "/")));
+    pathInp.addEventListener("keydown", (e) => { if (e.key === "Enter") load(pathInp.value || "/sdcard"); });
+    $("#fm-upload").addEventListener("change", async (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        const fd = new FormData(); fd.append("file", f); fd.append("dest", pathInp.value || "/sdcard/Download");
+        showMsg(`↑ pushing ${f.name} (${fmtBytes(f.size)})…`);
+        const r = await fetch("/v1/device/file/upload", { method: "POST", body: fd });
+        if (r.ok) { const j = await r.json(); showMsg(`✓ pushed → ${j.remote}`, "var(--acid)"); load(pathInp.value || "/sdcard"); }
+        else { const j = await r.json().catch(() => ({})); showMsg(`✕ ${j.detail || r.statusText}`, "var(--sev-crit)"); }
+    });
+    load("/sdcard");
+}
+
+function parentDir(path) {
+    if (!path || path === "/") return "/";
+    const trimmed = path.replace(/\/+$/, "");
+    const idx = trimmed.lastIndexOf("/");
+    return idx <= 0 ? "/" : trimmed.slice(0, idx);
+}
+
+function joinPath(base, name) {
+    if (name.startsWith("/")) return name;
+    return (base.endsWith("/") ? base : base + "/") + name;
+}
+
+/* SCREEN 06d — Screen Capture */
+function view_device_screen() {
+    return h`
+    <div class="main">
+      ${sectionHeader("S", "06 // INTAKE", "SCREEN CAPTURE")}
+      ${deviceTabs("screen")}
+      <section class="row">
+        <button class="btn primary" id="cap-shot">[ CAPTURE ]</button>
+        <button class="btn" id="cap-save" disabled>[ SAVE PNG ]</button>
+        <span class="muted small" id="cap-meta">no capture yet</span>
+      </section>
+      <section class="panel">
+        <div class="panel-head">// LIVE FRAME</div>
+        <div class="panel-body" id="cap-body" style="display:flex;align-items:center;justify-content:center;min-height:380px;background:#050505">
+          <div class="muted">click [ CAPTURE ] to grab the device screen</div>
+        </div>
+      </section>
+    </div>`;
+}
+
+function mount_device_screen() {
+    let lastDataUrl = null;
+    let lastPath = null;
+    $("#cap-shot").addEventListener("click", async () => {
+        const btn = $("#cap-shot");
+        btn.textContent = "[ CAPTURING… ]";
+        try {
+            const r = await fetch("/v1/device/screenshot", { method: "POST" });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || r.statusText);
+            lastDataUrl = j.data_url; lastPath = j.path;
+            $("#cap-body").innerHTML = `<img src="${j.data_url}" style="max-width:100%;max-height:560px;border:1px solid var(--border-accent)" alt="device screenshot">`;
+            $("#cap-meta").textContent = `${fmtBytes(j.size_bytes)} · saved to ${j.path}`;
+            $("#cap-save").disabled = false;
+            btn.textContent = "[ CAPTURE ]";
+            btn.style.color = "var(--acid)";
+        } catch (err) {
+            $("#cap-body").innerHTML = `<div class="empty-state"><div style="color:var(--sev-crit)">${escapeHtml(err.message)}</div></div>`;
+            btn.textContent = "[ CAPTURE ]";
+            btn.style.color = "var(--sev-crit)";
+        }
+    });
+    $("#cap-save").addEventListener("click", () => {
+        if (!lastDataUrl) return;
+        const a = document.createElement("a");
+        a.href = lastDataUrl;
+        a.download = (lastPath || "screen.png").split("/").pop();
+        a.click();
+    });
+}
+
+/* SCREEN 06e — Logcat */
+function view_device_logcat() {
+    return h`
+    <div class="main">
+      ${sectionHeader("L", "06 // INTAKE", "LOGCAT")}
+      ${deviceTabs("logcat")}
+      <section class="row">
+        <select id="lc-level" class="input" style="width:80px"><option>V</option><option selected>I</option><option>W</option><option>E</option><option>F</option></select>
+        <div class="input grow"><span class="prompt">⌕</span><input id="lc-filter" placeholder="grep filter (e.g. com.target.banking, FATAL, AndroidRuntime)"><span class="cursor">_</span></div>
+        <select id="lc-lines" class="input" style="width:80px"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select>
+        <button class="btn primary" id="lc-fetch">[ FETCH ]</button>
+        <label class="row"><input type="checkbox" id="lc-auto" style="accent-color:var(--acid)"> <span class="muted small">auto-poll · 3s</span></label>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><span>// STREAM</span><span class="spacer"></span><span class="muted" id="lc-count">—</span></div>
+        <div class="panel-body console" id="lc-out" style="min-height:420px;font-size:11px;line-height:1.4">no entries yet — [ FETCH ]</div>
+      </section>
+    </div>`;
+}
+
+function mount_device_logcat() {
+    let timer = null;
+    const fetchOnce = async () => {
+        const level = $("#lc-level").value;
+        const filter = $("#lc-filter").value.trim();
+        const lines = $("#lc-lines").value;
+        const out = $("#lc-out");
+        out.innerHTML = "loading…";
+        try {
+            const data = await getJSON(`/v1/device/logcat?lines=${encodeURIComponent(lines)}&level=${level}&filter=${encodeURIComponent(filter)}`);
+            $("#lc-count").textContent = `${(data.lines || []).length} lines`;
+            if (!data.lines.length) { out.innerHTML = `<div class="muted small">no entries</div>`; return; }
+            out.innerHTML = data.lines.map((l) => {
+                const cls = /\sE\s/.test(l) || /FATAL/.test(l) ? "crit"
+                    : /\sW\s/.test(l) ? "intent"
+                    : /\sI\s/.test(l) ? "nexus"
+                    : "muted";
+                return `<div><span class="${cls}">${escapeHtml(l)}</span></div>`;
+            }).join("");
+            out.scrollTop = out.scrollHeight;
+        } catch (err) {
+            out.innerHTML = `<div class="empty-state"><div style="color:var(--sev-crit)">${escapeHtml(err.message)}</div></div>`;
+        }
+    };
+    $("#lc-fetch").addEventListener("click", fetchOnce);
+    $("#lc-auto").addEventListener("change", (e) => {
+        if (timer) { clearInterval(timer); timer = null; }
+        if (e.target.checked) timer = setInterval(fetchOnce, 3000);
+    });
+    fetchOnce();
 }
 
 async function mount_recipes() {
@@ -2740,6 +3148,10 @@ const ROUTES = [
     { path: "devices",                          view: view_devices,           mount: mount_devices },
     { path: "device/pull",                      view: view_device_pull,       mount: mount_device_pull },
     { path: "device/bridge",                    view: view_device_bridge,     mount: mount_device_bridge },
+    { path: "device/shell",                     view: view_device_shell,      mount: mount_device_shell },
+    { path: "device/files",                     view: view_device_files,      mount: mount_device_files },
+    { path: "device/screen",                    view: view_device_screen,     mount: mount_device_screen },
+    { path: "device/logcat",                    view: view_device_logcat,     mount: mount_device_logcat },
     { path: "dynamic",                          view: (ctx) => view_project_dynamic(ctx), mount: mount_project_dynamic },
     { path: "network",                          view: (ctx) => view_project_network(ctx) },
     { path: "report",                           view: view_report,            mount: mount_report },
