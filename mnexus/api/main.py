@@ -12,7 +12,7 @@ import json
 import shutil
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -333,6 +333,226 @@ async def device_frida_start() -> dict[str, Any]:
     await asyncio.sleep(1.5)
     ps = await adb._run([nexus.config.adb_path, "shell", "pgrep", "-f", "frida-server"])  # type: ignore[attr-defined]
     return {"running": bool(ps.strip()), "pid": ps.strip().splitlines()[0] if ps.strip() else None}
+
+
+# ─── multi-device ADB management ─────────────────────────────────────────
+# Connection flavor matrix (per the user's request):
+#   ADB + ffmpeg server-side  → polling screencaps now, ffmpeg/scrcpy stream later
+#   WebUSB (ya-webadb)        → flag below; client-side, no daemon, iteration 2
+#   WebRTC (helper app)       → noted but unimplemented, needs a phone-side app
+# This file implements the first row. Endpoints are thin wrappers over `adb`.
+
+DEVICES_FLAVORS = {
+    "adb_server": True,
+    "webusb_yaadb": False,
+    "webrtc_signaling": False,
+}
+
+
+@app.get("/v1/devices/flavors")
+async def device_flavors() -> dict[str, Any]:
+    return DEVICES_FLAVORS
+
+
+@app.get("/v1/devices")
+async def list_devices() -> list[dict[str, Any]]:
+    """`adb devices -l` parsed + per-device getprop + `wm size`."""
+    nexus: MedusaNexus = app.state.nexus
+    adb = nexus.engines["adb"]
+    if not shutil.which(nexus.config.adb_path):
+        return []
+
+    try:
+        raw = await adb._run([nexus.config.adb_path, "devices", "-l"])  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return []
+
+    devices: list[dict[str, Any]] = []
+    for line in raw.splitlines()[1:]:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        serial, state = parts[0], parts[1]
+        info: dict[str, Any] = {"serial": serial, "state": state}
+        for kv in parts[2:]:
+            if ":" in kv:
+                k, v = kv.split(":", 1)
+                info[k] = v
+
+        if state != "device":
+            devices.append(info)
+            continue
+
+        for prop, key in [
+            ("ro.product.model", "model"),
+            ("ro.build.version.release", "android_release"),
+            ("ro.build.version.sdk", "android_sdk"),
+            ("ro.product.cpu.abi", "abi"),
+            ("ro.product.manufacturer", "manufacturer"),
+            ("ro.debuggable", "debuggable"),
+            ("ro.product.brand", "brand"),
+        ]:
+            try:
+                info[key] = (await adb._run([nexus.config.adb_path, "-s", serial, "shell", "getprop", prop])).strip()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                info[key] = ""
+
+        try:
+            size_out = await adb._run([nexus.config.adb_path, "-s", serial, "shell", "wm", "size"])  # type: ignore[attr-defined]
+            for ln in size_out.splitlines():
+                if "size:" in ln.lower():
+                    dims = ln.split(":")[-1].strip()
+                    if "x" in dims:
+                        w, h = dims.split("x", 1)
+                        info["screen_width"] = int(w.strip())
+                        info["screen_height"] = int(h.strip())
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            ls = await adb._run([nexus.config.adb_path, "-s", serial, "shell", "ls", "/data/local/tmp/frida-server"])  # type: ignore[attr-defined]
+            info["frida_server_staged"] = "frida-server" in ls and "No such" not in ls
+        except Exception:  # noqa: BLE001
+            info["frida_server_staged"] = False
+        try:
+            ps = await adb._run([nexus.config.adb_path, "-s", serial, "shell", "pgrep", "-f", "frida-server"])  # type: ignore[attr-defined]
+            info["frida_server_running"] = bool(ps.strip())
+        except Exception:  # noqa: BLE001
+            info["frida_server_running"] = False
+
+        devices.append(info)
+    return devices
+
+
+@app.post("/v1/devices/connect")
+async def device_connect(host: str = Form(...), port: int = Form(default=5555)) -> dict[str, Any]:
+    """`adb connect <host>:<port>` — wireless ADB."""
+    nexus: MedusaNexus = app.state.nexus
+    out = await nexus.engines["adb"]._run([nexus.config.adb_path, "connect", f"{host}:{port}"])  # type: ignore[attr-defined]
+    return {"output": out.strip(), "target": f"{host}:{port}"}
+
+
+@app.post("/v1/devices/{serial}/disconnect")
+async def device_disconnect(serial: str) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    out = await nexus.engines["adb"]._run([nexus.config.adb_path, "disconnect", serial])  # type: ignore[attr-defined]
+    return {"serial": serial, "output": out.strip()}
+
+
+@app.post("/v1/devices/{serial}/tcpip")
+async def device_tcpip(serial: str, port: int = Form(default=5555)) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    out = await nexus.engines["adb"]._run([nexus.config.adb_path, "-s", serial, "tcpip", str(port)])  # type: ignore[attr-defined]
+    return {"serial": serial, "port": port, "output": out.strip()}
+
+
+@app.post("/v1/devices/{serial}/shell")
+async def device_shell(serial: str, cmd: str = Form(...)) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    try:
+        out = await nexus.engines["adb"]._run([nexus.config.adb_path, "-s", serial, "shell", cmd])  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"adb shell failed: {exc}") from exc
+    return {"serial": serial, "cmd": cmd, "output": out}
+
+
+@app.post("/v1/devices/{serial}/key")
+async def device_key(serial: str, keycode: str = Form(...)) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    await nexus.engines["adb"]._run([  # type: ignore[attr-defined]
+        nexus.config.adb_path, "-s", serial, "shell", "input", "keyevent", keycode
+    ])
+    return {"serial": serial, "keycode": keycode}
+
+
+@app.post("/v1/devices/{serial}/tap")
+async def device_tap(serial: str, x: int = Form(...), y: int = Form(...)) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    await nexus.engines["adb"]._run([  # type: ignore[attr-defined]
+        nexus.config.adb_path, "-s", serial, "shell", "input", "tap", str(x), str(y)
+    ])
+    return {"serial": serial, "x": x, "y": y}
+
+
+@app.post("/v1/devices/{serial}/swipe")
+async def device_swipe(
+    serial: str,
+    x1: int = Form(...), y1: int = Form(...),
+    x2: int = Form(...), y2: int = Form(...),
+    ms: int = Form(default=300),
+) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    await nexus.engines["adb"]._run([  # type: ignore[attr-defined]
+        nexus.config.adb_path, "-s", serial, "shell", "input", "swipe",
+        str(x1), str(y1), str(x2), str(y2), str(ms),
+    ])
+    return {"serial": serial, "from": [x1, y1], "to": [x2, y2], "ms": ms}
+
+
+@app.post("/v1/devices/{serial}/text")
+async def device_text(serial: str, text: str = Form(...)) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    safe = text.replace(" ", "%s").replace("'", "")
+    await nexus.engines["adb"]._run([  # type: ignore[attr-defined]
+        nexus.config.adb_path, "-s", serial, "shell", "input", "text", safe
+    ])
+    return {"serial": serial, "len": len(text)}
+
+
+@app.post("/v1/devices/{serial}/reboot")
+async def device_reboot(serial: str, mode: str = Form(default="")) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    cmd = [nexus.config.adb_path, "-s", serial, "reboot"]
+    if mode:
+        cmd.append(mode)
+    await nexus.engines["adb"]._run(cmd)  # type: ignore[attr-defined]
+    return {"serial": serial, "mode": mode or "normal"}
+
+
+@app.post("/v1/devices/{serial}/install")
+async def device_install(serial: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    nexus.config.workspace.mkdir(parents=True, exist_ok=True)
+    apk_path = nexus.config.workspace / f"install-{serial.replace(':', '_')}-{Path(file.filename or 'app.apk').name}"
+    with apk_path.open("wb") as fh:
+        while chunk := await file.read(1024 * 1024):
+            fh.write(chunk)
+    out = await nexus.engines["adb"]._run([  # type: ignore[attr-defined]
+        nexus.config.adb_path, "-s", serial, "install", "-r", str(apk_path)
+    ])
+    return {"serial": serial, "apk": apk_path.name, "success": "Success" in out, "output": out}
+
+
+@app.get("/v1/devices/{serial}/screencap.png")
+async def device_screencap(serial: str) -> Response:
+    """Single PNG via `adb exec-out screencap -p`. UI polls this every ~800ms."""
+    nexus: MedusaNexus = app.state.nexus
+    proc = await asyncio.create_subprocess_exec(
+        nexus.config.adb_path, "-s", serial, "exec-out", "screencap", "-p",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0 or not stdout:
+        raise HTTPException(503, f"screencap failed: {stderr.decode('utf-8', errors='replace')[:200]}")
+    return Response(content=stdout, media_type="image/png", headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/v1/devices/{serial}/frida-server")
+async def device_frida_per_device(serial: str) -> dict[str, Any]:
+    """Start frida-server on a specific device (multi-device variant of /v1/device/frida/start)."""
+    nexus: MedusaNexus = app.state.nexus
+    cmd = "su -c '/data/local/tmp/frida-server &' 2>/dev/null || /data/local/tmp/frida-server &"
+    try:
+        await nexus.engines["adb"]._run([nexus.config.adb_path, "-s", serial, "shell", cmd])  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"adb shell failed: {exc}") from exc
+    await asyncio.sleep(1.5)
+    ps = await nexus.engines["adb"]._run([nexus.config.adb_path, "-s", serial, "shell", "pgrep", "-f", "frida-server"])  # type: ignore[attr-defined]
+    return {"serial": serial, "running": bool(ps.strip()), "pid": ps.strip().splitlines()[0] if ps.strip() else None}
 
 
 # ─── recipes (Medusa / Stheno on disk) ───────────────────────────────────
@@ -863,7 +1083,7 @@ async def dynamic_start(
     p = _require_project(project_id)
     hook_names = [h.strip() for h in hooks.split(",") if h.strip()]
     sid = uuid.uuid4().hex[:8]
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(UTC).isoformat()
     _SESSIONS[sid] = {
         "session_id": sid,
         "project_id": p.id,
@@ -886,7 +1106,7 @@ async def dynamic_stop(project_id: str, session_id: str = Form(...)) -> dict[str
     if not sess or sess["project_id"] != project_id:
         raise HTTPException(404, f"no session {session_id} for project {project_id}")
     sess["status"] = "detached"
-    sess["log"].append({"ts": datetime.utcnow().isoformat() + "Z", "channel": "nexus", "line": "[NEXUS] detached cleanly"})
+    sess["log"].append({"ts": datetime.now(UTC).isoformat(), "channel": "nexus", "line": "[NEXUS] detached cleanly"})
     return sess
 
 
