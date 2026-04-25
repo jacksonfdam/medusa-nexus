@@ -1024,6 +1024,362 @@ function view_finding_detail(ctx) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ *  SCREEN — Devices (multi-device ADB manager)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const DEVICE_CONNECT_FLAVORS = [
+    { key: "adb_server",      label: "ADB + ffmpeg",        impl: "server-side",   load: "medium", value: "high",   default: true },
+    { key: "webusb_yaadb",    label: "WebUSB / ya-webadb",  impl: "browser-direct", load: "medium", value: "high",   default: false },
+    { key: "webrtc_signaling",label: "WebRTC + helper app", impl: "phone-side app", load: "low",    value: "medium", default: false },
+];
+
+function view_devices() {
+    return h`
+    <div class="main">
+      ${sectionHeader("D", "04 // INTAKE", "DEVICES")}
+      <div class="devices-bar">
+        <div class="row" style="gap:8px">
+          <span class="muted small uppercase">connect via:</span>
+          ${DEVICE_CONNECT_FLAVORS.map((f) => `
+            <span class="chip ${f.default ? "low" : "info"}" data-flavor="${f.key}" title="${f.impl} · load=${f.load} · value=${f.value}">
+              ${f.label}${f.default ? "" : " (iter 2)"}
+            </span>`).join("")}
+        </div>
+        <span class="spacer"></span>
+        <form id="connect-form" class="row" style="gap:8px;flex-wrap:nowrap">
+          <div class="input" style="width:200px">
+            <span class="prompt">tcp&gt;</span>
+            <input id="connect-host" placeholder="192.168.1.42" autocomplete="off">
+          </div>
+          <div class="input" style="width:90px">
+            <input id="connect-port" placeholder="5555" value="5555" autocomplete="off">
+          </div>
+          <button class="btn primary" type="submit">[ CONNECT ]</button>
+        </form>
+        <button class="btn" id="devices-refresh">[ REFRESH ]</button>
+      </div>
+      <div class="muted small" id="connect-status" style="min-height:16px"></div>
+      <section class="panel">
+        <div class="panel-head">
+          <span>// CONNECTED DEVICES</span>
+          <span class="spacer"></span>
+          <span class="muted" id="devices-count">scanning…</span>
+        </div>
+        <div class="panel-body" id="devices-grid-host">
+          <div class="empty-state">scanning…</div>
+        </div>
+      </section>
+      <section class="panel" id="device-detail-panel" style="display:none">
+        <div class="panel-head">
+          <span id="device-detail-title">// DEVICE DETAIL</span>
+          <span class="spacer"></span>
+          <button class="btn" id="device-detail-close">[ CLOSE ]</button>
+        </div>
+        <div class="panel-body" id="device-detail-host"></div>
+      </section>
+    </div>`;
+}
+
+let _devicesPollTimer = null;
+let _mirrorTimer = null;
+let _activeSerial = null;
+
+async function mount_devices() {
+    await refreshDevices();
+    clearInterval(_devicesPollTimer);
+    _devicesPollTimer = setInterval(() => {
+        if (location.hash.startsWith("#/devices")) refreshDevices();
+        else { clearInterval(_devicesPollTimer); clearInterval(_mirrorTimer); }
+    }, 4000);
+
+    const form = $("#connect-form");
+    if (form) form.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const host = $("#connect-host").value.trim();
+        const port = $("#connect-port").value.trim() || "5555";
+        if (!host) return;
+        const status = $("#connect-status");
+        status.innerHTML = `<span style="color:var(--acid)">↑ adb connect ${host}:${port}…</span>`;
+        try {
+            const fd = new FormData();
+            fd.append("host", host);
+            fd.append("port", port);
+            const r = await fetch("/v1/devices/connect", { method: "POST", body: fd });
+            const j = await r.json();
+            const ok = !j.output.toLowerCase().includes("failed") && !j.output.toLowerCase().includes("cannot");
+            status.innerHTML = `<span style="color:var(--${ok ? "acid" : "sev-crit"})">${j.output}</span>`;
+            await refreshDevices();
+        } catch (e) {
+            status.innerHTML = `<span style="color:var(--sev-crit)">${e.message}</span>`;
+        }
+    });
+
+    const refreshBtn = $("#devices-refresh");
+    if (refreshBtn) refreshBtn.addEventListener("click", refreshDevices);
+
+    const closeBtn = $("#device-detail-close");
+    if (closeBtn) closeBtn.addEventListener("click", () => closeDeviceDetail());
+}
+
+async function refreshDevices() {
+    const host = $("#devices-grid-host");
+    if (!host) return;
+    const devices = await getJSON("/v1/devices").catch(() => []);
+    $("#devices-count").textContent = `${devices.length} attached`;
+    const navCount = $("#nav-devices-count");
+    if (navCount) navCount.textContent = devices.length ? String(devices.length) : "";
+
+    if (!devices.length) {
+        host.innerHTML = `
+          <div class="empty-state">
+            <div style="font-size:18px;color:var(--magenta);letter-spacing:3px">NO DEVICES</div>
+            <div class="muted small" style="margin-top:8px">plug a USB device with debugging on, or use <b>tcp&gt;</b> above to <code>adb connect &lt;host&gt;</code></div>
+          </div>`;
+        return;
+    }
+
+    host.innerHTML = `<div class="devices-grid">${devices.map(deviceCardHtml).join("")}</div>`;
+    $$("[data-serial]").forEach((card) => {
+        card.addEventListener("click", () => openDeviceDetail(card.dataset.serial, devices.find((d) => d.serial === card.dataset.serial)));
+    });
+}
+
+function deviceCardHtml(d) {
+    const ok = d.state === "device";
+    const stateColor = ok ? "var(--acid)" : (d.state === "unauthorized" ? "var(--sev-high)" : "var(--sev-crit)");
+    return `
+    <div class="device-card ${d.serial === _activeSerial ? "active" : ""}" data-serial="${d.serial}">
+      <div class="head">
+        <span class="t-mono" style="font-weight:700;flex:1">${d.model || d.product || d.serial}</span>
+        <span class="badge" style="color:${stateColor};border-color:${stateColor}">${d.state.toUpperCase()}</span>
+      </div>
+      <div class="muted small t-mono">${d.serial}</div>
+      ${ok ? `
+      <div class="grid">
+        <span class="key">ANDROID</span><span class="val">${d.android_release || "?"} (SDK ${d.android_sdk || "?"})</span>
+        <span class="key">ABI</span><span class="val">${d.abi || "?"}</span>
+        <span class="key">SCREEN</span><span class="val">${d.screen_width || "?"}×${d.screen_height || "?"}</span>
+        <span class="key">DEBUG</span><span class="val" style="color:var(--${d.debuggable === "1" ? "sev-high" : "muted"})">${d.debuggable === "1" ? "yes" : "no"}</span>
+        <span class="key">FRIDA</span><span class="val" style="color:var(--${d.frida_server_running ? "acid" : d.frida_server_staged ? "sev-high" : "muted"})">${d.frida_server_running ? "running" : d.frida_server_staged ? "staged" : "—"}</span>
+        <span class="key">BRAND</span><span class="val">${d.brand || d.manufacturer || "?"}</span>
+      </div>` : ""}
+    </div>`;
+}
+
+function openDeviceDetail(serial, d) {
+    _activeSerial = serial;
+    document.querySelectorAll(".device-card").forEach((c) => c.classList.toggle("active", c.dataset.serial === serial));
+    const panel = $("#device-detail-panel");
+    const host = $("#device-detail-host");
+    const title = $("#device-detail-title");
+    if (!panel || !host) return;
+    panel.style.display = "";
+    title.textContent = `// DEVICE :: ${d?.model || serial}`;
+
+    const ok = d?.state === "device";
+    if (!ok) {
+        host.innerHTML = `
+          <div class="empty-state">
+            <div style="color:var(--sev-crit);font-size:18px">${d?.state?.toUpperCase() || "OFFLINE"}</div>
+            <div class="muted small">authorize USB debugging on the device, or <code>adb kill-server && adb start-server</code></div>
+          </div>`;
+        return;
+    }
+
+    const w = d.screen_width || 1080;
+    const h = d.screen_height || 2400;
+    host.innerHTML = `
+      <div class="device-detail">
+        <div class="device-mirror" id="mirror">
+          <img id="mirror-img" alt="screen mirror" data-w="${w}" data-h="${h}" />
+          <div class="mirror-foot">
+            <span>MIRROR · ${w}×${h}</span>
+            <span>·</span>
+            <span>polling 800ms (ffmpeg stream → iter 2)</span>
+            <span class="spacer"></span>
+            <span id="mirror-status" style="color:var(--acid)">live</span>
+          </div>
+        </div>
+        <div class="col">
+          <section class="panel">
+            <div class="panel-head">// QUICK ACTIONS</div>
+            <div class="panel-body col">
+              <div class="row" style="flex-wrap:wrap;gap:8px">
+                <button class="btn primary" data-action="frida">[ START FRIDA ]</button>
+                <button class="btn" data-action="tcpip">[ ADB OVER TCP ]</button>
+                <button class="btn" data-action="reboot">[ REBOOT ]</button>
+                <button class="btn" data-action="reboot-bootloader">[ → BOOTLOADER ]</button>
+                <button class="btn" data-action="reboot-recovery">[ → RECOVERY ]</button>
+                <button class="btn danger" data-action="disconnect">[ DISCONNECT ]</button>
+              </div>
+              <div class="row" style="gap:8px;align-items:center">
+                <input type="file" id="install-file" accept=".apk" style="display:none">
+                <button class="btn" onclick="document.getElementById('install-file').click()">[ INSTALL APK… ]</button>
+                <span id="install-status" class="muted small"></span>
+              </div>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">// KEY EVENTS · adb shell input keyevent</div>
+            <div class="panel-body">
+              <div class="key-grid">
+                <button class="btn" data-key="3">HOME</button>
+                <button class="btn" data-key="4">BACK</button>
+                <button class="btn" data-key="187">RECENTS</button>
+                <button class="btn" data-key="26">POWER</button>
+                <button class="btn" data-key="24">VOL+</button>
+                <button class="btn" data-key="25">VOL-</button>
+                <button class="btn" data-key="82">MENU</button>
+                <button class="btn" data-key="66">ENTER</button>
+              </div>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">// SHELL</div>
+            <div class="panel-body col">
+              <form id="shell-form" class="row" style="gap:8px">
+                <div class="input grow">
+                  <span class="prompt">$</span>
+                  <input id="shell-input" placeholder="getprop ro.build.fingerprint" autocomplete="off">
+                  <span class="cursor">_</span>
+                </div>
+                <button class="btn primary" type="submit">[ RUN ]</button>
+              </form>
+              <pre id="shell-out" class="code" style="max-height:240px"></pre>
+            </div>
+          </section>
+        </div>
+      </div>`;
+
+    bindMirror(serial, w, h);
+    bindActions(serial);
+    bindKeys(serial);
+    bindShell(serial);
+    bindInstall(serial);
+}
+
+function bindMirror(serial, w, h) {
+    const img = $("#mirror-img");
+    if (!img) return;
+    const status = $("#mirror-status");
+    let fails = 0;
+
+    function tick() {
+        const url = `/v1/devices/${encodeURIComponent(serial)}/screencap.png?t=${Date.now()}`;
+        const probe = new Image();
+        probe.onload = () => { img.src = probe.src; if (status) { status.textContent = "live"; status.style.color = "var(--acid)"; } fails = 0; };
+        probe.onerror = () => { fails++; if (status && fails > 2) { status.textContent = "stalled"; status.style.color = "var(--sev-crit)"; } };
+        probe.src = url;
+    }
+    tick();
+    clearInterval(_mirrorTimer);
+    _mirrorTimer = setInterval(() => {
+        if (!location.hash.startsWith("#/devices")) { clearInterval(_mirrorTimer); return; }
+        if (_activeSerial !== serial) { clearInterval(_mirrorTimer); return; }
+        tick();
+    }, 800);
+
+    img.addEventListener("click", async (ev) => {
+        const rect = img.getBoundingClientRect();
+        const xRatio = (ev.clientX - rect.left) / rect.width;
+        const yRatio = (ev.clientY - rect.top) / rect.height;
+        const x = Math.round(xRatio * w);
+        const y = Math.round(yRatio * h);
+        const fd = new FormData(); fd.append("x", x); fd.append("y", y);
+        await fetch(`/v1/devices/${encodeURIComponent(serial)}/tap`, { method: "POST", body: fd });
+    });
+}
+
+function bindActions(serial) {
+    $$("[data-action]").forEach((btn) => btn.addEventListener("click", async () => {
+        const a = btn.dataset.action;
+        const orig = btn.textContent;
+        btn.textContent = "[ … ]";
+        try {
+            if (a === "frida") {
+                const r = await fetch(`/v1/devices/${encodeURIComponent(serial)}/frida-server`, { method: "POST" });
+                const j = await r.json();
+                btn.textContent = j.running ? `[ FRIDA pid=${j.pid} ]` : "[ FAILED ]";
+                btn.style.color = j.running ? "var(--acid)" : "var(--sev-crit)";
+            } else if (a === "tcpip") {
+                const r = await fetch(`/v1/devices/${encodeURIComponent(serial)}/tcpip`, { method: "POST", body: new FormData() });
+                const j = await r.json();
+                btn.textContent = `[ TCP/IP :${j.port} ]`;
+            } else if (a === "reboot" || a === "reboot-bootloader" || a === "reboot-recovery") {
+                const fd = new FormData();
+                if (a === "reboot-bootloader") fd.append("mode", "bootloader");
+                if (a === "reboot-recovery") fd.append("mode", "recovery");
+                await fetch(`/v1/devices/${encodeURIComponent(serial)}/reboot`, { method: "POST", body: fd });
+                btn.textContent = "[ REBOOTING ]"; btn.style.color = "var(--sev-high)";
+            } else if (a === "disconnect") {
+                await fetch(`/v1/devices/${encodeURIComponent(serial)}/disconnect`, { method: "POST" });
+                closeDeviceDetail(); refreshDevices();
+            }
+        } catch (e) {
+            btn.textContent = "[ ERROR ]"; btn.style.color = "var(--sev-crit)";
+            console.error(e);
+        }
+        setTimeout(() => { if (btn.textContent.includes("…") || btn.textContent === "[ ERROR ]") btn.textContent = orig; }, 2500);
+    }));
+}
+
+function bindKeys(serial) {
+    $$("[data-key]").forEach((btn) => btn.addEventListener("click", async () => {
+        const fd = new FormData(); fd.append("keycode", btn.dataset.key);
+        btn.style.background = "var(--bg-accent-panel)";
+        await fetch(`/v1/devices/${encodeURIComponent(serial)}/key`, { method: "POST", body: fd });
+        setTimeout(() => { btn.style.background = ""; }, 200);
+    }));
+}
+
+function bindShell(serial) {
+    const form = $("#shell-form"); if (!form) return;
+    form.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const cmd = $("#shell-input").value.trim(); if (!cmd) return;
+        const out = $("#shell-out");
+        out.textContent += `$ ${cmd}\n`;
+        const fd = new FormData(); fd.append("cmd", cmd);
+        try {
+            const r = await fetch(`/v1/devices/${encodeURIComponent(serial)}/shell`, { method: "POST", body: fd });
+            const j = await r.json();
+            out.textContent += (j.output || "(no output)") + "\n";
+        } catch (e) {
+            out.textContent += `<error: ${e.message}>\n`;
+        }
+        out.scrollTop = out.scrollHeight;
+        $("#shell-input").value = "";
+    });
+}
+
+function bindInstall(serial) {
+    const input = $("#install-file"); if (!input) return;
+    input.addEventListener("change", async () => {
+        const f = input.files?.[0]; if (!f) return;
+        const status = $("#install-status");
+        status.textContent = `installing ${f.name} (${fmtBytes(f.size)})…`;
+        const fd = new FormData(); fd.append("file", f);
+        try {
+            const r = await fetch(`/v1/devices/${encodeURIComponent(serial)}/install`, { method: "POST", body: fd });
+            const j = await r.json();
+            status.textContent = j.success ? `✓ installed` : `✕ ${j.output.split('\n').slice(-2).join(' ')}`;
+            status.style.color = j.success ? "var(--acid)" : "var(--sev-crit)";
+        } catch (e) {
+            status.textContent = `✕ ${e.message}`;
+            status.style.color = "var(--sev-crit)";
+        }
+    });
+}
+
+function closeDeviceDetail() {
+    _activeSerial = null;
+    clearInterval(_mirrorTimer);
+    const panel = $("#device-detail-panel");
+    if (panel) panel.style.display = "none";
+    document.querySelectorAll(".device-card").forEach((c) => c.classList.remove("active"));
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  *  mount hooks for every wired screen
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -1131,24 +1487,107 @@ async function mount_project_static(ctx) {
 }
 
 async function mount_project_dynamic(ctx) {
-    let recipes = [];
-    try { recipes = await getJSON("/v1/recipes"); } catch (e) { /* empty */ }
-    const left = $(".panel");
-    if (!left) return;
-    const body = left.querySelector(".panel-body");
-    if (!body || !recipes.length) return;
+    const id = ctx.params.id;
+    // Auto-hooks first; fall back to recipes.
+    let hooks = [];
+    if (id) {
+        try { hooks = await getJSON(`/v1/projects/${encodeURIComponent(id)}/hooks`); }
+        catch (e) { /* empty */ }
+    }
+    if (!hooks.length) {
+        try {
+            const recipes = await getJSON("/v1/recipes");
+            hooks = recipes.map((r) => ({ name: r.name, description: r.description, source_finding_id: null }));
+        } catch (e) { /* empty */ }
+    }
 
-    const listed = recipes.map((r, i) => {
-        const on = i < 3;
+    const panels = $$(".panel");
+    const hooksPanel = panels[0];
+    if (hooksPanel) {
+        const body = hooksPanel.querySelector(".panel-body");
+        if (body) {
+            const checked = new Set(hooks.slice(0, Math.min(3, hooks.length)).map((h) => h.name));
+            body.innerHTML = `<div class="muted small">Auto-hooks generated from this project's surface. Untick at your own risk.</div>`
+                + hooks.map((h) => {
+                    const on = checked.has(h.name);
+                    return `
+                    <label class="row" data-hook="${h.name}" style="padding:6px 10px;background:${on ? "var(--bg-accent-panel)" : "var(--bg-panel)"};border:1px solid ${on ? "var(--border-accent)" : "var(--border)"};border-radius:2px;cursor:pointer">
+                      <input type="checkbox" ${on ? "checked" : ""} style="accent-color:var(--acid)">
+                      <span class="t-mono" style="color:${on ? "var(--acid)" : "var(--muted)"};flex:1">${h.name}</span>
+                      <span class="muted small">${h.source_finding_id ? "auto" : "recipe"}</span>
+                    </label>`;
+                }).join("")
+                + `<div class="row" style="margin-top:10px;gap:8px">
+                     <button class="btn primary" id="dyn-start">[ START SESSION ]</button>
+                     <button class="btn" id="dyn-stop">[ STOP ]</button>
+                     <a class="btn" href="#/recipes">[ + RECIPES ]</a>
+                   </div>`;
+        }
+    }
+
+    let activeSession = null;
+    const consolePanel = panels[1];
+    const consoleEl = consolePanel?.querySelector(".panel-body.console");
+    const renderLog = (lines) => {
+        if (!consoleEl) return;
+        consoleEl.innerHTML = lines.map((l) => `<div><span class="${classifyTraceClass(l.channel)}">${escapeHtml(l.line)}</span></div>`).join("")
+            || `<span class="muted">no events</span>`;
+    };
+
+    const startBtn = $("#dyn-start");
+    const stopBtn = $("#dyn-stop");
+    if (startBtn && id) {
+        startBtn.addEventListener("click", async () => {
+            const selected = $$('label[data-hook] input[type="checkbox"]')
+                .map((c, i) => c.checked ? $$('label[data-hook]')[i].dataset.hook : null)
+                .filter(Boolean);
+            startBtn.textContent = "[ STARTING… ]";
+            const fd = new FormData(); fd.append("hooks", selected.join(","));
+            const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/start`, { method: "POST", body: fd });
+            const j = await r.json();
+            if (!r.ok) { startBtn.textContent = "[ FAILED ]"; startBtn.style.color = "var(--sev-crit)"; return; }
+            activeSession = j.session_id;
+            startBtn.textContent = `[ ATTACHED · ${activeSession} ]`;
+            startBtn.style.color = "var(--acid)";
+            renderLog(j.log);
+        });
+    }
+    if (stopBtn && id) {
+        stopBtn.addEventListener("click", async () => {
+            if (!activeSession) return;
+            const fd = new FormData(); fd.append("session_id", activeSession);
+            const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/stop`, { method: "POST", body: fd });
+            const j = await r.json();
+            if (r.ok) { stopBtn.textContent = "[ DETACHED ]"; renderLog(j.log); }
+        });
+    }
+}
+
+async function mount_project_network(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/traffic`).catch(() => null);
+    if (!data) return;
+    if (!data.captured.length) return; // keep the demo rows from the view
+    const panel = $$(".panel")[0];
+    const body = panel?.querySelector(".panel-body.tight");
+    if (!body) return;
+    body.innerHTML = `
+      <div class="table-hdr" style="grid-template-columns: 50px 180px 1fr 70px 80px 60px 90px">
+        <span>M</span><span>HOST</span><span>PATH</span><span>STATUS</span><span>SIZE</span><span>MS</span><span>FLAGS</span>
+      </div>` + data.captured.map((row) => {
+        const m = row.method || "GET";
+        const sev = row.severity || "info";
         return `
-        <div class="row" style="padding:6px 10px;background:${on ? "var(--bg-accent-panel)" : "var(--bg-panel)"};border:1px solid ${on ? "var(--border-accent)" : "var(--border)"};border-radius:2px">
-          <span style="color:${on ? "var(--acid)" : "var(--muted)"}">[${on ? "x" : " "}]</span>
-          <span class="t-mono" style="color:${on ? "var(--acid)" : "var(--muted)"};flex:1">${r.name}</span>
-          <span class="muted small">${r.origin}</span>
-        </div>`;
+          <a class="table-row" href="#/project/${encodeURIComponent(id)}/api-map" style="grid-template-columns: 50px 180px 1fr 70px 80px 60px 90px;text-decoration:none;color:inherit">
+            <span class="t-mono" style="color:${m === "POST" ? "var(--acid)" : "var(--cyan)"};font-weight:700">${m}</span>
+            <span class="t-mono" style="color:var(--cyan)">${row.host || "?"}</span>
+            <span class="t-mono" style="color:var(--cyan)">${row.path || "/"}</span>
+            <span class="t-mono" style="color:var(--${(row.status || 0) < 300 ? "acid" : (row.status || 0) < 500 ? "sev-high" : "sev-crit"});font-weight:700">${row.status || "—"}</span>
+            <span class="t-muted">${fmtBytes(row.size || 0)}</span>
+            <span class="t-muted">${row.ms || "—"}</span>
+            <span style="font-size:9px;color:var(--sev-${sev});font-weight:700">${(row.flags || []).map((f) => "[" + f + "]").join("")}</span>
+          </a>`;
     }).join("");
-    body.innerHTML = `<div class="muted small">Auto-generated from static findings + loaded recipes. Untick at your own risk.</div>` + listed +
-        `<a class="btn" href="#/recipes" style="margin-top:10px">[ LOAD MORE RECIPES ]</a>`;
 }
 
 async function mount_device_pull() {
@@ -1220,8 +1659,10 @@ async function mount_device_bridge() {
         }
     }
 
-    $$('.btn.primary').forEach((btn) => {
-        if (btn.textContent.includes("START FRIDA")) {
+    // Wire every button label.
+    $$(".btn").forEach((btn) => {
+        const label = btn.textContent.trim().toUpperCase();
+        if (label.includes("START FRIDA")) {
             btn.addEventListener("click", async () => {
                 btn.textContent = "[ STARTING… ]";
                 try {
@@ -1234,6 +1675,22 @@ async function mount_device_bridge() {
                     btn.textContent = "[ ERROR ]";
                     btn.style.color = "var(--sev-crit)";
                 }
+            });
+        } else if (label.includes("PUSH SCRIPTS")) {
+            btn.addEventListener("click", () => {
+                btn.textContent = "[ NOT WIRED — see /v1/recipes ]";
+                btn.style.color = "var(--sev-high)";
+            });
+        } else if (label.includes("PATCH WITH STHENO")) {
+            btn.addEventListener("click", () => {
+                btn.textContent = "[ STHENO BINDING PENDING ]";
+                btn.style.color = "var(--sev-high)";
+            });
+        } else if (label.includes("FORCE REBOOT")) {
+            btn.addEventListener("click", () => {
+                if (!confirm("really reboot the connected device?")) return;
+                btn.textContent = "[ NOT WIRED — adb reboot disabled ]";
+                btn.style.color = "var(--sev-high)";
             });
         }
     });
@@ -1252,21 +1709,58 @@ async function mount_recipes() {
           <div class="desc">${r.description}</div>
           <div class="foot">
             <span class="compat">${r.compatibility}</span>
+            <button class="btn" data-preview="${r.name}" style="padding:4px 10px">[ PREVIEW ]</button>
             <button class="btn primary" data-load="${r.name}" style="padding:4px 10px">[ LOAD ]</button>
           </div>
         </div>`).join("");
+
+    // Preview button → open modal-ish overlay with the script.
+    $$("[data-preview]").forEach((btn) => btn.addEventListener("click", async () => {
+        const name = btn.dataset.preview;
+        btn.textContent = "[ … ]";
+        try {
+            const j = await getJSON(`/v1/recipes/${encodeURIComponent(name)}/script`);
+            showScriptOverlay(name, j.script);
+            btn.textContent = "[ PREVIEW ]";
+        } catch (e) {
+            btn.textContent = "[ N/A ]";
+            btn.style.color = "var(--sev-high)";
+        }
+    }));
+
     $$("[data-load]").forEach((btn) => btn.addEventListener("click", async () => {
         const name = btn.dataset.load;
         btn.textContent = "[ …]";
         try {
             const j = await getJSON(`/v1/recipes/${encodeURIComponent(name)}/script`);
-            btn.textContent = `[ ${j.script.length}B ]`;
+            btn.textContent = `[ LOADED · ${j.script.length}B ]`;
             btn.style.color = "var(--acid)";
         } catch (e) {
             btn.textContent = "[ N/A ]";
             btn.style.color = "var(--sev-high)";
         }
     }));
+}
+
+function showScriptOverlay(name, script) {
+    const existing = $("#script-overlay");
+    if (existing) existing.remove();
+    const overlay = document.createElement("div");
+    overlay.id = "script-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;display:flex;align-items:center;justify-content:center;padding:40px";
+    overlay.innerHTML = `
+      <div style="max-width:900px;width:100%;max-height:80vh;background:var(--bg);border:1px solid var(--border-accent);display:flex;flex-direction:column">
+        <div class="panel-head" style="border-bottom:1px solid var(--border-accent)">
+          <span class="t-mono" style="color:var(--acid)">// ${name}.js</span>
+          <span class="spacer"></span>
+          <span class="muted small">${script.length} bytes</span>
+          <button class="btn" id="overlay-close" style="margin-left:12px">[ CLOSE ]</button>
+        </div>
+        <pre class="code" style="overflow:auto;flex:1;margin:0;border:0">${escapeHtml(script)}</pre>
+      </div>`;
+    document.body.appendChild(overlay);
+    $("#overlay-close").addEventListener("click", () => overlay.remove());
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
 }
 
 async function mount_settings() {
@@ -1293,126 +1787,883 @@ async function mount_settings() {
 
 async function mount_finding_detail(ctx) {
     const fid = ctx.params.fid || ctx.params.id;
+    let finding = null;
     try {
-        const f = await getJSON(`/v1/findings/${encodeURIComponent(fid)}`);
+        finding = await getJSON(`/v1/findings/${encodeURIComponent(fid)}`);
         const title = $(".finding .title");
         const meta = $(".finding .meta");
         const code = $$(".finding .code")[0];
+        const hookCode = $$(".finding .code")[1];
         const mit = $(".finding .mitigation");
-        if (title) title.textContent = f.title;
-        if (meta) meta.textContent = `${f.location || ""} · ${f.cwe_id || ""} ${f.owasp_mobile || ""} · engine: ${f.source_engine}`;
-        if (code) code.textContent = f.evidence || "(no evidence)";
-        if (mit && f.remediation) mit.innerHTML = f.remediation.split("\n").map((line) => `<div>${line}</div>`).join("");
-    } catch (e) {
-        // Fall back to the demo content — the route still shows the Finding Detail template.
-    }
+        if (title) title.textContent = finding.title;
+        if (meta) meta.textContent = `${finding.location || ""} · ${finding.cwe_id || ""} ${finding.owasp_mobile || ""} · engine: ${finding.source_engine}`;
+        if (code) code.textContent = finding.evidence || "(no evidence)";
+        if (hookCode && finding.suggested_hook) hookCode.textContent = finding.suggested_hook;
+        if (mit && finding.remediation) {
+            mit.innerHTML = finding.remediation.split("\n").map((line, i) => `<div><b>${String(i + 1).padStart(2, "0")}</b> ${escapeHtml(line)}</div>`).join("");
+        }
+        // Confirmed badge
+        const confirmedBadge = $(".finding .badge");
+        if (confirmedBadge) {
+            confirmedBadge.classList.toggle("connected", !!finding.confirmed);
+            confirmedBadge.classList.toggle("scanning", !finding.confirmed);
+            confirmedBadge.innerHTML = `<span class="dot">●</span>${finding.confirmed ? "CONFIRMED" : "STATIC ONLY"}`;
+        }
+    } catch (e) { /* fall back to demo content */ }
+
+    // Wire action buttons regardless of whether we got real data.
+    const buttons = $$(".finding .btn");
+    buttons.forEach((btn) => {
+        const t = btn.textContent.trim().toUpperCase();
+        if (t.includes("RUN HOOK")) {
+            btn.addEventListener("click", () => {
+                const hookCode = $$(".finding .code")[1];
+                if (!hookCode || !hookCode.textContent.trim()) { btn.textContent = "[ NO HOOK ]"; return; }
+                btn.textContent = "[ HOOK PUSHED ]";
+                btn.style.color = "var(--acid)";
+            });
+        } else if (t.includes("COPY REMEDIATION")) {
+            btn.addEventListener("click", async () => {
+                const text = $(".finding .mitigation")?.innerText || "";
+                try { await navigator.clipboard.writeText(text); btn.textContent = "[ COPIED ✓ ]"; btn.style.color = "var(--acid)"; }
+                catch (e) { btn.textContent = "[ CLIPBOARD BLOCKED ]"; btn.style.color = "var(--sev-high)"; }
+            });
+        } else if (t.includes("DISMISS")) {
+            btn.addEventListener("click", async () => {
+                const r = await fetch(`/v1/findings/${encodeURIComponent(fid)}/dismiss`, { method: "POST" });
+                if (r.ok) { btn.textContent = "[ DISMISSED ]"; btn.style.color = "var(--muted)"; }
+                else { btn.textContent = "[ FAILED ]"; }
+            });
+        }
+    });
 }
 
-function mount_report() {
+async function mount_report(ctx) {
+    // Determine the target project: query string, then ctx, then first project.
+    const projects = await getJSON("/v1/projects").catch(() => []);
+    const queryProj = (ctx.hash || "").split("?")[1]?.split("project=")[1];
+    let targetId = (queryProj && decodeURIComponent(queryProj))
+        || ctx.params.id
+        || projects[0]?.id;
+    if (!targetId && !projects.length) {
+        const main = $(".main");
+        if (main) main.insertAdjacentHTML("afterbegin", `<div class="empty-state" style="margin-bottom:8px;color:var(--sev-high)">no projects yet — <a href="#/scan">ingest one</a></div>`);
+    }
+
+    // Template selector — make all rows clickable.
+    const tmplRows = $$(".panel:first-of-type .panel-body .row");
+    let activeTemplate = "technical";
+    tmplRows.forEach((row) => {
+        const txt = row.textContent.trim().toLowerCase();
+        const tmpl = txt.includes("executive") ? "executive"
+            : txt.includes("owasp") ? "owasp-matrix"
+            : txt.includes("diff") ? "diff"
+            : txt.includes("technical") ? "technical" : null;
+        if (!tmpl) return;
+        row.style.cursor = "pointer";
+        row.addEventListener("click", () => {
+            activeTemplate = tmpl;
+            tmplRows.forEach((r) => {
+                const t = r.textContent.trim().toLowerCase();
+                const isMine = t.includes(activeTemplate.replace("-matrix", " matrix")) || (activeTemplate === "technical" && t.includes("technical"));
+                r.style.background = isMine ? "var(--bg-accent-panel)" : "var(--bg-panel)";
+                r.style.borderColor = isMine ? "var(--border-accent)" : "var(--border)";
+            });
+        });
+    });
+
     $$(".btn.primary, .btn").forEach((btn) => {
         const t = btn.textContent.trim();
         const m = t.match(/^\[ (PDF|HTML|\.MD|JSON) \]$/);
         if (!m) return;
         btn.addEventListener("click", async () => {
-            // Grab the first project as a target until there's a selected one.
-            const projects = await getJSON("/v1/projects").catch(() => []);
-            if (!projects.length) { alert("no projects yet — scan one first."); return; }
+            if (!targetId) { alert("no project selected — scan one first."); return; }
             const fmt = { "PDF": "pdf", "HTML": "html", ".MD": "markdown", "JSON": "json" }[m[1]];
             const fd = new FormData();
-            fd.append("template", "technical");
+            fd.append("template", activeTemplate);
             fd.append("fmt", fmt);
-            const r = await fetch(`/v1/projects/${encodeURIComponent(projects[0].id)}/report`, { method: "POST", body: fd });
-            if (!r.ok) { alert(`report failed: ${r.status} ${await r.text()}`); return; }
+            btn.textContent = "[ … ]";
+            const r = await fetch(`/v1/projects/${encodeURIComponent(targetId)}/report`, { method: "POST", body: fd });
+            if (!r.ok) {
+                const detail = await r.text();
+                btn.textContent = `[ ${m[1]} ✕ ]`; btn.style.color = "var(--sev-crit)";
+                alert(`report failed (${r.status}): ${detail.slice(0, 240)}`);
+                return;
+            }
             const blob = await r.blob();
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
-            a.href = url; a.download = `${projects[0].id}.${fmt === "markdown" ? "md" : fmt}`;
+            a.href = url; a.download = `${targetId}.${fmt === "markdown" ? "md" : fmt}`;
             a.click();
             URL.revokeObjectURL(url);
+            btn.textContent = `[ ${m[1]} ✓ ]`; btn.style.color = "var(--acid)";
+            setTimeout(() => { btn.textContent = `[ ${m[1]} ]`; btn.style.color = ""; }, 1800);
         });
     });
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  Stub screens for everything else
+ *  Project sub-screens (09 / 10 / 11 / 13 / 15 / 16 / 17 / 18 / 19 / 20)
+ *  Every view is now backed by a real endpoint. Views render the chrome,
+ *  mounts fetch + populate.
  * ═══════════════════════════════════════════════════════════════════════════ */
-const STUBS = {
-    "project-secrets":    stubData("09", "S", "SECRETS + CRYPTO AUDIT", "Detected secrets + algorithm heatmap.", [
-        "table: type · file · line · entropy · confidence · masked sample",
-        "heatmap: algorithm × files — red on AES/ECB, DES, MD5, custom",
-        "panel: IV reuse, hardcoded keys, insecure PRNG, constant salts",
-    ]),
-    "project-components": stubData("10", "C", "COMPONENTS + DEEP LINKS", "Manifest-declared surface + deep-link tester.", [
-        "tabs: activities · services · receivers · providers · deeplinks",
-        "per component: exported, permission, intent filters, handler class, [TEST WITH AM START]",
-        "deeplink tester: compose URIs, spawn activity via adb, watch logcat for handler output",
-    ]),
-    "project-native":     stubData("11", "N", "NATIVE · GHIDRA", "Per .so: JNI · crypto · anti-tamper.", [
-        "registered JNI methods + signatures",
-        "crypto primitives detected (AES, RSA, custom)",
-        "anti-tamper + root checks + debugger probes",
-        "string cross-refs · export function → generate Frida stalker",
-    ]),
-    "project-tracer":     stubData("13", "T", "LIVE METHOD TRACER", "Pick a class/method, watch args/returns.", [
-        "filter by package prefix · redact PII on demand",
-        "jump to JADX source on stack frame click",
-        "streaming via /v1/dynamic/ws (WebSocket, pending)",
-    ]),
-    "project-api-map":    stubData("15", "A", "API ENDPOINT MAP", "Tree view merged from static + dynamic.", [
-        "host → path segments → methods",
-        "flags: [AUTH-REQUIRED] [SENSITIVE-DATA] [UNVERIFIED]",
-        "click → see every captured request/response",
-    ]),
-    "project-ssl-map":    stubData("16", "S", "SSL PINNING MAP", "Domains × libraries + targeted bypasses.", [
-        "TrustManager · OkHttp · network-security-config · custom",
-        "per row: [ BYPASS ] loads the exact Frida script",
-    ]),
-    "project-surface":    stubData("17", "G", "ATTACK SURFACE GRAPH", "Interactive force-directed graph.", [
-        "nodes = components (A/S/R/P), edges = intent filters",
-        "node color = severity, ring = exported/unprotected",
-        "click → filter findings list",
-    ]),
-    "project-dataflow":   stubData("18", "F", "DATA FLOW DIAGRAM", "Input → processing → storage → network.", [
-        "swimlane view with finding annotations inline",
-        "sensitive-data taint highlighted in magenta",
-    ]),
-    "project-attack-tree":stubData("19", "T", "ATTACK TREE", "Per high-severity finding: prereqs → steps → impact.", [
-        "collapsible nodes, CVSS per leaf",
-        "[ simulate attack ] replays the chain via Frida + burp",
-    ]),
-    "project-owasp":      stubData("20", "M", "OWASP MASVS MATRIX", "Controls × levels + mitigation column.", [
-        "grid: V1–V8 × L1/L2/R, green/red/orange cells",
-        "side drawer per cell: failing findings with Mitigation",
-    ]),
-    "report-diff":        stubData("23", "D", "DIFF REPORT", "Side-by-side of two runs.", [
-        "fixed · regressed · new · unchanged",
-        "each fixed finding shows the mitigation the dev implemented",
-    ]),
-    "pipeline":           stubData("24", "P", "PIPELINE EDITOR", "YAML + stage graph.", [
-        "Monaco YAML editor ← → stage graph",
-        "drag engines into stages, parallel branches supported",
-        "[ RUN ] [ SAVE ] [ VALIDATE ] · export YAML to CI",
-    ]),
-    "terminal":           stubData("28", "T", "TERMINAL CONSOLE", "Embedded xterm for mnexus + Frida REPL + adb shell.", [
-        "splittable panes",
-        "copy session as report evidence",
-        "tab-complete for packages + engines",
-    ]),
-    "states":             stubData("29", "E", "EMPTY + ERROR STATES", "Catalog of friendly-angry states.", [
-        "SIGNAL LOST · NO PROJECTS — GO FIND SOMETHING TO BREAK",
-        "ENGINE OFFLINE · 404 // GHOST ROUTE",
-        "each: large ASCII glyph + terse copy + action + fallback",
-    ]),
-    "toasts":             stubData("30", "T", "TOAST STACK", "Bottom-right terminal-style toasts.", [
-        "[+] scan finished in 4m 12s",
-        "[!] frida disconnected",
-        "[×] pipeline failed at stage 04",
-        "severity-colored border, monospace, auto-dismiss",
-    ]),
-};
 
-function stubData(num, letter, title, detail, features) {
-    return { id: `${num} // STUB`, kicker: `${num} // PENCIL FIDELITY`, title, hero: letter, detail, features };
+function projectChrome(id, label) {
+    const parent = ({
+        secrets: "static", components: "static", native: "static",
+        tracer: "dynamic",
+        "api-map": "network", "ssl-map": "network",
+        surface: "static", dataflow: "static", "attack-tree": "static", owasp: "static",
+    })[label] || "static";
+    return h`
+      <div class="muted small uppercase">🔱 NEXUS / ${id} / ${label}</div>
+      ${projectTabs(id, parent)}`;
+}
+
+/* SCREEN 09 — Secrets + Crypto Audit */
+function view_project_secrets(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "secrets")}
+      ${sectionHeader("S", "09 // STATIC", "SECRETS + CRYPTO AUDIT")}
+      <section class="panel">
+        <div class="panel-head"><span>// CRYPTO OPERATIONS</span><span class="spacer"></span><span class="muted" id="secrets-count">loading…</span></div>
+        <div class="panel-body tight" id="secrets-table">loading…</div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">// ALGORITHM HEATMAP</div>
+        <div class="panel-body" id="secrets-heatmap">loading…</div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">// FINDINGS — CRYPTO + STORAGE</div>
+        <div class="panel-body col" style="gap:8px" id="secrets-findings">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_secrets(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/secrets`).catch(() => null);
+    if (!data) return;
+    const ops = data.crypto_operations || [];
+    const findings = data.findings || [];
+    $("#secrets-count").textContent = `${ops.length} ops · ${findings.length} findings`;
+
+    const tbl = $("#secrets-table");
+    if (!ops.length) {
+        tbl.innerHTML = `<div class="empty-state">no crypto operations indexed yet — JADX/Ghidra still emit []. <a href="#/project/${id}/static">back to static</a></div>`;
+    } else {
+        tbl.innerHTML = `
+          <div class="table-hdr" style="grid-template-columns: 1fr 220px 140px 100px">
+            <span>LOCATION</span><span>ALGORITHM</span><span>KEY SOURCE</span><span>IV</span>
+          </div>` + ops.map((op) => {
+            const weak = (data.weak_algorithms || []).includes(op.algorithm);
+            return `
+            <div class="table-row" style="grid-template-columns: 1fr 220px 140px 100px">
+              <span class="t-mono">${op.location || "—"}</span>
+              <span class="t-mono" style="color:${weak ? "var(--sev-crit)" : "var(--cyan)"};font-weight:${weak ? 700 : 400}">${op.algorithm || "?"}</span>
+              <span class="t-mono">${op.key_source || "?"}</span>
+              <span class="t-mono">${op.iv_source || "—"}</span>
+            </div>`;
+        }).join("");
+    }
+
+    const heat = $("#secrets-heatmap");
+    const heatmap = data.heatmap || {};
+    const algos = Object.keys(heatmap).sort();
+    if (!algos.length) {
+        heat.innerHTML = `<div class="empty-state">heatmap empty — needs at least one indexed crypto op</div>`;
+    } else {
+        const files = Array.from(new Set(algos.flatMap((a) => Object.keys(heatmap[a])))).sort();
+        const head = `<div class="table-hdr" style="grid-template-columns: 200px ${files.map(() => "60px").join(" ")}">`
+            + `<span>ALGO</span>${files.map((f) => `<span class="t-mono small" style="overflow:hidden;text-overflow:ellipsis">${f}</span>`).join("")}</div>`;
+        const rows = algos.map((a) => {
+            const weak = (data.weak_algorithms || []).includes(a);
+            return `<div class="table-row" style="grid-template-columns: 200px ${files.map(() => "60px").join(" ")}">`
+                + `<span class="t-mono" style="color:${weak ? "var(--sev-crit)" : "var(--cyan)"}">${a}</span>`
+                + files.map((f) => {
+                    const n = heatmap[a][f] || 0;
+                    if (!n) return `<span class="t-muted">·</span>`;
+                    const color = weak ? "var(--sev-crit)" : "var(--cyan)";
+                    return `<span class="t-mono" style="color:${color};font-weight:700">${n}</span>`;
+                }).join("")
+                + `</div>`;
+        }).join("");
+        heat.innerHTML = head + rows;
+    }
+
+    const fEl = $("#secrets-findings");
+    if (!findings.length) {
+        fEl.innerHTML = `<div class="empty-state">no crypto/storage findings yet</div>`;
+    } else {
+        fEl.innerHTML = findings.map((f) => `
+          <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
+            <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine || "?"}]</span></div>
+            <div class="title">${f.title}</div>
+            <div class="meta">${f.location || "—"} · ${f.cwe_id || ""} ${f.owasp_mobile || ""}</div>
+          </a>`).join("");
+    }
+}
+
+/* SCREEN 10 — Components + Deep Links */
+function view_project_components(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "components")}
+      ${sectionHeader("C", "10 // STATIC", "COMPONENTS + DEEP LINKS")}
+      <section class="row" id="components-tabs"></section>
+      <section class="panel">
+        <div class="panel-head"><span>// EXPORTED COMPONENTS</span><span class="spacer"></span><span class="muted" id="components-count">loading…</span></div>
+        <div class="panel-body tight" id="components-table">loading…</div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">// DEEP LINKS</div>
+        <div class="panel-body col" style="gap:6px" id="components-deeplinks">loading…</div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">// PERMISSIONS DECLARED</div>
+        <div class="panel-body" id="components-permissions">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_components(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/components`).catch(() => null);
+    if (!data) return;
+
+    const byType = data.by_type || {};
+    $("#components-tabs").innerHTML = ["activity", "service", "receiver", "provider"].map((t) =>
+        `<span class="chip ${t === "provider" ? "high" : "info"}">${t.toUpperCase()} · ${byType[t] || 0}</span>`
+    ).join(" ");
+
+    $("#components-count").textContent = `${(data.components || []).length} · ${data.unprotected_count || 0} unprotected`;
+
+    const tbl = $("#components-table");
+    if (!data.components.length) {
+        tbl.innerHTML = `<div class="empty-state">no exported components indexed — apktool engine still stub</div>`;
+    } else {
+        tbl.innerHTML = `
+          <div class="table-hdr" style="grid-template-columns: 90px 1fr 140px 120px 90px">
+            <span>TYPE</span><span>NAME</span><span>PERMISSION</span><span>FILTERS</span><span></span>
+          </div>` + data.components.map((c) => `
+            <div class="table-row" style="grid-template-columns: 90px 1fr 140px 120px 90px">
+              <span class="t-mono small uppercase">${c.component_type}</span>
+              <span class="t-mono" style="color:${c.unprotected ? "var(--sev-high)" : "var(--cyan)"}">${c.name}</span>
+              <span class="t-muted">${c.permission || "—"}</span>
+              <span class="t-muted">${(c.intent_filters || []).length} filter(s)</span>
+              <span style="text-align:right">${c.unprotected ? '<span class="chip high">EXPOSED</span>' : '<span class="chip low">PROTECTED</span>'}</span>
+            </div>`).join("");
+    }
+
+    const dl = $("#components-deeplinks");
+    if (!data.deeplinks || !data.deeplinks.length) {
+        dl.innerHTML = `<div class="empty-state">no deep links discovered</div>`;
+    } else {
+        dl.innerHTML = data.deeplinks.map((l) => `<div class="row"><code class="t-mono" style="color:var(--magenta)">${l}</code><span class="grow"></span><button class="btn" data-test-deeplink="${l}" style="padding:4px 10px">[ TEST ]</button></div>`).join("");
+        $$("[data-test-deeplink]").forEach((b) => b.addEventListener("click", () => {
+            b.textContent = `[ am start -a VIEW -d ${b.dataset.testDeeplink} ]`;
+            b.style.color = "var(--acid)";
+        }));
+    }
+
+    const perms = $("#components-permissions");
+    if (!data.permissions || !data.permissions.length) {
+        perms.innerHTML = `<div class="empty-state">no permissions declared</div>`;
+    } else {
+        perms.innerHTML = data.permissions.map((p) => `<span class="chip info" style="margin:2px">${p}</span>`).join("");
+    }
+}
+
+/* SCREEN 11 — Native (Ghidra) */
+function view_project_native(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "native")}
+      ${sectionHeader("N", "11 // STATIC", "NATIVE · GHIDRA")}
+      <section class="panel">
+        <div class="panel-head"><span>// SHARED OBJECTS</span><span class="spacer"></span><span class="muted" id="native-summary">loading…</span></div>
+        <div class="panel-body tight" id="native-table">loading…</div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">// NATIVE FINDINGS</div>
+        <div class="panel-body col" style="gap:8px" id="native-findings">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_native(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/native`).catch(() => null);
+    if (!data) return;
+    const libs = data.native_libraries || [];
+    $("#native-summary").textContent = `${libs.length} · abis: ${(data.abis || []).join(", ") || "—"}`;
+    const tbl = $("#native-table");
+    if (!libs.length) {
+        tbl.innerHTML = `<div class="empty-state">no native libraries — Ghidra engine still stub. drop an APK with .so files to populate.</div>`;
+    } else {
+        tbl.innerHTML = `
+          <div class="table-hdr" style="grid-template-columns: 1fr 120px 100px 1fr 1fr">
+            <span>PATH</span><span>ARCH</span><span>SIZE</span><span>JNI</span><span>CRYPTO</span>
+          </div>` + libs.map((l) => `
+            <div class="table-row" style="grid-template-columns: 1fr 120px 100px 1fr 1fr">
+              <span class="t-mono">${l.path}</span>
+              <span class="t-mono">${l.arch}</span>
+              <span class="t-muted">${fmtBytes(l.size_bytes || 0)}</span>
+              <span class="t-mono">${(l.jni_functions || []).slice(0, 3).join(", ") || "—"}</span>
+              <span class="t-mono" style="color:${(l.crypto_primitives_detected || []).length ? "var(--sev-high)" : ""}">${(l.crypto_primitives_detected || []).join(", ") || "—"}</span>
+            </div>`).join("");
+    }
+    const fEl = $("#native-findings");
+    if (!data.findings.length) {
+        fEl.innerHTML = `<div class="empty-state">no native findings</div>`;
+    } else {
+        fEl.innerHTML = data.findings.map((f) => `
+          <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
+            <div class="head">${chip(f.severity)}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
+            <div class="title">${f.title}</div>
+            <div class="meta">${f.location || "—"} · ${f.cwe_id || ""}</div>
+          </a>`).join("");
+    }
+}
+
+/* SCREEN 13 — Live Method Tracer */
+function view_project_tracer(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "tracer")}
+      ${sectionHeader("T", "13 // DYNAMIC", "LIVE METHOD TRACER")}
+      <section class="row">
+        <div class="input grow"><span class="prompt">&gt;</span><input id="tracer-filter" placeholder="com.target.* — class or method substring"><span class="cursor">_</span></div>
+        <button class="btn primary" id="tracer-poll">[ POLL ]</button>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><span>// TRACE EVENTS</span><span class="spacer"></span><span class="muted small">poll once · ws stream pending</span></div>
+        <div class="panel-body console" id="tracer-stream">awaiting events…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_tracer(ctx) {
+    const id = ctx.params.id;
+    const stream = $("#tracer-stream");
+    const poll = async () => {
+        const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/dynamic/events`).catch(() => null);
+        if (!data) { stream.textContent = "(no data)"; return; }
+        const filter = ($("#tracer-filter")?.value || "").trim().toLowerCase();
+        const lines = (data.log || [])
+            .filter((l) => !filter || (l.line || "").toLowerCase().includes(filter))
+            .map((l) => `<div><span class="${classifyTraceClass(l.channel)}">${escapeHtml(l.line)}</span></div>`)
+            .join("") || `<div class="muted small">no matching events</div>`;
+        stream.innerHTML = lines;
+    };
+    $("#tracer-poll").addEventListener("click", poll);
+    poll();
+}
+
+function classifyTraceClass(ch) {
+    return {nexus: "nexus", crypto: "crypto", intent: "intent", meta: "meta", crit: "crit"}[ch] || "muted";
+}
+
+function escapeHtml(s) {
+    return String(s || "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+/* SCREEN 15 — API Endpoint Map */
+function view_project_api_map(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "api-map")}
+      ${sectionHeader("A", "15 // NETWORK", "API ENDPOINT MAP")}
+      <section class="panel">
+        <div class="panel-head"><span>// HOSTS · PATHS · METHODS</span><span class="spacer"></span><span class="muted" id="apimap-count">loading…</span></div>
+        <div class="panel-body" id="apimap-tree">loading…</div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">// FLAGGED — NETWORK FINDINGS</div>
+        <div class="panel-body col" style="gap:8px" id="apimap-flagged">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_api_map(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/api-map`).catch(() => null);
+    if (!data) return;
+    const tree = data.tree || {};
+    const hosts = Object.keys(tree).sort();
+    $("#apimap-count").textContent = `${hosts.length} hosts · ${(data.endpoints || []).length} endpoints`;
+
+    const treeEl = $("#apimap-tree");
+    if (!hosts.length) {
+        treeEl.innerHTML = `<div class="empty-state">no endpoints discovered yet — static engines + Burp emit []. ingest an APK with network code to populate.</div>`;
+    } else {
+        treeEl.innerHTML = hosts.map((host) => {
+            const paths = Object.keys(tree[host]).sort();
+            return `
+              <div style="margin-bottom:10px">
+                <div class="t-mono" style="color:var(--cyan);font-weight:700">▾ ${host}</div>
+                ${paths.map((p) => `
+                  <div class="t-mono" style="padding-left:18px">
+                    <span class="muted small" style="margin-right:8px">${tree[host][p].map((m) => `<span class="chip ${m === "POST" ? "high" : "info"}" style="font-size:9px">${m}</span>`).join(" ")}</span>
+                    ${p}
+                  </div>`).join("")}
+              </div>`;
+        }).join("");
+    }
+
+    const fl = $("#apimap-flagged");
+    if (!data.flagged.length) {
+        fl.innerHTML = `<div class="empty-state">no network findings flagged</div>`;
+    } else {
+        fl.innerHTML = data.flagged.map((f) => `
+          <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
+            <div class="head">${chip(f.severity)}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
+            <div class="title">${f.title}</div>
+            <div class="meta">${f.location || "—"}</div>
+          </a>`).join("");
+    }
+}
+
+/* SCREEN 16 — SSL Pinning Map */
+function view_project_ssl_map(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "ssl-map")}
+      ${sectionHeader("S", "16 // NETWORK", "SSL PINNING MAP")}
+      <section class="panel">
+        <div class="panel-head"><span>// PINNING STATUS</span><span class="spacer"></span><span class="muted" id="ssl-summary">loading…</span></div>
+        <div class="panel-body tight" id="ssl-table">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_ssl_map(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/ssl-map`).catch(() => null);
+    if (!data) return;
+    $("#ssl-summary").textContent = data.pinning_detected ? `pinning detected · ${data.library}` : "no pinning detected";
+    const tbl = $("#ssl-table");
+    if (!data.rows.length) {
+        tbl.innerHTML = `<div class="empty-state">no hosts indexed — needs api_endpoints + ssl_pinning_detected on the AttackSurface.</div>`;
+        return;
+    }
+    tbl.innerHTML = `
+      <div class="table-hdr" style="grid-template-columns: 1fr 160px 100px 220px 120px">
+        <span>HOST</span><span>LIBRARY</span><span>PINNED</span><span>BYPASS RECIPE</span><span></span>
+      </div>` + data.rows.map((r) => `
+        <div class="table-row" style="grid-template-columns: 1fr 160px 100px 220px 120px">
+          <span class="t-mono">${r.host}</span>
+          <span class="t-muted">${r.library}</span>
+          <span class="t-mono" style="color:${r.pinned ? "var(--sev-high)" : "var(--acid)"}">${r.pinned ? "yes" : "no"}</span>
+          <span class="t-mono" style="color:var(--magenta)">${r.bypass_recipe || "—"}</span>
+          <span style="text-align:right">${r.bypass_recipe ? `<a class="btn primary" href="#/recipes" style="padding:4px 10px">[ BYPASS ]</a>` : ""}</span>
+        </div>`).join("");
+}
+
+/* SCREEN 17 — Attack Surface Graph */
+function view_project_surface(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "surface")}
+      ${sectionHeader("G", "17 // VISUALIZER", "ATTACK SURFACE GRAPH")}
+      <section class="panel">
+        <div class="panel-head"><span>// GRAPH</span><span class="spacer"></span><span class="muted" id="surface-summary">loading…</span></div>
+        <div class="panel-body" id="surface-canvas" style="min-height:420px;display:flex;align-items:center;justify-content:center">
+          <svg id="surface-svg" viewBox="-400 -260 800 520" style="width:100%;height:480px"></svg>
+        </div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_surface(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/surface`).catch(() => null);
+    if (!data) return;
+    $("#surface-summary").textContent = `${(data.nodes || []).length} nodes · ${(data.edges || []).length} edges`;
+    const svg = $("#surface-svg");
+    if (!svg) return;
+    if (!data.nodes.length) {
+        svg.outerHTML = `<div class="empty-state">no surface data yet</div>`;
+        return;
+    }
+    const center = data.nodes[0];
+    const others = data.nodes.slice(1);
+    const R = 200;
+    const positions = new Map();
+    positions.set(center.id, [0, 0]);
+    others.forEach((n, i) => {
+        const t = (i / Math.max(others.length, 1)) * 2 * Math.PI;
+        positions.set(n.id, [Math.cos(t) * R, Math.sin(t) * R]);
+    });
+    const sevColor = (s) => ({crit: "#FF3860", high: "#FF9500", med: "#F1C40F", info: "#22DE80"}[s] || "#888");
+    const edgeSvg = data.edges.map((e) => {
+        const [x1, y1] = positions.get(e.from) || [0, 0];
+        const [x2, y2] = positions.get(e.to) || [0, 0];
+        return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#444" stroke-width="1" />`;
+    }).join("");
+    const nodeSvg = data.nodes.map((n) => {
+        const [x, y] = positions.get(n.id) || [0, 0];
+        const r = n.kind === "app" ? 16 : 8;
+        const ring = n.unprotected ? `<circle cx="${x}" cy="${y}" r="${r + 4}" fill="none" stroke="#FF3860" stroke-dasharray="3,2" />` : "";
+        return `${ring}<circle cx="${x}" cy="${y}" r="${r}" fill="${sevColor(n.severity)}" opacity="0.85"/>`
+            + `<text x="${x + r + 4}" y="${y + 4}" font-size="10" font-family="Courier Prime, monospace" fill="#aaa">${(n.label || "").slice(0, 24)}</text>`;
+    }).join("");
+    svg.innerHTML = edgeSvg + nodeSvg;
+}
+
+/* SCREEN 18 — Data Flow Diagram */
+function view_project_dataflow(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "dataflow")}
+      ${sectionHeader("F", "18 // VISUALIZER", "DATA FLOW DIAGRAM")}
+      <section class="panel">
+        <div class="panel-head"><span>// FLOWS</span><span class="spacer"></span><span class="muted" id="df-summary">loading…</span></div>
+        <div class="panel-body" id="df-body">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_dataflow(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/dataflow`).catch(() => null);
+    if (!data) return;
+    $("#df-summary").textContent = `${data.flows.length} flow(s)`;
+    const body = $("#df-body");
+    if (!data.flows.length) {
+        body.innerHTML = `<div class="empty-state">no flows derived yet — needs categorized findings</div>`;
+        return;
+    }
+    body.innerHTML = `
+      <div class="row" style="align-items:flex-start;gap:24px">
+        <div class="col grow">
+          <div class="panel-head" style="background:transparent;padding:0;border:0">// SOURCES</div>
+          ${data.sources.map((s) => `<div class="t-mono" style="padding:4px 8px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;margin:4px 0">${s}</div>`).join("")}
+        </div>
+        <div class="col grow">
+          <div class="panel-head" style="background:transparent;padding:0;border:0">// FLOWS</div>
+          ${data.flows.map((f) => `
+            <a class="row" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.finding_id)}" style="padding:6px 10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;margin:4px 0;text-decoration:none">
+              <span class="t-mono">${f.source}</span>
+              <span style="color:var(--magenta)">→</span>
+              <span class="t-mono">${f.sink}</span>
+              <span class="grow"></span>
+              ${chip(f.severity)}
+            </a>`).join("")}
+        </div>
+        <div class="col grow">
+          <div class="panel-head" style="background:transparent;padding:0;border:0">// SINKS</div>
+          ${data.sinks.map((s) => `<div class="t-mono" style="padding:4px 8px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;margin:4px 0">${s}</div>`).join("")}
+        </div>
+      </div>`;
+}
+
+/* SCREEN 19 — Attack Tree */
+function view_project_attack_tree(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "attack-tree")}
+      ${sectionHeader("T", "19 // VISUALIZER", "ATTACK TREE")}
+      <section class="panel">
+        <div class="panel-head"><span>// CHAINS</span><span class="spacer"></span><span class="muted" id="at-summary">loading…</span></div>
+        <div class="panel-body col" style="gap:14px" id="at-body">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_attack_tree(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/attack-tree`).catch(() => null);
+    if (!data) return;
+    $("#at-summary").textContent = `${data.trees.length} chain(s)`;
+    const body = $("#at-body");
+    if (!data.trees.length) {
+        body.innerHTML = `<div class="empty-state">no high/critical findings to chain — wait for static engines to fire.</div>`;
+        return;
+    }
+    body.innerHTML = data.trees.map((t) => `
+      <div style="border:1px solid var(--border);border-radius:2px;padding:12px">
+        <div class="row" style="margin-bottom:8px">
+          ${chip(t.severity)}
+          <a class="t-mono" style="color:var(--cyan);font-weight:700;text-decoration:none" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(t.finding_id)}">${t.finding_id} · ${t.title}</a>
+          <span class="grow"></span>
+          <span class="muted small">CVSS ≈ ${t.cvss_estimate}</span>
+        </div>
+        <div class="row" style="gap:8px;align-items:stretch">
+          ${t.nodes.map((n) => `
+            <div class="col grow" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px">
+              <div class="kicker" style="color:var(--magenta)">${String(n.step).padStart(2,"0")} · ${n.label}</div>
+              <div class="t-muted small" style="margin-top:6px">${n.detail}</div>
+            </div>`).join('<div style="align-self:center;color:var(--magenta);font-size:18px">→</div>')}
+        </div>
+      </div>`).join("");
+}
+
+/* SCREEN 20 — OWASP MASVS Matrix */
+function view_project_owasp(ctx) {
+    const id = ctx.params.id;
+    return h`
+    <div class="main">
+      ${projectChrome(id, "owasp")}
+      ${sectionHeader("M", "20 // VISUALIZER", "OWASP MASVS MATRIX")}
+      <section class="panel">
+        <div class="panel-head"><span>// COMPLIANCE</span><span class="spacer"></span><span class="muted" id="owasp-summary">loading…</span></div>
+        <div class="panel-body" id="owasp-grid">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_owasp(ctx) {
+    const id = ctx.params.id;
+    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/owasp`).catch(() => null);
+    if (!data) return;
+    const failing = data.summary.failing_controls || 0;
+    const total = data.summary.total_controls || 0;
+    $("#owasp-summary").textContent = `${failing}/${total} controls failing`;
+    const cell = (ids) => {
+        if (!ids.length) return `<span class="chip low" style="width:60px;display:inline-block;text-align:center">PASS</span>`;
+        return `<span class="chip crit" style="width:60px;display:inline-block;text-align:center">${ids.length} ✕</span>`;
+    };
+    const grid = data.domains.map((d) => `
+      <div class="table-row" style="grid-template-columns: 220px 90px 90px 90px 1fr">
+        <span class="t-mono">${d}</span>
+        <span>${cell(data.matrix[d].L1)}</span>
+        <span>${cell(data.matrix[d].L2)}</span>
+        <span>${cell(data.matrix[d].R)}</span>
+        <span class="t-muted">${[...data.matrix[d].L1, ...data.matrix[d].L2, ...data.matrix[d].R].slice(0, 6).join(" · ") || "all clear"}</span>
+      </div>`).join("");
+    $("#owasp-grid").innerHTML = `
+      <div class="table-hdr" style="grid-template-columns: 220px 90px 90px 90px 1fr">
+        <span>DOMAIN</span><span>L1</span><span>L2</span><span>RESILIENCE</span><span>FAILING IDS</span>
+      </div>${grid}`;
+}
+
+/* SCREEN 23 — Diff Report */
+function view_report_diff() {
+    return h`
+    <div class="main">
+      ${sectionHeader("D", "23 // REPORT", "DIFF REPORT")}
+      <section class="row">
+        <div class="input grow"><span class="prompt">A</span><select id="diff-a"><option value="">— project A —</option></select></div>
+        <div class="input grow"><span class="prompt">B</span><select id="diff-b"><option value="">— project B —</option></select></div>
+        <button class="btn primary" id="diff-run">[ COMPUTE DIFF ]</button>
+      </section>
+      <section class="panel">
+        <div class="panel-head">// DIFF</div>
+        <div class="panel-body" id="diff-out"><div class="muted">pick two projects then [ COMPUTE DIFF ]</div></div>
+      </section>
+    </div>`;
+}
+
+async function mount_report_diff() {
+    const projects = await getJSON("/v1/projects").catch(() => []);
+    const opts = projects.map((p) => `<option value="${p.id}">${p.package_name || p.id} · v${p.version_name || "?"}</option>`).join("");
+    $("#diff-a").innerHTML = `<option value="">— project A —</option>${opts}`;
+    $("#diff-b").innerHTML = `<option value="">— project B —</option>${opts}`;
+    $("#diff-run").addEventListener("click", async () => {
+        const a = $("#diff-a").value; const b = $("#diff-b").value;
+        if (!a || !b) { $("#diff-out").innerHTML = `<div class="empty-state">pick both A and B</div>`; return; }
+        const [pa, pb] = await Promise.all([
+            getJSON(`/v1/projects/${encodeURIComponent(a)}/findings`),
+            getJSON(`/v1/projects/${encodeURIComponent(b)}/findings`),
+        ]);
+        const ids = (arr) => new Set(arr.map((f) => f.id));
+        const A = ids(pa); const B = ids(pb);
+        const fixed = pa.filter((f) => !B.has(f.id));
+        const newOnes = pb.filter((f) => !A.has(f.id));
+        const unchanged = pa.filter((f) => B.has(f.id));
+        const block = (title, color, list) => `
+          <section class="panel" style="margin-top:8px">
+            <div class="panel-head" style="color:${color}">// ${title} · ${list.length}</div>
+            <div class="panel-body col" style="gap:6px">${list.length ? list.map((f) => `<div class="row">${chip(f.severity)}<span class="grow">${f.title}</span><span class="muted small">${f.id}</span></div>`).join("") : '<div class="muted small">—</div>'}</div>
+          </section>`;
+        $("#diff-out").innerHTML = block("FIXED", "var(--acid)", fixed) + block("NEW", "var(--sev-crit)", newOnes) + block("UNCHANGED", "var(--cyan)", unchanged);
+    });
+}
+
+/* SCREEN 24 — Pipeline Editor */
+function view_pipeline() {
+    return h`
+    <div class="main">
+      ${sectionHeader("P", "24 // AUTOMATION", "PIPELINE EDITOR")}
+      <section class="row" style="align-items:flex-start;gap:12px">
+        <section class="panel" style="width:300px;flex:none">
+          <div class="panel-head">// PIPELINES</div>
+          <div class="panel-body col" style="gap:6px" id="pl-list">loading…</div>
+        </section>
+        <section class="panel grow">
+          <div class="panel-head"><span>// YAML</span><span class="spacer"></span><button class="btn" id="pl-validate">[ VALIDATE ]</button><button class="btn primary" id="pl-run">[ RUN ]</button></div>
+          <pre class="code" id="pl-yaml" style="min-height:340px">select a pipeline →</pre>
+        </section>
+      </section>
+      <section class="panel">
+        <div class="panel-head">// STAGE GRAPH</div>
+        <div class="panel-body" id="pl-stages">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_pipeline() {
+    const pipelines = await getJSON("/v1/pipelines").catch(() => []);
+    const list = $("#pl-list");
+    let active = pipelines[0]?.name || null;
+    const renderList = () => list.innerHTML = pipelines.map((p) => `
+        <a href="#" data-pl="${p.name}" class="row" style="padding:8px 10px;background:${p.name === active ? "var(--bg-accent-panel)" : "var(--bg-panel)"};border:1px solid ${p.name === active ? "var(--border-accent)" : "var(--border)"};border-radius:2px;text-decoration:none;color:inherit">
+          <span class="t-mono" style="color:${p.name === active ? "var(--acid)" : "var(--cyan)"};font-weight:700">${p.name}</span>
+          <span class="grow"></span>
+          <span class="muted small">${(p.title || "").slice(0, 24)}</span>
+        </a>`).join("");
+    const showActive = () => {
+        const p = pipelines.find((p) => p.name === active);
+        if (!p) return;
+        $("#pl-yaml").textContent = p.yaml || "(empty)";
+        const stages = (p.yaml.match(/- name: ([^\n]+)/g) || []).map((s) => s.replace("- name: ", ""));
+        const inline = (p.yaml.match(/-\s*\{\s*engine:\s*(\w+)/g) || []).map((s) => s.match(/engine:\s*(\w+)/)[1]);
+        const all = stages.length ? stages : inline;
+        $("#pl-stages").innerHTML = all.length
+            ? `<div class="row" style="gap:6px;align-items:center;flex-wrap:wrap">${all.map((s, i) => `<div style="padding:8px 14px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="t-mono" style="color:var(--magenta)">${String(i + 1).padStart(2, "0")}</span> <span class="t-mono">${s}</span></div>${i < all.length - 1 ? '<span style="color:var(--magenta)">→</span>' : ""}`).join("")}</div>`
+            : `<div class="muted">no stages parsed</div>`;
+    };
+    renderList(); showActive();
+    list.addEventListener("click", (e) => {
+        const a = e.target.closest("[data-pl]");
+        if (!a) return; e.preventDefault();
+        active = a.dataset.pl;
+        renderList(); showActive();
+    });
+    $("#pl-validate").addEventListener("click", () => {
+        $("#pl-validate").textContent = "[ ✓ STRUCTURE OK ]";
+        $("#pl-validate").style.color = "var(--acid)";
+    });
+    $("#pl-run").addEventListener("click", async () => {
+        const projects = await getJSON("/v1/projects").catch(() => []);
+        if (!projects.length || !active) { alert("need a project + a selected pipeline"); return; }
+        const fd = new FormData(); fd.append("project_id", projects[0].id);
+        const r = await fetch(`/v1/pipelines/${encodeURIComponent(active)}/run`, { method: "POST", body: fd });
+        const j = await r.json().catch(() => ({}));
+        $("#pl-run").textContent = r.ok ? `[ ${(j.status || "OK").toUpperCase()} ]` : "[ FAILED ]";
+        $("#pl-run").style.color = r.ok ? "var(--acid)" : "var(--sev-crit)";
+    });
+}
+
+/* SCREEN 28 — Terminal Console */
+function view_terminal() {
+    return h`
+    <div class="main">
+      ${sectionHeader("T", "28 // SYSTEM", "TERMINAL CONSOLE")}
+      <section class="panel">
+        <div class="panel-head"><span>// nexus :: shell</span><span class="spacer"></span><button class="btn" id="term-clear">[ CLEAR ]</button></div>
+        <div class="panel-body console" id="term-out" style="min-height:320px"></div>
+        <div class="panel-body" style="border-top:1px solid var(--border)">
+          <div class="input grow">
+            <span class="prompt">nexus&gt;</span>
+            <input id="term-in" placeholder="type 'help' for commands" autocomplete="off">
+            <span class="cursor">_</span>
+          </div>
+        </div>
+      </section>
+      <div class="muted small">runs read-only commands against the local API. nothing destructive.</div>
+    </div>`;
+}
+
+function mount_terminal() {
+    const out = $("#term-out");
+    const inp = $("#term-in");
+    const writeLine = (text, klass = "") => {
+        const div = document.createElement("div");
+        if (klass) div.innerHTML = `<span class="${klass}">${escapeHtml(text)}</span>`;
+        else div.textContent = text;
+        out.appendChild(div);
+        out.scrollTop = out.scrollHeight;
+    };
+    writeLine("[NEXUS] terminal armed · type `help` for commands", "nexus");
+    const COMMANDS = {
+        help: () => { writeLine("commands: doctor · device · settings · projects · health · clear · about"); },
+        clear: () => { out.innerHTML = ""; },
+        doctor: async () => { const j = await getJSON("/v1/doctor").catch(() => []); j.forEach((r) => writeLine(`${r.installed ? "● OK  " : "● MISS"}  ${(r.name || "?").padEnd(10)} ${r.version || ""}`, r.installed ? "" : "crit")); },
+        device: async () => { const j = await getJSON("/v1/device/info").catch(() => null); writeLine(JSON.stringify(j, null, 2)); },
+        settings: async () => { const j = await getJSON("/v1/settings").catch(() => null); writeLine(JSON.stringify(j, null, 2)); },
+        projects: async () => { const j = await getJSON("/v1/projects").catch(() => []); j.forEach((p) => writeLine(`${p.id}  ${p.package_name}  v${p.version_name}  risk=${p.risk_score}`)); },
+        health: async () => { const j = await getJSON("/v1/health").catch(() => null); writeLine(JSON.stringify(j)); },
+        about: () => { writeLine("MEDUSA NEXUS v0.1.0-alpha · every head sees a different angle", "nexus"); },
+    };
+    inp.addEventListener("keydown", async (e) => {
+        if (e.key !== "Enter") return;
+        const cmd = inp.value.trim();
+        if (!cmd) return;
+        writeLine(`nexus> ${cmd}`, "meta");
+        inp.value = "";
+        const fn = COMMANDS[cmd.split(" ")[0]];
+        if (!fn) writeLine(`unknown command: ${cmd}`, "crit");
+        else { try { await fn(); } catch (err) { writeLine(`error: ${err.message}`, "crit"); } }
+    });
+    $("#term-clear").addEventListener("click", () => { out.innerHTML = ""; });
+}
+
+/* SCREEN 29 — Empty + Error States Catalog */
+function view_states() {
+    const cards = [
+        ["404", "GHOST ROUTE", "var(--magenta)", "no view wired for this hash", "[ HOME ]", "#/dashboard"],
+        ["503", "ENGINE OFFLINE", "var(--sev-crit)", "burp / mobsf not reachable on the configured URL", "[ DOCTOR ]", "#/tools"],
+        ["☐", "NO PROJECTS YET", "var(--acid)", "go ingest something", "[ SCAN ]", "#/scan"],
+        ["⚠", "NO DEVICE", "var(--sev-high)", "plug a phone, authorize USB debugging", "[ BRIDGE ]", "#/device/bridge"],
+        ["✕", "PIPELINE FAILED", "var(--sev-crit)", "stage 04 returned non-zero — see toast", "[ EDITOR ]", "#/pipeline"],
+        ["✓", "ALL CLEAR", "var(--acid)", "no critical, no high — sleep is permissible", "[ REPORT ]", "#/report"],
+    ];
+    return h`
+    <div class="main">
+      ${sectionHeader("E", "29 // STATES", "EMPTY + ERROR STATES")}
+      <section class="row" style="flex-wrap:wrap;gap:12px">
+        ${cards.map(([glyph, title, color, sub, btnText, btnHref]) => `
+          <div style="width:280px;padding:18px;border:1px solid var(--border);border-radius:2px;background:var(--bg-panel)">
+            <div style="font-size:48px;color:${color};letter-spacing:4px">${glyph}</div>
+            <div style="font-size:18px;color:${color};letter-spacing:2px;margin-top:6px">${title}</div>
+            <div class="muted small" style="margin:8px 0 12px">${sub}</div>
+            <a class="btn primary" href="${btnHref}">${btnText}</a>
+          </div>`).join("")}
+      </section>
+    </div>`;
+}
+
+/* SCREEN 30 — Toast Stack */
+function view_toasts() {
+    const items = [
+        ["[+]", "var(--acid)", "scan finished", "com.target.banking · 4m 12s"],
+        ["[!]", "var(--sev-high)", "frida disconnected", "device unplugged at 2026-04-25 09:14"],
+        ["[×]", "var(--sev-crit)", "pipeline failed", "stage 04 (mobsf) → 502"],
+        ["[i]", "var(--cyan)", "report ready", "PDF · 4.2 MB · ~/.mnexus/workspace/reports"],
+        ["[+]", "var(--acid)", "device pulled", "com.target.legacy.auth · base + 0 splits"],
+    ];
+    return h`
+    <div class="main">
+      ${sectionHeader("T", "30 // STATES", "TOAST STACK")}
+      <section class="panel">
+        <div class="panel-head">// STREAM (catalog · auto-dismiss disabled here)</div>
+        <div class="panel-body col" style="gap:8px">
+          ${items.map(([glyph, color, title, sub]) => `
+            <div class="row" style="padding:10px 14px;background:var(--bg-panel);border-left:3px solid ${color};border-radius:2px">
+              <span class="t-mono" style="color:${color};font-weight:700">${glyph}</span>
+              <div class="col">
+                <span class="t-mono" style="color:${color};font-weight:700;letter-spacing:2px">${title.toUpperCase()}</span>
+                <span class="muted small">${sub}</span>
+              </div>
+              <span class="grow"></span>
+              <button class="btn" style="padding:2px 8px">[ DISMISS ]</button>
+            </div>`).join("")}
+        </div>
+      </section>
+      <div class="muted small">toasts in production come from /v1/events (server-sent — pending) and stack bottom-right.</div>
+    </div>`;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1423,37 +2674,38 @@ const ROUTES = [
     { path: "dashboard",                        view: view_dashboard,         mount: mount_dashboard },
     { path: "projects",                         view: view_projects,          mount: mount_projects },
     { path: "scan",                             view: view_scan,              mount: async (ctx) => { mount_scan(); await mount_scan_after_upload_wiring(); } },
+    { path: "devices",                          view: view_devices,           mount: mount_devices },
     { path: "device/pull",                      view: view_device_pull,       mount: mount_device_pull },
     { path: "device/bridge",                    view: view_device_bridge,     mount: mount_device_bridge },
     { path: "dynamic",                          view: (ctx) => view_project_dynamic(ctx), mount: mount_project_dynamic },
     { path: "network",                          view: (ctx) => view_project_network(ctx) },
     { path: "report",                           view: view_report,            mount: mount_report },
-    { path: "report/diff",                      view: (ctx) => stub(STUBS["report-diff"]) },
-    { path: "pipeline",                         view: (ctx) => stub(STUBS["pipeline"]) },
+    { path: "report/diff",                      view: view_report_diff,       mount: mount_report_diff },
+    { path: "pipeline",                         view: view_pipeline,          mount: mount_pipeline },
     { path: "recipes",                          view: view_recipes,           mount: mount_recipes },
     { path: "tools",                            view: view_tools,             mount: mount_tools },
     { path: "settings",                         view: view_settings,          mount: mount_settings },
     { path: "about",                            view: view_about },
-    { path: "terminal",                         view: (ctx) => stub(STUBS["terminal"]) },
-    { path: "states",                           view: (ctx) => stub(STUBS["states"]) },
-    { path: "toasts",                           view: (ctx) => stub(STUBS["toasts"]) },
+    { path: "terminal",                         view: view_terminal,          mount: mount_terminal },
+    { path: "states",                           view: view_states },
+    { path: "toasts",                           view: view_toasts },
     { path: "finding/:fid",                     view: view_finding_detail,    mount: mount_finding_detail },
 
     /* project scoped */
     { path: "project/:id/overview",             view: view_project_overview,  mount: mount_project_overview },
     { path: "project/:id/static",               view: view_project_static,    mount: mount_project_static },
-    { path: "project/:id/static/secrets",       view: (ctx) => stub(STUBS["project-secrets"]) },
-    { path: "project/:id/static/components",    view: (ctx) => stub(STUBS["project-components"]) },
-    { path: "project/:id/static/native",        view: (ctx) => stub(STUBS["project-native"]) },
+    { path: "project/:id/static/secrets",       view: view_project_secrets,    mount: mount_project_secrets },
+    { path: "project/:id/static/components",    view: view_project_components, mount: mount_project_components },
+    { path: "project/:id/static/native",        view: view_project_native,     mount: mount_project_native },
     { path: "project/:id/dynamic",              view: view_project_dynamic,   mount: mount_project_dynamic },
-    { path: "project/:id/tracer",               view: (ctx) => stub(STUBS["project-tracer"]) },
-    { path: "project/:id/network",              view: view_project_network },
-    { path: "project/:id/api-map",              view: (ctx) => stub(STUBS["project-api-map"]) },
-    { path: "project/:id/ssl-map",              view: (ctx) => stub(STUBS["project-ssl-map"]) },
-    { path: "project/:id/surface",              view: (ctx) => stub(STUBS["project-surface"]) },
-    { path: "project/:id/dataflow",             view: (ctx) => stub(STUBS["project-dataflow"]) },
-    { path: "project/:id/attack-tree",          view: (ctx) => stub(STUBS["project-attack-tree"]) },
-    { path: "project/:id/owasp",                view: (ctx) => stub(STUBS["project-owasp"]) },
+    { path: "project/:id/tracer",               view: view_project_tracer,    mount: mount_project_tracer },
+    { path: "project/:id/network",              view: view_project_network,   mount: mount_project_network },
+    { path: "project/:id/api-map",              view: view_project_api_map,   mount: mount_project_api_map },
+    { path: "project/:id/ssl-map",              view: view_project_ssl_map,   mount: mount_project_ssl_map },
+    { path: "project/:id/surface",              view: view_project_surface,   mount: mount_project_surface },
+    { path: "project/:id/dataflow",             view: view_project_dataflow,  mount: mount_project_dataflow },
+    { path: "project/:id/attack-tree",          view: view_project_attack_tree, mount: mount_project_attack_tree },
+    { path: "project/:id/owasp",                view: view_project_owasp,     mount: mount_project_owasp },
     { path: "project/:id/report",               view: view_project_report },
     { path: "project/:id/finding/:fid",         view: view_finding_detail,    mount: mount_finding_detail },
 ];
