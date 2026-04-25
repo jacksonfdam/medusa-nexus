@@ -74,9 +74,69 @@ class MobSFEngine(BaseEngine):
                 message=f"MobSF unreachable: {exc.__class__.__name__}",
             )
 
-    async def execute(self, context: AnalysisContext) -> list[Finding]:  # pragma: no cover - stub
-        _ = context
-        return []
+    async def execute(self, context: AnalysisContext) -> list[Finding]:
+        """Local MobSF-style static checks driven by parsed manifest metadata.
+
+        We don't require a running MobSF server — these are MASTG-flavored
+        cross-checks over what the apktool engine already extracted. When
+        MobSF *is* configured, the orchestrator can promote its findings;
+        here we keep things deterministic so the pipeline produces value
+        even on a fresh install.
+        """
+        from mnexus.models.finding import Finding, FindingCategory, Severity
+
+        meta = (context.extras or {}).get("apk_meta") or {}
+        findings: list[Finding] = []
+
+        # Components: surface providers without permission separately so they
+        # show up under the storage category (typical content-provider risk).
+        for comp in meta.get("exported_components", []):
+            if comp.get("type") == "provider" and comp.get("unprotected"):
+                findings.append(Finding(
+                    title=f"ContentProvider exported without permission: {comp['name']}",
+                    description=("An exported provider without `android:permission` is a remote SQL/IPC endpoint "
+                                 "any installed app can talk to."),
+                    severity=Severity.HIGH,
+                    category=FindingCategory.STORAGE,
+                    source_engine=self.name,
+                    evidence=f"<provider android:name=\"{comp['name']}\" android:exported=\"true\">",
+                    location="AndroidManifest.xml",
+                    cwe_id="CWE-926",
+                    masvs="MSTG-PLATFORM-4",
+                    remediation="Add `android:permission` (signature-level), parametrize all queries, deny `*` URIs.",
+                ))
+
+        # Permission count — informational only.
+        perms = meta.get("permissions", [])
+        if len(perms) >= 25:
+            findings.append(Finding(
+                title=f"App declares {len(perms)} permissions — unusually broad",
+                description="A large permission set widens the attack surface and triggers Play Store review.",
+                severity=Severity.LOW,
+                category=FindingCategory.PRIVACY,
+                source_engine=self.name,
+                evidence=", ".join(perms[:8]) + ("…" if len(perms) > 8 else ""),
+                location="AndroidManifest.xml",
+            ))
+
+        # Min SDK too low — pre-N apps lose modern platform protections.
+        try:
+            min_sdk_int = int(meta.get("min_sdk") or "0")
+        except ValueError:
+            min_sdk_int = 0
+        if 0 < min_sdk_int < 21:
+            findings.append(Finding(
+                title=f"minSdkVersion={min_sdk_int} — pre-Lollipop devices in scope",
+                description=("Below API 21 you lose Network Security Config, scoped storage, JobScheduler, "
+                             "and a long list of platform mitigations."),
+                severity=Severity.LOW,
+                category=FindingCategory.CODE,
+                source_engine=self.name,
+                evidence=f"minSdkVersion={min_sdk_int}",
+                location="AndroidManifest.xml",
+            ))
+
+        return findings
 
     def _headers(self) -> dict[str, str]:
         """Send both header styles. MobSF has historically accepted either."""
