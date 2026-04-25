@@ -1,0 +1,188 @@
+# 🔱 MEDUSA NEXUS — 60-second quickstart
+
+A condensed path from `git clone` to "I'm scanning APKs in a browser." The
+full installer + per-engine setup lives in [`README.md`](../README.md); this
+file is the shortest line through.
+
+## TL;DR
+
+```bash
+git clone https://github.com/jacksonmafra-umain/medusa-nexus.git
+cd medusa-nexus
+./scripts/dev.sh        # bootstrap → doctor → server (with auto-reload)
+```
+
+That single command will:
+
+1. Verify Python 3.11+.
+2. Create `.venv/` and install `mnexus` in editable mode (idempotent).
+3. Source `~/.mnexus/env.sh` if it exists (engine paths + service URLs).
+4. Run `mnexus doctor` so you see what's healthy / missing.
+5. Launch `uvicorn` with `--reload` on `127.0.0.1:8765`.
+6. Auto-open your browser at the dashboard.
+7. Watch `/v1/health` in the background and print `✓` / `✕` on each restart.
+
+When the server is up:
+
+- **Web UI**: <http://127.0.0.1:8765/>
+- **Swagger**: <http://127.0.0.1:8765/docs>
+- **ADB Control Panel**: <http://127.0.0.1:8765/#/adb>
+
+Edit any file under `mnexus/` and the server reloads in under a second; the
+watchdog will reprint `✓` once `/v1/health` answers again.
+
+## The interactive REPL
+
+`mnexus` with no arguments drops you into a terminal app with the same vibe
+as Claude Code or Gemini — slash commands, autocomplete, history, project
+context. Useful when you don't want a browser tab open.
+
+```bash
+mnexus
+```
+
+```
+🔱
+███╗   ███╗███████╗██████╗ ██╗   ██╗███████╗ █████╗
+████╗ ████║██╔════╝██╔══██╗██║   ██║██╔════╝██╔══██╗
+██╔████╔██║█████╗  ██║  ██║██║   ██║███████╗███████║
+██║╚██╔╝██║██╔══╝  ██║  ██║██║   ██║╚════██║██╔══██║
+██║ ╚═╝ ██║███████╗██████╔╝╚██████╔╝███████║██║  ██║
+╚═╝     ╚═╝╚══════╝╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝
+
+███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗
+████╗  ██║██╔════╝╚██╗██╔╝██║   ██║██╔════╝
+██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║███████╗
+██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║╚════██║
+██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║
+╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
+                  every head sees a different angle
+                  ────────────────────────────────────
+                  v0.1.0  ·  unified mobile threat analysis
+
+  engines: 6/7 healthy  ·  missing: ghidra  ·  workspace: ~/.mnexus/workspace
+
+🔱 nexus ❯
+```
+
+### Slash commands
+
+| command            | description                                                           |
+|--------------------|-----------------------------------------------------------------------|
+| `/help`            | Show every command.                                                   |
+| `/doctor`          | Run engine health checks with a live spinner.                         |
+| `/scan <apk>`      | Static scan an APK. Auto-detects package + version.                   |
+| `/projects`        | List stored projects with risk scores.                                |
+| `/use <id>`        | Set the active project.                                               |
+| `/findings [sev]`  | List findings on the active project (optional severity filter).       |
+| `/rescan`          | Re-run the static fan-out on the active project.                      |
+| `/report [fmt]`    | Generate a report (`markdown`/`json`/`html`/`pdf`).                   |
+| `/serve [port]`    | Start the FastAPI server in the background.                           |
+| `/open`            | Open the running web UI in the default browser.                       |
+| `/devices`         | List ADB-connected devices.                                           |
+| `/adb <args>`      | One-shot adb command (recorded in the audit log).                     |
+| `/clear`           | Clear the screen.                                                     |
+| `/exit`, Ctrl-D    | Leave the REPL (server is stopped automatically).                     |
+
+Prefix matching works — `/doc`, `/sca`, `/proj` all resolve. Tab completes on
+the full set if [`prompt_toolkit`](https://python-prompt-toolkit.readthedocs.io)
+is installed (it ships as a dependency).
+
+### Sample session
+
+```
+🔱 nexus ❯ /scan ~/Downloads/target.apk
+✓ ingest complete
+PRJ-A1B2C3D4  ·  com.target.app_4.12.0
+risk      62.8/100
+findings  18  (3c 6h 7m 2l)
+surface   3 components · 2 deeplinks · 1 native libs
+hooks     5 auto-generated
+
+🔱 nexus PRJ-A1B2C3D4 ❯ /findings critical
+┌──────────────┬──────────┬────────┬──────────────────────────────────────────┬────────────────┐
+│ id           │ sev      │ engine │ title                                     │ location       │
+├──────────────┼──────────┼────────┼──────────────────────────────────────────┼────────────────┤
+│ FND-7B22A91C │ CRITICAL │ jadx   │ Static (zero) IV with AES                │ classes.dex    │
+└──────────────┴──────────┴────────┴──────────────────────────────────────────┴────────────────┘
+
+🔱 nexus PRJ-A1B2C3D4 ❯ /serve
+✓ server ready
+web ui   http://127.0.0.1:8765/
+swagger  http://127.0.0.1:8765/docs
+
+🔱 nexus PRJ-A1B2C3D4 ❯ /open
+→ opening http://127.0.0.1:8765/
+```
+
+## One-shot mode
+
+Every slash command has a flat CLI equivalent for scripts and CI:
+
+```bash
+mnexus doctor                                   # exits non-zero if any engine is missing
+mnexus scan ./target.apk                        # auto-detects package + version
+mnexus scan ./target.apk --package com.target   # explicit override
+mnexus report --project PRJ-A1B2C3D4 \
+              --template technical --format markdown \
+              --output ./report.md
+mnexus serve --port 8765                        # production-style serve (no reload)
+mnexus dev --port 8765                          # dev-style serve (with reload)
+```
+
+## After a code change
+
+`scripts/dev.sh` already auto-reloads the server on Python file changes. To
+re-verify the whole world after a bigger change:
+
+```bash
+./scripts/dev.sh --check                  # bootstrap + doctor + tests, no server
+pytest                                    # full suite (27+ tests)
+```
+
+The watchdog inside `dev.sh` polls `/v1/health` once per second and prints
+a one-line `✓` / `✕` whenever the server flips state, so you always know if
+the last reload broke anything.
+
+## Project tabs (web UI)
+
+After a scan, `http://127.0.0.1:8765/#/projects` lists everything you've
+ingested. Click a project to land on its workspace, which has five tabs:
+
+| tab       | what populates it                                                       |
+|-----------|-------------------------------------------------------------------------|
+| OVERVIEW  | risk gauge, severity bars, attack-surface summary, recent findings      |
+| STATIC    | SDK fingerprint, crypto operations, full findings list with filters    |
+| DYNAMIC   | auto-hooks (real, generated from this APK), Frida console, start/stop  |
+| NETWORK   | API endpoints, captured traffic, SSL pinning library, cleartext flag    |
+| REPORT    | template + format picker, downloads to `~/.mnexus/workspace/reports/`  |
+
+Every project tab has `⟳ RESCAN` and `↻ REFRESH` buttons in the tab bar:
+
+- **RESCAN** — re-runs the full static fan-out on the stored APK in place.
+- **REFRESH** — re-fetches data without re-running the pipeline.
+
+## ADB control panel
+
+The web UI ships an ADBugger-style control panel at `#/adb`:
+
+- Device dropdown (multi-device aware).
+- Project package binding — pre-fills the package field from your most recent
+  project so app-specific commands (start / stop / uninstall / clear) Just Work.
+- Categorized buttons for: server, reboot, app, activity manager, permissions,
+  display, input, monkey, screen recording, shared prefs, packages, dumpsys,
+  logcat.
+- Sticky right-pane "Command Log" that records every adb call with its full
+  command line, exit code, and output preview.
+
+## Troubleshooting
+
+| symptom                                  | fix                                                       |
+|------------------------------------------|-----------------------------------------------------------|
+| `python3 not on PATH`                    | macOS: `brew install python@3.13`                         |
+| `engines: 0/7 healthy`                   | run `./scripts/setup.sh` to install adb / jadx / apktool  |
+| `mobsf MISSING`                          | `./scripts/setup.sh --mobsf`                              |
+| `burp MISSING`                           | `./scripts/setup.sh --burp` and follow the prompts        |
+| sidebar is in the way on a small window  | click `[☰]` in the topbar (or hit `⌘B` / `Ctrl-B`)        |
+| server didn't reload                     | check the `dev.sh` log; uvicorn watches `mnexus/` only    |
+| device tabs say "no device"              | plug a phone, authorize USB debugging, click `⟳`         |
