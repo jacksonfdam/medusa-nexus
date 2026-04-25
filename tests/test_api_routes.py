@@ -30,11 +30,15 @@ def test_root_serves_spa_shell(client: TestClient) -> None:
     assert "v0.1.0-alpha" in body
     assert 'id="clock"' in body
 
-    # Sidebar: 9 primary routes + 3 secondary at the bottom.
-    for nav_item in ("DASHBOARD", "PROJECTS", "SCAN", "DYNAMIC", "NETWORK",
+    # Sidebar primary routes (DYNAMIC and NETWORK now reachable only via the
+    # project workspace tabs) + 3 secondary entries at the bottom.
+    for nav_item in ("DASHBOARD", "PROJECTS", "SCAN", "DEVICES", "ADB",
                      "REPORT", "TOOLS", "RECIPES", "SETTINGS",
                      "BOOT", "CREDITS", "TERMINAL"):
         assert f">{nav_item}<" in body, f"sidebar missing {nav_item}"
+    # Belt-and-suspenders: pin that we did NOT regrow the removed entries.
+    assert ">DYNAMIC<" not in body, "DYNAMIC should be reached via project tabs, not the sidebar"
+    assert ">NETWORK<" not in body, "NETWORK should be reached via project tabs, not the sidebar"
 
     # Static asset references wired
     assert '/static/app.css' in body
@@ -69,11 +73,17 @@ def test_every_sidebar_route_has_a_handler(client: TestClient) -> None:
 
 
 def test_mitigation_is_pinned_in_spa(client: TestClient) -> None:
-    """The Mitigation block is a first-class UI element; don't let anyone quietly drop it."""
+    """The Mitigation block is a first-class UI element; don't let anyone quietly drop it.
+
+    Demo content was removed when the SPA went fully data-driven, so we pin
+    the structural anchors instead — the slot ids the mount hooks fill, the
+    CSS class, and the playbook header.
+    """
     js = client.get("/static/app.js").text
     assert "MITIGATION PLAYBOOK" in js
-    assert "mitigation" in js  # CSS class
-    assert "Android Keystore" in js  # sample mitigation content from Finding Detail
+    assert "mitigation" in js                  # CSS class on the highlighted block
+    assert "finding-mitigation" in js          # finding-detail slot id
+    assert "mit.innerHTML" in js or "mitEl.innerHTML" in js  # the mount hook fills it
 
 
 def test_favicon_is_svg(client: TestClient) -> None:
