@@ -403,7 +403,23 @@ function deviceTabs(active) {
     return `
     <div class="tab-bar">
       ${tabs.map(([k, label]) => `<a class="tab ${k === active ? "active" : ""}" href="#/device/${k}">${k === active ? "> " : "  "}${label}</a>`).join("")}
-    </div>`;
+      <span class="grow"></span>
+      <a class="tab" href="#/adb" style="color:var(--magenta)">+ ADB CONTROL ↗</a>
+    </div>
+    <div id="device-status-strip" class="row" style="padding:6px 10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;margin:6px 0 12px;font-size:11px"><span class="muted small">device:</span><span class="t-mono" id="device-status-text">checking…</span><span class="grow"></span><span class="muted small">commands routed via the singular /v1/device/* endpoints — for per-serial control, switch to ADB →</span></div>`;
+}
+
+async function fillDeviceStatusStrip() {
+    const text = $("#device-status-text");
+    if (!text) return;
+    const info = await getJSON("/v1/device/info").catch(() => ({connected: false}));
+    if (info.connected) {
+        text.textContent = `${info.manufacturer || ""} ${info.model || ""} · A${info.android_release || "?"} · ${info.abi || ""}`.trim();
+        text.style.color = "var(--acid)";
+    } else {
+        text.textContent = "no device connected";
+        text.style.color = "var(--sev-crit)";
+    }
 }
 
 function view_device_bridge() {
@@ -1046,17 +1062,20 @@ const DEVICE_CONNECT_FLAVORS = [
     { key: "webrtc_signaling",label: "WebRTC + helper app", impl: "phone-side app", load: "low",    value: "medium", default: false },
 ];
 
+// Currently active connection flavor (drives the device-list source).
+let _activeFlavor = "adb_server";
+
 function view_devices() {
     return h`
     <div class="main">
       ${sectionHeader("D", "04 // INTAKE", "DEVICES")}
       <div class="devices-bar">
-        <div class="row" style="gap:8px">
+        <div class="row" style="gap:8px;flex-wrap:wrap">
           <span class="muted small uppercase">connect via:</span>
           ${DEVICE_CONNECT_FLAVORS.map((f) => `
-            <span class="chip ${f.default ? "low" : "info"}" data-flavor="${f.key}" title="${f.impl} · load=${f.load} · value=${f.value}">
-              ${f.label}${f.default ? "" : " (iter 2)"}
-            </span>`).join("")}
+            <button type="button" class="chip ${_activeFlavor === f.key ? "low" : "info"}" data-flavor="${f.key}" title="${f.impl} · load=${f.load} · value=${f.value}" style="cursor:pointer;border-style:solid">
+              ${_activeFlavor === f.key ? "● " : "○ "}${f.label}
+            </button>`).join("")}
         </div>
         <span class="spacer"></span>
         <form id="connect-form" class="row" style="gap:8px;flex-wrap:nowrap">
@@ -1132,6 +1151,140 @@ async function mount_devices() {
 
     const closeBtn = $("#device-detail-close");
     if (closeBtn) closeBtn.addEventListener("click", () => closeDeviceDetail());
+
+    // ── Connection-flavor chip click handlers ─────────────────────────────
+    $$("[data-flavor]").forEach((chip) => chip.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        const flavor = chip.dataset.flavor;
+        if (flavor === _activeFlavor) return;
+
+        if (flavor === "adb_server") {
+            _activeFlavor = "adb_server";
+            redrawFlavorChips();
+            setConnectStatus("flavor: ADB + ffmpeg (server-side)", "var(--acid)");
+            await refreshDevices();
+            return;
+        }
+
+        if (flavor === "webusb_yaadb") {
+            await activateWebUSB();
+            return;
+        }
+
+        if (flavor === "webrtc_signaling") {
+            showWebRTCInfo();
+            return;
+        }
+    }));
+}
+
+function redrawFlavorChips() {
+    $$("[data-flavor]").forEach((c) => {
+        const k = c.dataset.flavor;
+        const active = k === _activeFlavor;
+        c.classList.toggle("low", active);
+        c.classList.toggle("info", !active);
+        const flavor = DEVICE_CONNECT_FLAVORS.find((f) => f.key === k);
+        c.innerHTML = (active ? "● " : "○ ") + (flavor ? flavor.label : k);
+    });
+}
+
+function setConnectStatus(text, color) {
+    const status = $("#connect-status");
+    if (status) {
+        status.innerHTML = `<span style="color:${color || "var(--muted)"}">${text}</span>`;
+    }
+}
+
+// ── WebUSB / ya-webadb path ─────────────────────────────────────────────
+async function activateWebUSB() {
+    if (!("usb" in navigator)) {
+        setConnectStatus(
+            "✕ this browser doesn't expose <code>navigator.usb</code> — try Chrome/Edge over HTTPS or localhost",
+            "var(--sev-crit)",
+        );
+        return;
+    }
+    setConnectStatus("↑ requesting USB device — pick the phone in the browser prompt", "var(--acid)");
+    try {
+        // ADB USB interface signature on Android.
+        const usbDev = await navigator.usb.requestDevice({
+            filters: [
+                { classCode: 0xFF, subclassCode: 0x42, protocolCode: 0x01 }, // ADB
+                { classCode: 0xFF, subclassCode: 0x42, protocolCode: 0x03 }, // ADB v2
+            ],
+        });
+        _activeFlavor = "webusb_yaadb";
+        redrawFlavorChips();
+        renderWebUSBPanel(usbDev);
+    } catch (e) {
+        // User cancelled the chooser, or no matching device.
+        setConnectStatus(`✕ ${e.name === "NotFoundError" ? "no ADB-class USB device picked" : e.message}`, "var(--sev-high)");
+    }
+}
+
+function renderWebUSBPanel(usbDev) {
+    const host = $("#devices-grid-host");
+    if (!host) return;
+    const product = usbDev.productName || "(unknown)";
+    const vendor = usbDev.manufacturerName || "(unknown)";
+    const vid = usbDev.vendorId.toString(16).padStart(4, "0");
+    const pid = usbDev.productId.toString(16).padStart(4, "0");
+    host.innerHTML = `
+      <div class="empty-state">
+        <div style="font-size:18px;color:var(--acid);letter-spacing:3px;margin-bottom:14px">WEBUSB DEVICE PICKED</div>
+        <div class="t-mono" style="text-align:left;display:inline-block">
+          <div>vendor:    <span style="color:var(--cyan)">${vendor}</span> (0x${vid})</div>
+          <div>product:   <span style="color:var(--cyan)">${product}</span> (0x${pid})</div>
+          <div>serial:    <span style="color:var(--cyan)">${usbDev.serialNumber || "(none)"}</span></div>
+        </div>
+        <div class="muted small" style="margin-top:18px;max-width:560px;margin-left:auto;margin-right:auto">
+          We have the USB handle. Driving ADB over WebUSB needs the
+          <a href="https://github.com/yume-chan/ya-webadb" target="_blank" style="color:var(--magenta)">ya-webadb</a>
+          library bundled into the SPA — that's tagged <b>iter 2</b>. For now we hand the handle back so you
+          can confirm the path works; commands still flow through server-side ADB.
+        </div>
+        <div style="margin-top:14px"><button class="btn" id="webusb-back">[ ← BACK TO ADB SERVER ]</button></div>
+      </div>`;
+    const back = $("#webusb-back");
+    if (back) back.addEventListener("click", async () => {
+        _activeFlavor = "adb_server";
+        redrawFlavorChips();
+        await refreshDevices();
+    });
+    setConnectStatus(
+        `✓ WebUSB picked: ${product} (0x${vid}/0x${pid}) — bundle ya-webadb to enable command flow`,
+        "var(--acid)",
+    );
+}
+
+// ── WebRTC signaling info ───────────────────────────────────────────────
+function showWebRTCInfo() {
+    const host = $("#devices-grid-host");
+    if (!host) return;
+    _activeFlavor = "webrtc_signaling";
+    redrawFlavorChips();
+    host.innerHTML = `
+      <div class="empty-state">
+        <div style="font-size:18px;color:var(--magenta);letter-spacing:3px;margin-bottom:14px">WEBRTC + HELPER APP</div>
+        <div class="t-mono" style="text-align:left;display:inline-block;line-height:1.7">
+          <div>1. companion app on the device (APK to be built) opens a WebRTC peer.</div>
+          <div>2. nexus signals it via <code>ws://nexus:8765/v1/devices/webrtc/signal</code>.</div>
+          <div>3. data channel ferries adb commands; video track ferries the screen.</div>
+        </div>
+        <div class="muted small" style="margin-top:18px;max-width:560px;margin-left:auto;margin-right:auto">
+          Lowest server load (only signaling), works through NAT, but <b>requires a phone-side app</b> we
+          haven't built yet. <span style="color:var(--magenta)">iter 2.</span>
+        </div>
+        <div style="margin-top:14px"><button class="btn" id="webrtc-back">[ ← BACK TO ADB SERVER ]</button></div>
+      </div>`;
+    const back = $("#webrtc-back");
+    if (back) back.addEventListener("click", async () => {
+        _activeFlavor = "adb_server";
+        redrawFlavorChips();
+        await refreshDevices();
+    });
+    setConnectStatus("flavor: WebRTC + helper app (iter 2 — informational only)", "var(--magenta)");
 }
 
 async function refreshDevices() {
@@ -1228,10 +1381,18 @@ function openDeviceDetail(serial, d) {
                 <button class="btn" data-action="reboot-recovery">[ → RECOVERY ]</button>
                 <button class="btn danger" data-action="disconnect">[ DISCONNECT ]</button>
               </div>
-              <div class="row" style="gap:8px;align-items:center">
-                <input type="file" id="install-file" accept=".apk" style="display:none">
-                <button class="btn" onclick="document.getElementById('install-file').click()">[ INSTALL APK… ]</button>
-                <span id="install-status" class="muted small"></span>
+              <div class="col" style="gap:6px">
+                <div class="muted small" style="letter-spacing:2px">// INSTALL FROM A SAVED PROJECT</div>
+                <div class="row" style="gap:8px;align-items:center">
+                  <select id="install-from-project" class="input" style="flex:1;padding:6px 10px"><option>loading projects…</option></select>
+                  <button class="btn primary" id="install-from-project-btn">[ INSTALL ]</button>
+                </div>
+                <div class="muted small" style="margin-top:6px;letter-spacing:2px">// OR UPLOAD A FRESH APK</div>
+                <div class="row" style="gap:8px;align-items:center">
+                  <input type="file" id="install-file" accept=".apk" style="display:none">
+                  <button class="btn" onclick="document.getElementById('install-file').click()">[ ↑ UPLOAD NEW APK ]</button>
+                  <span id="install-status" class="muted small grow"></span>
+                </div>
               </div>
             </div>
           </section>
@@ -1486,21 +1647,74 @@ function bindShell(serial) {
     });
 }
 
-function bindInstall(serial) {
-    const input = $("#install-file"); if (!input) return;
-    input.addEventListener("change", async () => {
+async function bindInstall(serial) {
+    const status = $("#install-status");
+    const setStatus = (text, color) => { if (status) { status.textContent = text; status.style.color = color || ""; } };
+
+    // ── 1. Populate the saved-projects dropdown from /v1/projects ──
+    const select = $("#install-from-project");
+    if (select) {
+        const projects = await getJSON("/v1/projects").catch(() => []);
+        if (!projects.length) {
+            select.innerHTML = `<option value="">— no saved projects yet (upload one at /#/scan) —</option>`;
+            select.disabled = true;
+        } else {
+            select.disabled = false;
+            select.innerHTML = `<option value="">— pick a saved project —</option>` +
+                projects.map((p) => {
+                    const label = `${p.package_name || p.name || p.id}` +
+                        (p.version_name ? ` v${p.version_name}` : "") +
+                        ` · ${p.id}`;
+                    return `<option value="${p.id}">${label}</option>`;
+                }).join("");
+        }
+    }
+
+    // ── 2. Install-from-project button ──
+    const installBtn = $("#install-from-project-btn");
+    if (installBtn) installBtn.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        const projectId = select?.value;
+        if (!projectId) { setStatus("pick a project from the dropdown first", "var(--sev-high)"); return; }
+        setStatus(`pushing ${projectId} via adb install -r…`, "var(--acid)");
+        installBtn.disabled = true;
+        try {
+            const fd = new FormData(); fd.append("project_id", projectId);
+            const r = await fetch(`/v1/devices/${encodeURIComponent(serial)}/install-project`, { method: "POST", body: fd });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                const detail = j.detail || j;
+                setStatus(`✕ ${typeof detail === "string" ? detail : (detail.error || "install failed")}`, "var(--sev-crit)");
+                return;
+            }
+            setStatus(
+                j.success
+                    ? `✓ installed ${j.package} v${j.version} (${j.apk})`
+                    : `✕ ${(j.output || "").split("\n").slice(-2).join(" ").trim() || "adb refused"}`,
+                j.success ? "var(--acid)" : "var(--sev-crit)",
+            );
+        } catch (e) {
+            setStatus(`✕ ${e.message}`, "var(--sev-crit)");
+        } finally {
+            installBtn.disabled = false;
+        }
+    });
+
+    // ── 3. Fresh-file upload (existing path, kept as a secondary option) ──
+    const input = $("#install-file");
+    if (input) input.addEventListener("change", async () => {
         const f = input.files?.[0]; if (!f) return;
-        const status = $("#install-status");
-        status.textContent = `installing ${f.name} (${fmtBytes(f.size)})…`;
+        setStatus(`installing ${f.name} (${fmtBytes(f.size)})…`, "var(--acid)");
         const fd = new FormData(); fd.append("file", f);
         try {
             const r = await fetch(`/v1/devices/${encodeURIComponent(serial)}/install`, { method: "POST", body: fd });
             const j = await r.json();
-            status.textContent = j.success ? `✓ installed` : `✕ ${j.output.split('\n').slice(-2).join(' ')}`;
-            status.style.color = j.success ? "var(--acid)" : "var(--sev-crit)";
+            setStatus(
+                j.success ? "✓ installed" : `✕ ${(j.output || "").split("\n").slice(-2).join(" ")}`,
+                j.success ? "var(--acid)" : "var(--sev-crit)",
+            );
         } catch (e) {
-            status.textContent = `✕ ${e.message}`;
-            status.style.color = "var(--sev-crit)";
+            setStatus(`✕ ${e.message}`, "var(--sev-crit)");
         }
     });
 }
@@ -1777,6 +1991,7 @@ async function mount_device_pull() {
 }
 
 async function mount_device_bridge() {
+    fillDeviceStatusStrip();
     const info = await getJSON("/v1/device/info/full").catch(() => ({connected: false, reason: "network error"}));
     const badge = $("#bridge-badge");
     if (badge) {
@@ -1879,6 +2094,647 @@ async function mount_device_bridge() {
     });
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  ADB CONTROL PANEL — ADBugger-style command surface
+ *
+ *  Shared state across this whole route family:
+ *    window.NEXUS_ADB = {
+ *      serial:  string | null    — currently selected device
+ *      package: string | null    — currently selected app package
+ *      devices: array            — last fetched /v1/devices result
+ *    }
+ *  Persisted in sessionStorage so it survives screen switches.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+window.NEXUS_ADB = window.NEXUS_ADB || (function () {
+    let stored = {};
+    try { stored = JSON.parse(sessionStorage.getItem("nexus.adb") || "{}"); } catch (e) {}
+    return { serial: stored.serial || null, package: stored.package || null, devices: [] };
+})();
+
+function adbStateSave() {
+    try { sessionStorage.setItem("nexus.adb", JSON.stringify({ serial: NEXUS_ADB.serial, package: NEXUS_ADB.package })); } catch (e) {}
+}
+
+async function adbRefreshDevices() {
+    NEXUS_ADB.devices = await getJSON("/v1/devices").catch(() => []);
+    if (!NEXUS_ADB.serial && NEXUS_ADB.devices.length) {
+        const first = NEXUS_ADB.devices.find((d) => d.state === "device");
+        if (first) NEXUS_ADB.serial = first.serial;
+    }
+    if (NEXUS_ADB.serial && !NEXUS_ADB.devices.some((d) => d.serial === NEXUS_ADB.serial)) {
+        NEXUS_ADB.serial = null;
+    }
+    adbStateSave();
+    return NEXUS_ADB.devices;
+}
+
+async function adbRefreshPackages() {
+    if (NEXUS_ADB.package) return;
+    const projects = await getJSON("/v1/projects").catch(() => []);
+    if (projects.length && projects[0].package_name) {
+        NEXUS_ADB.package = projects[0].package_name;
+        adbStateSave();
+    }
+}
+
+function deviceSelectorBar() {
+    const devices = NEXUS_ADB.devices || [];
+    const opts = devices.length
+        ? devices.map((d) => {
+            const label = d.state === "device"
+                ? `${d.serial}${d.model ? " · " + d.model : ""}${d.android_release ? " · A" + d.android_release : ""}`
+                : `${d.serial} · ${d.state}`;
+            return `<option value="${d.serial}" ${d.serial === NEXUS_ADB.serial ? "selected" : ""}>${label}</option>`;
+        }).join("")
+        : `<option value="">— no devices —</option>`;
+    return `
+      <section class="row" style="gap:10px;align-items:center;padding:10px 12px;background:var(--bg-panel);border:1px solid var(--border-accent);border-radius:2px;margin-bottom:14px">
+        <span class="muted small uppercase">device</span>
+        <select id="adb-serial" class="input" style="min-width:280px">${opts}</select>
+        <button class="btn" id="adb-refresh">[ ⟳ ]</button>
+        <span style="width:1px;height:24px;background:var(--border)"></span>
+        <span class="muted small uppercase">package</span>
+        <select id="adb-package-preset" class="input" style="min-width:200px">
+          <option value="">— pick / type below —</option>
+        </select>
+        <input id="adb-package" class="input" style="min-width:240px" value="${NEXUS_ADB.package || ""}" placeholder="com.target.banking">
+        <span class="grow"></span>
+        <span class="muted small">log in panel →</span>
+      </section>`;
+}
+
+function bindDeviceSelector() {
+    $("#adb-serial")?.addEventListener("change", (e) => { NEXUS_ADB.serial = e.target.value || null; adbStateSave(); });
+    $("#adb-package")?.addEventListener("input", (e) => { NEXUS_ADB.package = e.target.value.trim() || null; adbStateSave(); });
+    $("#adb-package-preset")?.addEventListener("change", async (e) => {
+        const pid = e.target.value;
+        if (!pid) return;
+        const proj = await getJSON(`/v1/projects/${encodeURIComponent(pid)}`).catch(() => null);
+        if (proj && proj.package_name) {
+            $("#adb-package").value = proj.package_name;
+            NEXUS_ADB.package = proj.package_name;
+            adbStateSave();
+        }
+    });
+    $("#adb-refresh")?.addEventListener("click", async () => {
+        await adbRefreshDevices();
+        const sel = $("#adb-serial");
+        if (sel) {
+            const devices = NEXUS_ADB.devices || [];
+            sel.innerHTML = (devices.length
+                ? devices.map((d) => `<option value="${d.serial}" ${d.serial === NEXUS_ADB.serial ? "selected" : ""}>${d.serial}${d.model ? " · " + d.model : ""}</option>`).join("")
+                : `<option value="">— no devices —</option>`);
+        }
+    });
+    // Populate the package preset once.
+    getJSON("/v1/projects").then((projects) => {
+        const sel = $("#adb-package-preset");
+        if (!sel || !projects?.length) return;
+        sel.innerHTML = `<option value="">— pick / type below —</option>` + projects.map((p) =>
+            `<option value="${p.id}">${p.package_name || p.id} · v${p.version_name || "?"}</option>`).join("");
+    }).catch(() => {});
+}
+
+/* SCREEN — ADB Control Panel (entry route #/adb) */
+function view_adb() {
+    return h`
+    <div class="main">
+      ${sectionHeader("A", "ADB // CONTROL PANEL", "ANDROID DEBUG BRIDGE")}
+      <div id="adb-bar"></div>
+
+      <div class="row" style="align-items:flex-start;gap:14px">
+        <div class="col grow" style="min-width:0">
+
+          <section class="panel">
+            <div class="panel-head">// SERVER</div>
+            <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+              <button class="btn" data-adb='{"method":"POST","url":"/v1/adb/server/start"}'>[ start-server ]</button>
+              <button class="btn danger" data-adb='{"method":"POST","url":"/v1/adb/server/kill"}'>[ kill-server ]</button>
+              <button class="btn" data-adb='{"method":"POST","url":"/v1/adb/server/root"}'>[ root ]</button>
+              <button class="btn" data-adb='{"method":"POST","url":"/v1/adb/server/unroot"}'>[ unroot ]</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// REBOOT</div>
+            <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+              <button class="btn" data-adb-reboot="">[ reboot ]</button>
+              <button class="btn" data-adb-reboot="recovery">[ recovery ]</button>
+              <button class="btn" data-adb-reboot="bootloader">[ bootloader ]</button>
+              <button class="btn" data-adb-reboot="fastboot">[ fastboot ]</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// APP — uses selected package</div>
+            <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+              <button class="btn primary" data-adb-app="start">[ START ]</button>
+              <button class="btn" data-adb-app="stop">[ FORCE STOP ]</button>
+              <button class="btn" data-adb-app="clear">[ CLEAR DATA ]</button>
+              <button class="btn danger" data-adb-app="uninstall">[ UNINSTALL ]</button>
+              <button class="btn" data-adb-app="uninstall-keep">[ UNINSTALL · KEEP DATA ]</button>
+              <label class="row" style="gap:6px;cursor:pointer"><input type="file" id="apk-install" accept=".apk" style="display:none"><span class="btn primary">[ + INSTALL APK ]</span></label>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// ACTIVITY MANAGER</div>
+            <div class="panel-body col" style="gap:8px">
+              <div class="row" style="gap:8px;flex-wrap:wrap">
+                <button class="btn" data-adb-home>[ HOME ]</button>
+                <button class="btn" data-adb-key="3">[ KEY: HOME ]</button>
+                <button class="btn" data-adb-key="4">[ KEY: BACK ]</button>
+                <button class="btn" data-adb-key="82">[ KEY: MENU ]</button>
+                <button class="btn" data-adb-key="84">[ KEY: SEARCH ]</button>
+                <button class="btn" data-adb-key="26">[ KEY: POWER ]</button>
+              </div>
+              <div class="row" style="gap:8px">
+                <input id="adb-url" class="input grow" placeholder="https://example.com (open as VIEW intent)" style="min-width:0">
+                <button class="btn primary" id="adb-url-go">[ OPEN URL ]</button>
+              </div>
+              <div class="row" style="gap:8px">
+                <input id="adb-tel" class="input" placeholder="+1234567890" style="width:200px">
+                <button class="btn" id="adb-tel-call">[ CALL ]</button>
+                <button class="btn" id="adb-tel-sms">[ SEND SMS ]</button>
+                <input id="adb-sms-body" class="input grow" placeholder="message body…" style="min-width:0">
+              </div>
+              <div class="row" style="gap:8px">
+                <input id="adb-action" class="input" placeholder="action (e.g. android.intent.action.VIEW)" style="width:300px">
+                <input id="adb-data" class="input" placeholder="data" style="width:200px">
+                <select id="adb-mode" class="input" style="width:130px"><option>start</option><option>broadcast</option><option>startservice</option></select>
+                <button class="btn primary" id="adb-intent-go">[ FIRE INTENT ]</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// PERMISSIONS — uses selected package</div>
+            <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+              <input id="adb-perm" class="input" placeholder="android.permission.CAMERA" style="width:280px">
+              <button class="btn" data-adb-perm="grant">[ GRANT ]</button>
+              <button class="btn" data-adb-perm="revoke">[ REVOKE ]</button>
+              <button class="btn" data-adb-perm="reset">[ RESET ALL ]</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// DISPLAY (wm)</div>
+            <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+              <input id="adb-wm-size" class="input" placeholder="1080x2400" style="width:160px">
+              <button class="btn" id="adb-wm-size-go">[ SET SIZE ]</button>
+              <button class="btn" id="adb-wm-size-reset">[ RESET ]</button>
+              <span style="width:1px;height:24px;background:var(--border)"></span>
+              <input id="adb-wm-density" class="input" placeholder="320" style="width:100px">
+              <button class="btn" id="adb-wm-density-go">[ SET DENSITY ]</button>
+              <button class="btn" id="adb-wm-density-reset">[ RESET ]</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// INPUT</div>
+            <div class="panel-body col" style="gap:8px">
+              <div class="row" style="gap:8px">
+                <input id="adb-text" class="input grow" placeholder='"hello world"' style="min-width:0">
+                <button class="btn primary" id="adb-text-go">[ TYPE ]</button>
+              </div>
+              <div class="row" style="gap:8px;flex-wrap:wrap">
+                <input id="adb-tap-x" class="input" placeholder="x" style="width:80px">
+                <input id="adb-tap-y" class="input" placeholder="y" style="width:80px">
+                <button class="btn" id="adb-tap-go">[ TAP ]</button>
+                <span style="width:1px;height:24px;background:var(--border)"></span>
+                <input id="adb-swipe-x1" class="input" placeholder="x1" style="width:60px">
+                <input id="adb-swipe-y1" class="input" placeholder="y1" style="width:60px">
+                <input id="adb-swipe-x2" class="input" placeholder="x2" style="width:60px">
+                <input id="adb-swipe-y2" class="input" placeholder="y2" style="width:60px">
+                <input id="adb-swipe-ms" class="input" placeholder="ms" style="width:80px" value="300">
+                <button class="btn" id="adb-swipe-go">[ SWIPE ]</button>
+              </div>
+              <div id="adb-keycodes" class="row" style="gap:6px;flex-wrap:wrap;padding:8px;background:var(--bg);border:1px dashed var(--border);border-radius:2px"></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// MONKEY · stress test</div>
+            <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+              <input id="adb-monkey-events" class="input" placeholder="events" style="width:120px" value="500">
+              <input id="adb-monkey-seed" class="input" placeholder="seed" style="width:100px" value="42">
+              <button class="btn primary" id="adb-monkey-go">[ RUN MONKEY ]</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// SCREEN RECORDING</div>
+            <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+              <input id="adb-rec-secs" class="input" placeholder="seconds (max 180)" style="width:160px" value="30">
+              <button class="btn primary" id="adb-rec-start">[ START RECORDING ]</button>
+              <button class="btn" id="adb-rec-pull">[ PULL LATEST ]</button>
+              <span class="muted small" id="adb-rec-status">—</span>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// SHARED PREFERENCES (debug-build receivers)</div>
+            <div class="panel-body col" style="gap:8px">
+              <div class="row" style="gap:8px;flex-wrap:wrap">
+                <select id="adb-sp-op" class="input" style="width:110px"><option>PUT</option><option>REMOVE</option><option>CLEAR</option></select>
+                <input id="adb-sp-name" class="input" placeholder="prefs name (optional)" style="width:160px">
+                <input id="adb-sp-key" class="input" placeholder="key" style="width:160px">
+                <select id="adb-sp-type" class="input" style="width:110px"><option>string</option><option>boolean</option><option>int</option><option>long</option><option>float</option></select>
+                <input id="adb-sp-value" class="input grow" placeholder='value' style="min-width:0">
+                <button class="btn primary" id="adb-sp-go">[ BROADCAST ]</button>
+              </div>
+              <div class="muted small">Receivers must be registered as <code>&lt;package&gt;.sp.{PUT,REMOVE,CLEAR}</code> in the debug build.</div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// PACKAGES — list + filter</div>
+            <div class="panel-body col" style="gap:8px">
+              <div class="row" style="gap:8px">
+                <select id="adb-pkg-scope" class="input" style="width:160px">
+                  <option value="all">all</option>
+                  <option value="3rd" selected>3rd party</option>
+                  <option value="system">system</option>
+                  <option value="uninstalled">uninstalled</option>
+                  <option value="with-paths">with paths</option>
+                </select>
+                <input id="adb-pkg-filter" class="input grow" placeholder="grep filter (optional)">
+                <button class="btn primary" id="adb-pkg-list">[ LIST ]</button>
+              </div>
+              <div id="adb-pkg-results" class="panel-body tight" style="background:var(--bg);max-height:280px;overflow:auto"></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// DUMPSYS</div>
+            <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+              ${["battery", "wifi", "window", "package", "activity", "cpuinfo", "meminfo"].map((t) => `<button class="btn" data-adb-dumpsys="${t}">[ ${t} ]</button>`).join("")}
+            </div>
+            <pre class="code" id="adb-dumpsys-out" style="max-height:240px;overflow:auto;display:none;margin:0"></pre>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">// LOGCAT</div>
+            <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+              <select id="adb-lc-level" class="input" style="width:80px"><option>V</option><option selected>I</option><option>W</option><option>E</option><option>F</option></select>
+              <input id="adb-lc-filter" class="input grow" placeholder="grep" style="min-width:200px">
+              <input id="adb-lc-lines" class="input" style="width:80px" value="200">
+              <button class="btn primary" id="adb-lc-fetch">[ FETCH ]</button>
+              <button class="btn danger" id="adb-lc-clear">[ logcat -c ]</button>
+            </div>
+            <pre class="code" id="adb-lc-out" style="max-height:300px;overflow:auto;display:none;margin:0"></pre>
+          </section>
+
+        </div>
+
+        <!-- COMMAND LOG (sticky right pane) -->
+        <section class="panel" style="width:460px;flex:none;position:sticky;top:12px">
+          <div class="panel-head"><span>// COMMAND LOG · live</span><span class="spacer"></span><button class="btn" id="adb-log-clear">[ CLEAR ]</button><label class="row" style="gap:4px;margin-left:8px"><input type="checkbox" id="adb-log-auto" checked style="accent-color:var(--acid)"><span class="muted small">auto-poll · 2s</span></label></div>
+          <div class="panel-body" id="adb-log-body" style="max-height:80vh;overflow:auto;font-size:11px;line-height:1.45"></div>
+        </section>
+      </div>
+    </div>`;
+}
+
+async function mount_adb() {
+    await adbRefreshDevices();
+    await adbRefreshPackages();
+    $("#adb-bar").innerHTML = deviceSelectorBar();
+    bindDeviceSelector();
+    renderKeycodeButtons();
+
+    // ─── helpers ─────────────────────────────────────────────────────────
+    const requireSerial = () => {
+        if (!NEXUS_ADB.serial) { alert("select a device first"); return null; }
+        return NEXUS_ADB.serial;
+    };
+    const requirePackage = () => {
+        const pkg = ($("#adb-package")?.value || NEXUS_ADB.package || "").trim();
+        if (!pkg) { alert("set a package first (top bar or project import)"); return null; }
+        return pkg;
+    };
+    const post = async (url, formData = {}) => {
+        const fd = new FormData();
+        Object.entries(formData).forEach(([k, v]) => fd.append(k, v));
+        const r = await fetch(url, { method: "POST", body: fd });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || r.statusText);
+        return j;
+    };
+    const flash = (btn, ok = true, msg) => {
+        const orig = btn.textContent;
+        btn.textContent = msg || (ok ? "[ ✓ ]" : "[ ✕ ]");
+        btn.style.color = ok ? "var(--acid)" : "var(--sev-crit)";
+        setTimeout(() => { btn.textContent = orig; btn.style.color = ""; }, 1300);
+    };
+
+    // ─── server / generic POST ──────────────────────────────────────────
+    $$('[data-adb]').forEach((btn) => btn.addEventListener("click", async () => {
+        try {
+            const cfg = JSON.parse(btn.dataset.adb);
+            await post(cfg.url, cfg.form || {});
+            flash(btn, true);
+        } catch (e) { flash(btn, false); console.error(e); }
+    }));
+
+    // ─── reboot ─────────────────────────────────────────────────────────
+    $$('[data-adb-reboot]').forEach((btn) => btn.addEventListener("click", async () => {
+        const s = requireSerial(); if (!s) return;
+        const mode = btn.dataset.adbReboot || "";
+        if (!confirm(`reboot ${s}${mode ? " into " + mode : ""}?`)) return;
+        try { await post(`/v1/devices/${encodeURIComponent(s)}/reboot`, { mode }); flash(btn); } catch (e) { flash(btn, false); }
+    }));
+
+    // ─── app actions ────────────────────────────────────────────────────
+    $$('[data-adb-app]').forEach((btn) => btn.addEventListener("click", async () => {
+        const s = requireSerial(); if (!s) return;
+        const pkg = requirePackage(); if (!pkg) return;
+        const op = btn.dataset.adbApp;
+        try {
+            if (op === "start") await post(`/v1/devices/${encodeURIComponent(s)}/start`, { package: pkg });
+            else if (op === "stop") await post(`/v1/devices/${encodeURIComponent(s)}/stop`, { package: pkg });
+            else if (op === "clear") await post(`/v1/devices/${encodeURIComponent(s)}/clear`, { package: pkg });
+            else if (op === "uninstall") await post(`/v1/devices/${encodeURIComponent(s)}/uninstall`, { package: pkg });
+            else if (op === "uninstall-keep") await post(`/v1/devices/${encodeURIComponent(s)}/uninstall`, { package: pkg, keep_data: "yes" });
+            flash(btn, true);
+        } catch (e) { flash(btn, false); console.error(e); }
+    }));
+
+    $("#apk-install").addEventListener("change", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const f = e.target.files?.[0]; if (!f) return;
+        const fd = new FormData(); fd.append("file", f);
+        const btn = e.target.parentElement.querySelector("span.btn");
+        btn.textContent = `[ INSTALLING ${f.name}… ]`;
+        const r = await fetch(`/v1/devices/${encodeURIComponent(s)}/install`, { method: "POST", body: fd });
+        const j = await r.json().catch(() => ({}));
+        btn.textContent = r.ok && j.success ? "[ ✓ INSTALLED ]" : "[ ✕ FAILED ]";
+        btn.style.color = r.ok && j.success ? "var(--acid)" : "var(--sev-crit)";
+        setTimeout(() => { btn.textContent = "[ + INSTALL APK ]"; btn.style.color = ""; }, 1800);
+    });
+
+    // ─── activity manager ──────────────────────────────────────────────
+    $('[data-adb-home]').addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        try { await post(`/v1/devices/${encodeURIComponent(s)}/home`); flash(e.target); } catch { flash(e.target, false); }
+    });
+    $$('[data-adb-key]').forEach((btn) => btn.addEventListener("click", async () => {
+        const s = requireSerial(); if (!s) return;
+        try { await post(`/v1/devices/${encodeURIComponent(s)}/key`, { keycode: btn.dataset.adbKey }); flash(btn); } catch { flash(btn, false); }
+    }));
+    $("#adb-url-go").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const url = $("#adb-url").value.trim();
+        if (!url) { alert("enter a URL"); return; }
+        try { await post(`/v1/devices/${encodeURIComponent(s)}/url`, { url }); flash(e.target); } catch { flash(e.target, false); }
+    });
+    $("#adb-tel-call").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const tel = $("#adb-tel").value.trim();
+        if (!tel) return;
+        try {
+            await post(`/v1/devices/${encodeURIComponent(s)}/intent`, {
+                action: "android.intent.action.CALL", data: `tel:${tel}`, mode: "start",
+            });
+            flash(e.target);
+        } catch { flash(e.target, false); }
+    });
+    $("#adb-tel-sms").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const tel = $("#adb-tel").value.trim();
+        const body = $("#adb-sms-body").value.trim();
+        if (!tel) return;
+        try {
+            await post(`/v1/devices/${encodeURIComponent(s)}/intent`, {
+                action: "android.intent.action.SENDTO", data: `sms:${tel}`,
+                extras: body ? `sms_body=${body}` : "", mode: "start",
+            });
+            flash(e.target);
+        } catch { flash(e.target, false); }
+    });
+    $("#adb-intent-go").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const action = $("#adb-action").value.trim();
+        if (!action) return;
+        try {
+            await post(`/v1/devices/${encodeURIComponent(s)}/intent`, {
+                action, data: $("#adb-data").value.trim(), mode: $("#adb-mode").value,
+            });
+            flash(e.target);
+        } catch { flash(e.target, false); }
+    });
+
+    // ─── permissions ────────────────────────────────────────────────────
+    $$('[data-adb-perm]').forEach((btn) => btn.addEventListener("click", async () => {
+        const s = requireSerial(); if (!s) return;
+        const pkg = requirePackage(); if (!pkg) return;
+        const op = btn.dataset.adbPerm;
+        const perm = $("#adb-perm").value.trim();
+        if (op !== "reset" && !perm) { alert("enter a permission"); return; }
+        try {
+            await post(`/v1/devices/${encodeURIComponent(s)}/permissions/${op}`, { package: pkg, permission: perm });
+            flash(btn);
+        } catch { flash(btn, false); }
+    }));
+
+    // ─── display ────────────────────────────────────────────────────────
+    const wm = async (btn, op, value = "") => {
+        const s = requireSerial(); if (!s) return;
+        try { await post(`/v1/devices/${encodeURIComponent(s)}/wm`, { op, value }); flash(btn); } catch { flash(btn, false); }
+    };
+    $("#adb-wm-size-go").addEventListener("click", (e) => wm(e.target, "size", $("#adb-wm-size").value.trim()));
+    $("#adb-wm-size-reset").addEventListener("click", (e) => wm(e.target, "size-reset"));
+    $("#adb-wm-density-go").addEventListener("click", (e) => wm(e.target, "density", $("#adb-wm-density").value.trim()));
+    $("#adb-wm-density-reset").addEventListener("click", (e) => wm(e.target, "density-reset"));
+
+    // ─── input ──────────────────────────────────────────────────────────
+    $("#adb-text-go").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const t = $("#adb-text").value;
+        if (!t) return;
+        try { await post(`/v1/devices/${encodeURIComponent(s)}/text`, { text: t }); flash(e.target); } catch { flash(e.target, false); }
+    });
+    $("#adb-tap-go").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        try { await post(`/v1/devices/${encodeURIComponent(s)}/tap`, { x: $("#adb-tap-x").value, y: $("#adb-tap-y").value }); flash(e.target); } catch { flash(e.target, false); }
+    });
+    $("#adb-swipe-go").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        try {
+            await post(`/v1/devices/${encodeURIComponent(s)}/swipe`, {
+                x1: $("#adb-swipe-x1").value, y1: $("#adb-swipe-y1").value,
+                x2: $("#adb-swipe-x2").value, y2: $("#adb-swipe-y2").value,
+                ms: $("#adb-swipe-ms").value || 300,
+            });
+            flash(e.target);
+        } catch { flash(e.target, false); }
+    });
+
+    // ─── monkey ────────────────────────────────────────────────────────
+    $("#adb-monkey-go").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const pkg = requirePackage(); if (!pkg) return;
+        try {
+            await post(`/v1/devices/${encodeURIComponent(s)}/monkey`, {
+                package: pkg, events: $("#adb-monkey-events").value || 500, seed: $("#adb-monkey-seed").value || 42,
+            });
+            flash(e.target);
+        } catch { flash(e.target, false); }
+    });
+
+    // ─── recording ─────────────────────────────────────────────────────
+    $("#adb-rec-start").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const secs = $("#adb-rec-secs").value || 30;
+        try {
+            const j = await post(`/v1/devices/${encodeURIComponent(s)}/screenrecord/start`, { seconds: secs });
+            $("#adb-rec-status").textContent = `recording → ${j.remote} (pid ${j.pid}, max ${j.seconds}s)`;
+            $("#adb-rec-status").style.color = "var(--acid)";
+            flash(e.target);
+        } catch (err) { flash(e.target, false); $("#adb-rec-status").textContent = err.message; }
+    });
+    $("#adb-rec-pull").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        try {
+            const j = await post(`/v1/devices/${encodeURIComponent(s)}/screenrecord/pull`);
+            $("#adb-rec-status").textContent = `pulled → ${j.local} (${fmtBytes(j.size_bytes || 0)})`;
+            $("#adb-rec-status").style.color = "var(--acid)";
+            flash(e.target);
+        } catch (err) { flash(e.target, false); $("#adb-rec-status").textContent = err.message; }
+    });
+
+    // ─── shared prefs ───────────────────────────────────────────────────
+    $("#adb-sp-go").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const pkg = requirePackage(); if (!pkg) return;
+        try {
+            await post(`/v1/devices/${encodeURIComponent(s)}/sharedprefs`, {
+                package: pkg, op: $("#adb-sp-op").value,
+                name: $("#adb-sp-name").value, key: $("#adb-sp-key").value,
+                value: $("#adb-sp-value").value, type: $("#adb-sp-type").value,
+            });
+            flash(e.target);
+        } catch { flash(e.target, false); }
+    });
+
+    // ─── packages ──────────────────────────────────────────────────────
+    $("#adb-pkg-list").addEventListener("click", async () => {
+        const s = requireSerial(); if (!s) return;
+        const scope = $("#adb-pkg-scope").value;
+        const filter = $("#adb-pkg-filter").value.trim();
+        const out = $("#adb-pkg-results");
+        out.innerHTML = "loading…";
+        try {
+            const url = `/v1/devices/${encodeURIComponent(s)}/packages?scope=${encodeURIComponent(scope)}` + (filter ? `&filter=${encodeURIComponent(filter)}` : "");
+            const rows = await getJSON(url);
+            if (!rows.length) { out.innerHTML = `<div class="muted small" style="padding:8px">no matches</div>`; return; }
+            out.innerHTML = rows.slice(0, 200).map((r) => `
+              <div class="table-row" style="grid-template-columns: 1fr 90px 90px 90px;padding:4px 8px">
+                <span class="t-mono small">${r.package}</span>
+                <button class="btn" data-pick="${r.package}" style="padding:2px 8px;font-size:10px">[ PICK ]</button>
+                <button class="btn" data-clear-pkg="${r.package}" style="padding:2px 8px;font-size:10px">[ CLEAR ]</button>
+                <button class="btn danger" data-uninstall-pkg="${r.package}" style="padding:2px 8px;font-size:10px">[ × ]</button>
+              </div>`).join("");
+            out.querySelectorAll('[data-pick]').forEach((b) => b.addEventListener("click", () => {
+                $("#adb-package").value = b.dataset.pick;
+                NEXUS_ADB.package = b.dataset.pick;
+                adbStateSave();
+                b.textContent = "[ PICKED ]"; b.style.color = "var(--acid)";
+            }));
+            out.querySelectorAll('[data-clear-pkg]').forEach((b) => b.addEventListener("click", async () => {
+                if (!confirm(`pm clear ${b.dataset.clearPkg}?`)) return;
+                try { await post(`/v1/devices/${encodeURIComponent(s)}/clear`, { package: b.dataset.clearPkg }); flash(b); } catch { flash(b, false); }
+            }));
+            out.querySelectorAll('[data-uninstall-pkg]').forEach((b) => b.addEventListener("click", async () => {
+                if (!confirm(`uninstall ${b.dataset.uninstallPkg}?`)) return;
+                try { await post(`/v1/devices/${encodeURIComponent(s)}/uninstall`, { package: b.dataset.uninstallPkg }); flash(b); } catch { flash(b, false); }
+            }));
+        } catch (err) { out.innerHTML = `<div class="muted small" style="padding:8px;color:var(--sev-crit)">${escapeHtml(err.message)}</div>`; }
+    });
+
+    // ─── dumpsys ───────────────────────────────────────────────────────
+    $$('[data-adb-dumpsys]').forEach((btn) => btn.addEventListener("click", async () => {
+        const s = requireSerial(); if (!s) return;
+        const topic = btn.dataset.adbDumpsys;
+        const out = $("#adb-dumpsys-out");
+        out.style.display = "";
+        out.textContent = "loading…";
+        try {
+            const j = await getJSON(`/v1/devices/${encodeURIComponent(s)}/dumpsys/${topic}`);
+            out.textContent = j.output;
+            flash(btn);
+        } catch (err) { out.textContent = err.message; flash(btn, false); }
+    }));
+
+    // ─── logcat ────────────────────────────────────────────────────────
+    $("#adb-lc-fetch").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        const out = $("#adb-lc-out");
+        out.style.display = "";
+        out.textContent = "loading…";
+        try {
+            const url = `/v1/devices/${encodeURIComponent(s)}/logcat?lines=${$("#adb-lc-lines").value || 200}&level=${$("#adb-lc-level").value}&filter=${encodeURIComponent($("#adb-lc-filter").value)}`;
+            const j = await getJSON(url);
+            out.textContent = (j.lines || []).join("\n") || "(no entries)";
+            flash(e.target);
+        } catch (err) { out.textContent = err.message; flash(e.target, false); }
+    });
+    $("#adb-lc-clear").addEventListener("click", async (e) => {
+        const s = requireSerial(); if (!s) return;
+        if (!confirm("clear device logcat buffer?")) return;
+        try { await post(`/v1/devices/${encodeURIComponent(s)}/logcat/clear`); flash(e.target); } catch { flash(e.target, false); }
+    });
+
+    // ─── command log polling ──────────────────────────────────────────
+    let logTimer = null;
+    const renderLog = (rows) => {
+        const body = $("#adb-log-body");
+        if (!rows.length) { body.innerHTML = `<div class="muted small" style="padding:12px">no commands yet — every adb call we make shows up here</div>`; return; }
+        body.innerHTML = rows.slice().reverse().map((e) => {
+            const ok = e.exit === 0 || e.exit === "running";
+            const time = (e.ts || "").split("T")[1]?.slice(0, 8) || "";
+            return `
+              <div style="padding:6px 10px;border-bottom:1px dashed var(--border)">
+                <div class="row" style="gap:8px">
+                  <span class="t-mono small" style="color:${ok ? "var(--acid)" : "var(--sev-crit)"};font-weight:700">${ok ? "✓" : "✕"}</span>
+                  <span class="t-mono small" style="color:var(--magenta)">${time}</span>
+                  <span class="t-mono small" style="color:var(--cyan)">${escapeHtml(e.serial || "—")}</span>
+                  <span class="grow"></span>
+                  <span class="muted small">${escapeHtml(e.note || "")}</span>
+                </div>
+                <div class="t-mono" style="margin-top:2px;font-size:11px">${escapeHtml(e.command)}</div>
+                ${e.output ? `<pre class="t-muted" style="margin:4px 0 0;font-size:10px;white-space:pre-wrap;max-height:90px;overflow:auto">${escapeHtml((e.output || "").slice(0, 1200))}</pre>` : ""}
+              </div>`;
+        }).join("");
+    };
+    const pollLog = async () => {
+        try { const j = await getJSON("/v1/adb/log?limit=80"); renderLog(j.log || []); } catch (e) {}
+    };
+    pollLog();
+    const setAuto = (on) => {
+        if (logTimer) { clearInterval(logTimer); logTimer = null; }
+        if (on) logTimer = setInterval(pollLog, 2000);
+    };
+    setAuto(true);
+    $("#adb-log-auto").addEventListener("change", (e) => setAuto(e.target.checked));
+    $("#adb-log-clear").addEventListener("click", async () => {
+        await fetch("/v1/adb/log/clear", { method: "POST" });
+        pollLog();
+    });
+}
+
+function renderKeycodeButtons() {
+    const el = $("#adb-keycodes");
+    if (!el) return;
+    const codes = [
+        [3, "HOME"], [4, "BACK"], [82, "MENU"], [84, "SEARCH"], [66, "ENTER"], [67, "DEL"],
+        [26, "POWER"], [24, "VOL+"], [25, "VOL-"], [27, "CAMERA"], [220, "BRIGHT-"], [221, "BRIGHT+"],
+        [85, "PLAY/PAUSE"], [87, "NEXT"], [88, "PREV"], [277, "CUT"], [278, "COPY"], [279, "PASTE"],
+    ];
+    el.innerHTML = codes.map(([code, name]) => `<button class="btn small" data-adb-key="${code}" style="padding:2px 8px;font-size:10px">[ ${code} · ${name} ]</button>`).join("");
+}
+
 /* SCREEN 06b — Interactive Shell */
 function view_device_shell() {
     return h`
@@ -1901,6 +2757,7 @@ function view_device_shell() {
 }
 
 function mount_device_shell() {
+    fillDeviceStatusStrip();
     const out = $("#sh-out");
     const inp = $("#sh-in");
     const writeLine = (text, klass = "") => {
@@ -1962,6 +2819,7 @@ function view_device_files() {
 }
 
 function mount_device_files() {
+    fillDeviceStatusStrip();
     const list = $("#fm-list");
     const pathInp = $("#fm-path");
     const current = $("#fm-current");
@@ -2085,6 +2943,7 @@ function view_device_screen() {
 }
 
 function mount_device_screen() {
+    fillDeviceStatusStrip();
     let lastDataUrl = null;
     let lastPath = null;
     $("#cap-shot").addEventListener("click", async () => {
@@ -2136,6 +2995,7 @@ function view_device_logcat() {
 }
 
 function mount_device_logcat() {
+    fillDeviceStatusStrip();
     let timer = null;
     const fetchOnce = async () => {
         const level = $("#lc-level").value;
@@ -3146,12 +4006,14 @@ const ROUTES = [
     { path: "projects",                         view: view_projects,          mount: mount_projects },
     { path: "scan",                             view: view_scan,              mount: async (ctx) => { mount_scan(); await mount_scan_after_upload_wiring(); } },
     { path: "devices",                          view: view_devices,           mount: mount_devices },
+    { path: "adb",                              view: view_devices,           mount: mount_devices },  // alias of /devices
     { path: "device/pull",                      view: view_device_pull,       mount: mount_device_pull },
     { path: "device/bridge",                    view: view_device_bridge,     mount: mount_device_bridge },
     { path: "device/shell",                     view: view_device_shell,      mount: mount_device_shell },
     { path: "device/files",                     view: view_device_files,      mount: mount_device_files },
     { path: "device/screen",                    view: view_device_screen,     mount: mount_device_screen },
     { path: "device/logcat",                    view: view_device_logcat,     mount: mount_device_logcat },
+    { path: "adb",                              view: view_adb,               mount: mount_adb },
     { path: "dynamic",                          view: (ctx) => view_project_dynamic(ctx), mount: mount_project_dynamic },
     { path: "network",                          view: (ctx) => view_project_network(ctx) },
     { path: "report",                           view: view_report,            mount: mount_report },
