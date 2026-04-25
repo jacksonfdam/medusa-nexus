@@ -526,19 +526,125 @@ async def device_install(serial: str, file: UploadFile = File(...)) -> dict[str,
     return {"serial": serial, "apk": apk_path.name, "success": "Success" in out, "output": out}
 
 
-@app.get("/v1/devices/{serial}/screencap.png")
-async def device_screencap(serial: str) -> Response:
-    """Single PNG via `adb exec-out screencap -p`. UI polls this every ~800ms."""
-    nexus: MedusaNexus = app.state.nexus
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+async def _screencap_exec_out(adb_path: str, serial: str) -> tuple[bytes, str]:
+    """Fast path. `adb exec-out screencap -p` — no temp file, raw PNG to stdout.
+
+    Some Samsung devices and older Androids mangle the stream (CRLF translation
+    on legacy `shell`, DRM-protected screens, etc.). Returns (bytes, diag).
+    """
     proc = await asyncio.create_subprocess_exec(
-        nexus.config.adb_path, "-s", serial, "exec-out", "screencap", "-p",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        adb_path, "-s", serial, "exec-out", "screencap", "-p",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await proc.communicate()
-    if proc.returncode != 0 or not stdout:
-        raise HTTPException(503, f"screencap failed: {stderr.decode('utf-8', errors='replace')[:200]}")
-    return Response(content=stdout, media_type="image/png", headers={"Cache-Control": "no-cache"})
+    if proc.returncode != 0:
+        return b"", f"exec-out exit={proc.returncode} stderr={stderr.decode('utf-8', errors='replace').strip()[:200]}"
+    if not stdout:
+        return b"", "exec-out returned 0 bytes"
+    if not stdout.startswith(_PNG_MAGIC):
+        head = stdout[:16].hex()
+        return b"", f"exec-out returned non-PNG (first 16 bytes: {head})"
+    return stdout, "ok"
+
+
+async def _screencap_temp_file(adb_path: str, serial: str) -> tuple[bytes, str]:
+    """Fallback. `screencap -p /data/local/tmp/foo.png` then `exec-out cat foo.png`.
+
+    Slower but immune to OEM stdout mangling.
+    """
+    tmp = "/data/local/tmp/_mnexus_screen.png"
+    cap = await asyncio.create_subprocess_exec(
+        adb_path, "-s", serial, "shell", "screencap", "-p", tmp,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, cap_err = await cap.communicate()
+    if cap.returncode != 0:
+        return b"", f"capture-to-tmp exit={cap.returncode} stderr={cap_err.decode('utf-8', errors='replace').strip()[:200]}"
+
+    cat = await asyncio.create_subprocess_exec(
+        adb_path, "-s", serial, "exec-out", "cat", tmp,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, cat_err = await cat.communicate()
+
+    # Best-effort cleanup; don't await.
+    asyncio.create_task(_silent_rm(adb_path, serial, tmp))
+
+    if cat.returncode != 0:
+        return b"", f"cat exit={cat.returncode} stderr={cat_err.decode('utf-8', errors='replace').strip()[:200]}"
+    if not stdout.startswith(_PNG_MAGIC):
+        return b"", f"cat returned non-PNG (first 16 bytes: {stdout[:16].hex()})"
+    return stdout, "ok"
+
+
+async def _silent_rm(adb_path: str, serial: str, path: str) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        adb_path, "-s", serial, "shell", "rm", "-f", path,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.communicate()
+
+
+@app.get("/v1/devices/{serial}/screencap.png")
+async def device_screencap(serial: str) -> Response:
+    """Single PNG. Tries exec-out fast path first, falls back to temp-file.
+
+    Validated against the PNG magic header so we never serve a half-baked stream
+    to the `<img>` tag (that was the cause of the SM-F741B "stalled" bug).
+    """
+    nexus: MedusaNexus = app.state.nexus
+
+    png, diag1 = await _screencap_exec_out(nexus.config.adb_path, serial)
+    if png:
+        return Response(
+            content=png, media_type="image/png",
+            headers={"Cache-Control": "no-cache", "X-MNexus-Path": "exec-out"},
+        )
+
+    png2, diag2 = await _screencap_temp_file(nexus.config.adb_path, serial)
+    if png2:
+        return Response(
+            content=png2, media_type="image/png",
+            headers={"Cache-Control": "no-cache", "X-MNexus-Path": "temp-file"},
+        )
+
+    raise HTTPException(
+        503,
+        detail={
+            "error": "screencap_failed",
+            "exec_out": diag1,
+            "temp_file": diag2,
+            "hint": "OEM screen-protect (Knox/DRM) or USB hiccup. Try /v1/devices/{serial}/screencap-debug for raw output.",
+        },
+    )
+
+
+@app.get("/v1/devices/{serial}/screencap-debug")
+async def device_screencap_debug(serial: str) -> dict[str, Any]:
+    """Diagnostic JSON for the screencap path — used when the mirror stalls."""
+    nexus: MedusaNexus = app.state.nexus
+    out: dict[str, Any] = {"serial": serial}
+
+    png, diag = await _screencap_exec_out(nexus.config.adb_path, serial)
+    out["exec_out"] = {
+        "ok": bool(png),
+        "size_bytes": len(png),
+        "head_hex": png[:16].hex() if png else "",
+        "diag": diag,
+    }
+
+    png2, diag2 = await _screencap_temp_file(nexus.config.adb_path, serial)
+    out["temp_file"] = {
+        "ok": bool(png2),
+        "size_bytes": len(png2),
+        "head_hex": png2[:16].hex() if png2 else "",
+        "diag": diag2,
+    }
+    out["picked"] = "exec-out" if png else ("temp-file" if png2 else "none")
+    return out
 
 
 @app.post("/v1/devices/{serial}/frida-server")
