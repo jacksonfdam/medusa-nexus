@@ -887,6 +887,51 @@ async def device_install(serial: str, file: UploadFile = File(...)) -> dict[str,
     return {"serial": serial, "apk": apk_path.name, "success": "Success" in out, "output": out}
 
 
+@app.post("/v1/devices/{serial}/install-project")
+async def device_install_project(
+    serial: str,
+    project_id: str = Form(...),
+) -> dict[str, Any]:
+    """Install an already-stored Project's APK on the device — no re-upload.
+
+    The user uploaded an APK once at /#/scan; the file lives in the workspace.
+    From the Devices screen we just point `adb install -r` at the same path.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    project = nexus.db.load_project(project_id)
+    if not project:
+        raise HTTPException(404, f"no project with id {project_id}")
+
+    apk_path = Path(project.apk_path)
+    if not apk_path.exists():
+        raise HTTPException(
+            404,
+            detail={
+                "error": "apk_missing_on_disk",
+                "project_id": project_id,
+                "expected_path": str(apk_path),
+                "hint": "the workspace was wiped or the APK was moved. Re-upload it from /#/scan.",
+            },
+        )
+
+    try:
+        out = await nexus.engines["adb"]._run([  # type: ignore[attr-defined]
+            nexus.config.adb_path, "-s", serial, "install", "-r", str(apk_path)
+        ])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"adb install failed: {exc}") from exc
+
+    return {
+        "serial": serial,
+        "project_id": project_id,
+        "package": project.package_name,
+        "version": project.version_name,
+        "apk": apk_path.name,
+        "success": "Success" in out,
+        "output": out,
+    }
+
+
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
@@ -1022,16 +1067,21 @@ async def _mjpeg_frame_loop(adb_path: str, serial: str, fps: int):
     last_path = "exec-out"  # remember which capture path worked, skip the broken one
     try:
         while True:
-            if last_path == "exec-out":
-                png, _ = await _screencap_exec_out(adb_path, serial)
-                if not png:
-                    last_path = "temp-file"
-                    png, _ = await _screencap_temp_file(adb_path, serial)
-            else:
-                png, _ = await _screencap_temp_file(adb_path, serial)
-                if not png:
-                    last_path = "exec-out"
+            try:
+                if last_path == "exec-out":
                     png, _ = await _screencap_exec_out(adb_path, serial)
+                    if not png:
+                        last_path = "temp-file"
+                        png, _ = await _screencap_temp_file(adb_path, serial)
+                else:
+                    png, _ = await _screencap_temp_file(adb_path, serial)
+                    if not png:
+                        last_path = "exec-out"
+                        png, _ = await _screencap_exec_out(adb_path, serial)
+            except FileNotFoundError:
+                # adb itself isn't on PATH — no point looping. Headers were
+                # already written by StreamingResponse; just close the stream.
+                return
 
             if not png:
                 consecutive_failures += 1
@@ -1086,6 +1136,444 @@ async def device_frida_per_device(serial: str) -> dict[str, Any]:
     await asyncio.sleep(1.5)
     ps = await nexus.engines["adb"]._run([nexus.config.adb_path, "-s", serial, "shell", "pgrep", "-f", "frida-server"])  # type: ignore[attr-defined]
     return {"serial": serial, "running": bool(ps.strip()), "pid": ps.strip().splitlines()[0] if ps.strip() else None}
+
+
+# ─── ADB control panel (audited single-shot ADB calls) ───────────────────
+# Every command that the UI launches goes through `_adb_log` so the SPA can
+# render an ADBugger-style "command log" — the most useful pedagogical feature
+# of those tools is letting you *see what's actually being run*.
+
+import collections
+
+# Bounded ring buffer. 500 entries is plenty for an interactive session.
+_ADB_LOG: "collections.deque[dict[str, Any]]" = collections.deque(maxlen=500)
+
+
+async def _adb(
+    args: list[str],
+    *,
+    serial: str | None = None,
+    note: str = "",
+    decode: bool = True,
+) -> tuple[int, str]:
+    """Run `adb [...]` with full audit trail. Returns (returncode, output)."""
+    nexus: MedusaNexus = app.state.nexus
+    full = [nexus.config.adb_path]
+    if serial:
+        full += ["-s", serial]
+    full += args
+    started = datetime.now(UTC).isoformat()
+    proc = await asyncio.create_subprocess_exec(
+        *full,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    stdout, _ = await proc.communicate()
+    text = stdout.decode("utf-8", errors="replace") if decode else ""
+    entry = {
+        "ts": started,
+        "serial": serial or "—",
+        "command": " ".join(full),
+        "exit": proc.returncode,
+        "output": text[:4000],  # cap so we never blow up the log
+        "note": note,
+    }
+    _ADB_LOG.append(entry)
+    return proc.returncode, text
+
+
+async def _adb_or_503(args: list[str], *, serial: str | None = None, note: str = "") -> tuple[int, str]:
+    """Like `_adb` but converts FileNotFoundError into a clean 503."""
+    nexus: MedusaNexus = app.state.nexus
+    if not shutil.which(nexus.config.adb_path):
+        raise HTTPException(503, "adb not on PATH")
+    try:
+        return await _adb(args, serial=serial, note=note)
+    except FileNotFoundError:
+        raise HTTPException(503, "adb not on PATH") from None
+
+
+@app.get("/v1/adb/log")
+async def adb_log(limit: int = 100) -> dict[str, Any]:
+    """Recent adb invocations + their output — the audit trail."""
+    limit = max(1, min(limit, 500))
+    rows = list(_ADB_LOG)[-limit:]
+    return {"count": len(rows), "log": rows}
+
+
+@app.post("/v1/adb/log/clear")
+async def adb_log_clear() -> dict[str, Any]:
+    n = len(_ADB_LOG)
+    _ADB_LOG.clear()
+    return {"cleared": n}
+
+
+@app.get("/v1/adb/help")
+async def adb_help() -> dict[str, Any]:
+    """Catalog of supported ADB categories — drives the control panel sidebar."""
+    return {
+        "categories": [
+            {"id": "server",   "label": "ADB Server",     "blurb": "start / kill / root"},
+            {"id": "reboot",   "label": "Reboot",         "blurb": "normal / recovery / bootloader / fastboot"},
+            {"id": "devices",  "label": "Devices",        "blurb": "list / connect / disconnect / tcpip"},
+            {"id": "apps",     "label": "Apps",           "blurb": "install / uninstall / clear / list packages"},
+            {"id": "activity", "label": "Activity",       "blurb": "am start · broadcast · home · phone · sms"},
+            {"id": "perms",    "label": "Permissions",    "blurb": "grant / revoke / reset"},
+            {"id": "display",  "label": "Display",        "blurb": "wm size / density · reset"},
+            {"id": "input",    "label": "Input",          "blurb": "keyevent / tap / swipe / text"},
+            {"id": "screen",   "label": "Screen",         "blurb": "screencap / screenrecord"},
+            {"id": "files",    "label": "Files",          "blurb": "push / pull / ls / rm"},
+            {"id": "logcat",   "label": "Logcat",         "blurb": "tail / clear / filter"},
+            {"id": "dumpsys",  "label": "Dumpsys",        "blurb": "battery · window · wifi · package"},
+            {"id": "monkey",   "label": "Monkey",         "blurb": "stress test"},
+            {"id": "sharedprefs","label": "Shared Prefs", "blurb": "PUT / REMOVE / CLEAR via broadcast"},
+            {"id": "device-info","label": "Device Info",  "blurb": "getprop / wm size / build info"},
+        ],
+        "keycodes": _KEYCODES,
+    }
+
+
+_KEYCODES = [
+    {"code": 3,   "name": "HOME"},
+    {"code": 4,   "name": "BACK"},
+    {"code": 5,   "name": "CALL"},
+    {"code": 6,   "name": "ENDCALL"},
+    {"code": 24,  "name": "VOLUME_UP"},
+    {"code": 25,  "name": "VOLUME_DOWN"},
+    {"code": 26,  "name": "POWER"},
+    {"code": 27,  "name": "CAMERA"},
+    {"code": 64,  "name": "EXPLORER"},
+    {"code": 66,  "name": "ENTER"},
+    {"code": 67,  "name": "DEL"},
+    {"code": 82,  "name": "MENU"},
+    {"code": 84,  "name": "SEARCH"},
+    {"code": 85,  "name": "MEDIA_PLAY_PAUSE"},
+    {"code": 86,  "name": "MEDIA_STOP"},
+    {"code": 87,  "name": "MEDIA_NEXT"},
+    {"code": 88,  "name": "MEDIA_PREVIOUS"},
+    {"code": 91,  "name": "MUTE"},
+    {"code": 92,  "name": "PAGE_UP"},
+    {"code": 93,  "name": "PAGE_DOWN"},
+    {"code": 122, "name": "MOVE_HOME"},
+    {"code": 123, "name": "MOVE_END"},
+    {"code": 207, "name": "CONTACTS"},
+    {"code": 220, "name": "BRIGHTNESS_DOWN"},
+    {"code": 221, "name": "BRIGHTNESS_UP"},
+    {"code": 277, "name": "CUT"},
+    {"code": 278, "name": "COPY"},
+    {"code": 279, "name": "PASTE"},
+]
+
+
+# ── ADB server lifecycle ────────────────────────────────────────────────
+
+@app.post("/v1/adb/server/{action}")
+async def adb_server(action: str) -> dict[str, Any]:
+    """`adb start-server`, `adb kill-server`, `adb root` — host-level toggles."""
+    if action not in ("start", "kill", "root", "unroot"):
+        raise HTTPException(400, f"unknown action {action!r}")
+    sub = {"start": "start-server", "kill": "kill-server", "root": "root", "unroot": "unroot"}[action]
+    rc, out = await _adb_or_503([sub], note=f"server.{action}")
+    return {"action": action, "exit": rc, "output": out}
+
+
+# ── App actions ─────────────────────────────────────────────────────────
+
+@app.post("/v1/devices/{serial}/uninstall")
+async def device_uninstall(serial: str, package: str = Form(...), keep_data: str = Form(default="")) -> dict[str, Any]:
+    """`adb uninstall [-k] <pkg>` — pass keep_data=yes to retain data dir."""
+    args = ["uninstall"]
+    if keep_data == "yes":
+        args.append("-k")
+    args.append(package)
+    rc, out = await _adb_or_503(args, serial=serial, note=f"uninstall {package}")
+    return {"serial": serial, "package": package, "exit": rc, "output": out, "success": "Success" in out}
+
+
+@app.post("/v1/devices/{serial}/clear")
+async def device_clear(serial: str, package: str = Form(...)) -> dict[str, Any]:
+    """`pm clear <pkg>` — wipes app data without uninstalling."""
+    rc, out = await _adb_or_503(["shell", "pm", "clear", package], serial=serial, note=f"clear {package}")
+    return {"serial": serial, "package": package, "exit": rc, "output": out, "success": "Success" in out}
+
+
+@app.get("/v1/devices/{serial}/packages")
+async def device_packages_per(serial: str, scope: str = "all", filter: str = "") -> list[dict[str, Any]]:
+    """List packages on a specific device. scope ∈ {all,3rd,system,uninstalled,with-paths}."""
+    arg = {"all": "", "3rd": "-3", "system": "-s", "uninstalled": "-u", "with-paths": "-r"}.get(scope, "")
+    cmd = ["shell", "pm", "list", "packages"]
+    if arg:
+        cmd.append(arg)
+    if filter:
+        cmd.append(filter)
+    _, out = await _adb_or_503(cmd, serial=serial, note=f"packages.{scope}")
+    rows = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("package:"):
+            continue
+        rest = line[len("package:"):]
+        if "=" in rest:
+            apk_path, _, name = rest.partition("=")
+            rows.append({"package": name, "apk_path": apk_path})
+        else:
+            rows.append({"package": rest})
+    return rows
+
+
+@app.post("/v1/devices/{serial}/start")
+async def device_app_start(serial: str, package: str = Form(...), activity: str = Form(default="")) -> dict[str, Any]:
+    """`am start -n <pkg>/<activity>` — launch the app's main activity by default."""
+    if activity:
+        target = f"{package}/{activity}"
+    else:
+        # Resolve the launcher activity via dumpsys; fall back to a generic launcher intent.
+        _, raw = await _adb_or_503(
+            ["shell", "cmd", "package", "resolve-activity", "--brief", package],
+            serial=serial, note=f"resolve-activity {package}",
+        )
+        line = next((l for l in raw.splitlines() if "/" in l and not l.startswith("priority")), "")
+        target = line.strip() if line else ""
+    if target:
+        rc, out = await _adb_or_503(["shell", "am", "start", "-n", target], serial=serial, note=f"start {target}")
+    else:
+        rc, out = await _adb_or_503(
+            ["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"],
+            serial=serial, note=f"monkey-launch {package}",
+        )
+    return {"serial": serial, "target": target or f"monkey:{package}", "exit": rc, "output": out}
+
+
+@app.post("/v1/devices/{serial}/stop")
+async def device_app_stop(serial: str, package: str = Form(...)) -> dict[str, Any]:
+    """`am force-stop <pkg>` — terminate all processes for the package."""
+    rc, out = await _adb_or_503(["shell", "am", "force-stop", package], serial=serial, note=f"force-stop {package}")
+    return {"serial": serial, "package": package, "exit": rc, "output": out}
+
+
+# ── Activity Manager ────────────────────────────────────────────────────
+
+@app.post("/v1/devices/{serial}/intent")
+async def device_intent(
+    serial: str,
+    action: str = Form(...),
+    data: str = Form(default=""),
+    extras: str = Form(default=""),
+    component: str = Form(default=""),
+    mode: str = Form(default="start"),
+) -> dict[str, Any]:
+    """Generic `am start|broadcast` with an action + optional data + component."""
+    if mode not in ("start", "broadcast", "startservice"):
+        raise HTTPException(400, "mode must be start|broadcast|startservice")
+    cmd = ["shell", "am", mode, "-a", action]
+    if data:
+        cmd += ["-d", data]
+    if component:
+        cmd += ["-n", component]
+    if extras:
+        # Each extra is "k=v" — types not supported (UI uses --es by default).
+        for kv in extras.split(","):
+            if "=" not in kv:
+                continue
+            k, v = kv.split("=", 1)
+            cmd += ["--es", k.strip(), v.strip()]
+    rc, out = await _adb_or_503(cmd, serial=serial, note=f"{mode} {action}")
+    return {"serial": serial, "exit": rc, "output": out}
+
+
+@app.post("/v1/devices/{serial}/home")
+async def device_home(serial: str) -> dict[str, Any]:
+    rc, out = await _adb_or_503(
+        ["shell", "am", "start", "-W", "-c", "android.intent.category.HOME", "-a", "android.intent.action.MAIN"],
+        serial=serial, note="home",
+    )
+    return {"serial": serial, "exit": rc, "output": out}
+
+
+@app.post("/v1/devices/{serial}/url")
+async def device_open_url(serial: str, url: str = Form(...)) -> dict[str, Any]:
+    rc, out = await _adb_or_503(
+        ["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url],
+        serial=serial, note=f"url {url}",
+    )
+    return {"serial": serial, "exit": rc, "output": out}
+
+
+# ── Permissions ─────────────────────────────────────────────────────────
+
+@app.post("/v1/devices/{serial}/permissions/{op}")
+async def device_permissions(serial: str, op: str, package: str = Form(...), permission: str = Form(default="")) -> dict[str, Any]:
+    """grant / revoke / reset permissions for a package."""
+    if op not in ("grant", "revoke", "reset"):
+        raise HTTPException(400, "op must be grant|revoke|reset")
+    if op == "reset":
+        rc, out = await _adb_or_503(["shell", "pm", "reset-permissions", "-p", package], serial=serial, note=f"perm.reset {package}")
+    else:
+        if not permission:
+            raise HTTPException(400, "permission is required for grant/revoke")
+        rc, out = await _adb_or_503(["shell", "pm", op, package, permission], serial=serial, note=f"perm.{op} {package}")
+    return {"serial": serial, "op": op, "exit": rc, "output": out}
+
+
+# ── Display (size + density) ───────────────────────────────────────────
+
+@app.post("/v1/devices/{serial}/wm")
+async def device_wm(
+    serial: str,
+    op: str = Form(...),
+    value: str = Form(default=""),
+) -> dict[str, Any]:
+    """op ∈ {size,size-reset,density,density-reset}; value e.g. 1080x1920 or 320."""
+    if op == "size":
+        if not value:
+            raise HTTPException(400, "value required (e.g. 1080x1920)")
+        cmd = ["shell", "wm", "size", value]
+    elif op == "size-reset":
+        cmd = ["shell", "wm", "size", "reset"]
+    elif op == "density":
+        if not value:
+            raise HTTPException(400, "value required (e.g. 320)")
+        cmd = ["shell", "wm", "density", value]
+    elif op == "density-reset":
+        cmd = ["shell", "wm", "density", "reset"]
+    else:
+        raise HTTPException(400, "op must be size|size-reset|density|density-reset")
+    rc, out = await _adb_or_503(cmd, serial=serial, note=f"wm.{op} {value}")
+    return {"serial": serial, "op": op, "value": value, "exit": rc, "output": out}
+
+
+# ── Monkey ──────────────────────────────────────────────────────────────
+
+@app.post("/v1/devices/{serial}/monkey")
+async def device_monkey(
+    serial: str,
+    package: str = Form(...),
+    events: int = Form(default=500),
+    seed: int = Form(default=42),
+) -> dict[str, Any]:
+    events = max(1, min(events, 100000))
+    rc, out = await _adb_or_503(
+        ["shell", "monkey", "-p", package, "-v", str(events), "-s", str(seed)],
+        serial=serial, note=f"monkey {package} {events}",
+    )
+    return {"serial": serial, "package": package, "events": events, "exit": rc, "output": out}
+
+
+# ── Screen recording ────────────────────────────────────────────────────
+
+@app.post("/v1/devices/{serial}/screenrecord/start")
+async def device_screenrecord_start(serial: str, seconds: int = Form(default=60)) -> dict[str, Any]:
+    """Start `screenrecord` on-device. Caps at 180s (Android's own limit)."""
+    seconds = max(5, min(seconds, 180))
+    remote = "/sdcard/mnexus-record.mp4"
+    # Fire and forget — the UI polls /screenrecord/status afterwards.
+    nexus: MedusaNexus = app.state.nexus
+    if not shutil.which(nexus.config.adb_path):
+        raise HTTPException(503, "adb not on PATH")
+    proc = await asyncio.create_subprocess_exec(
+        nexus.config.adb_path, "-s", serial, "shell",
+        "screenrecord", "--time-limit", str(seconds), remote,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    _ADB_LOG.append({
+        "ts": datetime.now(UTC).isoformat(), "serial": serial,
+        "command": f"adb -s {serial} shell screenrecord --time-limit {seconds} {remote}",
+        "exit": "running", "output": f"started pid={proc.pid}",
+        "note": f"screenrecord.start {seconds}s",
+    })
+    return {"serial": serial, "remote": remote, "pid": proc.pid, "seconds": seconds}
+
+
+@app.post("/v1/devices/{serial}/screenrecord/pull")
+async def device_screenrecord_pull(serial: str) -> dict[str, Any]:
+    """Pull the most recent recording into the workspace."""
+    nexus: MedusaNexus = app.state.nexus
+    out_dir = nexus.config.workspace / "screenrecords"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    local = out_dir / f"record-{serial}-{stamp}.mp4"
+    rc, out = await _adb_or_503(["pull", "/sdcard/mnexus-record.mp4", str(local)], serial=serial, note="screenrecord.pull")
+    if not local.exists():
+        raise HTTPException(404, "no recording on device — start one first")
+    return {"serial": serial, "local": str(local), "size_bytes": local.stat().st_size, "output": out}
+
+
+# ── Shared preferences (the broadcast trick) ────────────────────────────
+
+@app.post("/v1/devices/{serial}/sharedprefs")
+async def device_sharedprefs(
+    serial: str,
+    package: str = Form(...),
+    op: str = Form(...),
+    name: str = Form(default=""),
+    key: str = Form(default=""),
+    value: str = Form(default=""),
+    type: str = Form(default="string"),
+) -> dict[str, Any]:
+    """Hits the canonical SharedPreferences debug receiver — only works in debug
+    builds that registered <package>.sp.{PUT,REMOVE,CLEAR}.
+
+    type ∈ {string, boolean, float, int, long}.
+    """
+    if op not in ("PUT", "REMOVE", "CLEAR"):
+        raise HTTPException(400, "op must be PUT|REMOVE|CLEAR")
+    type_flag = {"string": "--es", "boolean": "--ez", "float": "--ef", "int": "--ei", "long": "--el"}.get(type, "--es")
+    cmd = ["shell", "am", "broadcast", "-a", f"{package}.sp.{op}"]
+    if name:
+        cmd += ["--es", "name", name]
+    if key:
+        cmd += ["--es", "key", key]
+    if op == "PUT" and value:
+        cmd += [type_flag, "value", value]
+    rc, out = await _adb_or_503(cmd, serial=serial, note=f"sp.{op} {package}/{key}")
+    return {"serial": serial, "exit": rc, "output": out, "command": " ".join(cmd)}
+
+
+# ── dumpsys topical wrappers ────────────────────────────────────────────
+
+_DUMPSYS_TOPICS = ("battery", "wifi", "window", "package", "activity", "cpuinfo", "meminfo", "media_session")
+
+
+@app.get("/v1/devices/{serial}/dumpsys/{topic}")
+async def device_dumpsys(serial: str, topic: str, target: str = "") -> dict[str, Any]:
+    if topic not in _DUMPSYS_TOPICS:
+        raise HTTPException(400, f"topic must be one of {_DUMPSYS_TOPICS}")
+    args = ["shell", "dumpsys", topic]
+    if target:
+        args.append(target)
+    rc, out = await _adb_or_503(args, serial=serial, note=f"dumpsys.{topic}")
+    return {"serial": serial, "topic": topic, "target": target, "exit": rc, "output": out}
+
+
+# ── Device-info convenience: `getprop ro.build.version.release` ─────────
+
+@app.get("/v1/devices/{serial}/version")
+async def device_version(serial: str) -> dict[str, Any]:
+    _, out = await _adb_or_503(["shell", "getprop", "ro.build.version.release"], serial=serial, note="version")
+    return {"serial": serial, "android": out.strip()}
+
+
+# ── Logcat per-device (parallels /v1/device/logcat singleton) ───────────
+
+@app.get("/v1/devices/{serial}/logcat")
+async def device_logcat_per(serial: str, lines: int = 200, level: str = "V", filter: str = "") -> dict[str, Any]:
+    lines = max(1, min(lines, 5000))
+    level = level.upper().strip() if level else "V"
+    if level not in ("V", "D", "I", "W", "E", "F", "S"):
+        level = "V"
+    cmd = ["shell", "logcat", "-d", "-t", str(lines), f"*:{level}"]
+    rc, out = await _adb_or_503(cmd, serial=serial, note=f"logcat -t {lines} *:{level}")
+    if filter:
+        flow = [ln for ln in out.splitlines() if filter.lower() in ln.lower()]
+    else:
+        flow = out.splitlines()
+    return {"serial": serial, "lines": flow, "count": len(flow), "level": level, "filter": filter, "exit": rc}
+
+
+@app.post("/v1/devices/{serial}/logcat/clear")
+async def device_logcat_clear(serial: str) -> dict[str, Any]:
+    rc, out = await _adb_or_503(["shell", "logcat", "-c"], serial=serial, note="logcat -c")
+    return {"serial": serial, "exit": rc, "output": out}
 
 
 # ─── recipes (Medusa / Stheno on disk) ───────────────────────────────────
