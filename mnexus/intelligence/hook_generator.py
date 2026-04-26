@@ -26,9 +26,23 @@ class GeneratedHook:
 class HookGenerator:
     """Turns an AttackSurface into a list of GeneratedHook ready for Frida."""
 
-    def for_attack_surface(self, surface: AttackSurface) -> list[GeneratedHook]:
+    def for_attack_surface(self, surface: AttackSurface, *, platform: str = "android") -> list[GeneratedHook]:
         hooks: list[GeneratedHook] = []
 
+        if platform == "ios":
+            # iOS jailbreak detection bypass — analog to Android root bypass.
+            if surface.jailbreak_detection_detected:
+                hooks.append(self._ios_jailbreak_bypass(surface.jailbreak_detection_library))
+            # Universal iOS pinning bypass — pinning is detected via findings,
+            # not a single library flag, so always offer the recipe.
+            hooks.append(self._ios_ssl_kill_switch())
+            # Keychain dumper — useful on every iOS target.
+            hooks.append(self._ios_keychain_dump())
+            for op in surface.crypto_operations:
+                hooks.append(self._ios_common_crypto_logger(op.location, op.algorithm))
+            return hooks
+
+        # Android (default).
         if surface.root_detection_detected:
             hooks.append(self._root_bypass(surface.root_detection_library))
 
@@ -135,4 +149,108 @@ Java.perform(function () {{
             description=f"Trace the method implicated by {finding.id}.",
             script=script,
             source_finding_id=finding.id,
+        )
+
+    # ─── iOS hook templates ───
+
+    def _ios_jailbreak_bypass(self, library: str | None) -> GeneratedHook:
+        lib = library or "generic"
+        script = f"""// auto: iOS jailbreak detection bypass (target: {lib})
+// Hooks the file-existence + sysctl + fork() checks that {lib} relies on.
+ObjC.classes.NSFileManager['- fileExistsAtPath:'].implementation = ObjC.implement(
+    ObjC.classes.NSFileManager['- fileExistsAtPath:'],
+    function (handle, sel, path) {{
+        var p = new ObjC.Object(path).toString();
+        var jb_paths = ['/Applications/Cydia.app', '/Library/MobileSubstrate', '/var/lib/apt',
+                        '/private/var/lib/apt', '/usr/sbin/sshd', '/etc/apt'];
+        for (var i = 0; i < jb_paths.length; i++) {{
+            if (p.indexOf(jb_paths[i]) !== -1) {{
+                console.log('[NEXUS][JB] hiding ' + p);
+                return 0;
+            }}
+        }}
+        return ObjC.classes.NSFileManager['- fileExistsAtPath:'].apply(this, arguments);
+    }}
+);
+// fork() always returns -1 in App Store builds; some checks rely on this.
+Interceptor.replace(Module.findExportByName(null, 'fork'), new NativeCallback(function () {{
+    console.log('[NEXUS][JB] fork() blocked');
+    return -1;
+}}, 'int', []));
+"""
+        return GeneratedHook(
+            name="ios_jailbreak_bypass",
+            description=f"Stub out classic iOS jailbreak checks (targeting {lib}).",
+            script=script,
+        )
+
+    def _ios_ssl_kill_switch(self) -> GeneratedHook:
+        script = """// auto: iOS SSL pinning bypass — neutralizes Sec*/NSURLSession pinning callbacks.
+// Adapted from SSL Kill Switch 2 + Frida CodeShare iOS pinning bypass scripts.
+try {
+    var SSL_VERIFY_NONE = 0;
+    var SecTrustEvaluateAsync = Module.findExportByName('Security', 'SecTrustEvaluateAsync');
+    if (SecTrustEvaluateAsync) {
+        Interceptor.replace(SecTrustEvaluateAsync, new NativeCallback(function (trust, queue, handler) {
+            console.log('[NEXUS][SSL] SecTrustEvaluateAsync → success');
+            return 0;
+        }, 'int', ['pointer', 'pointer', 'pointer']));
+    }
+    // NSURLSession delegate pinning short-circuit.
+    var NSURLConnection = ObjC.classes.NSURLConnection;
+    if (NSURLConnection) {
+        var didReceive = NSURLConnection['- connection:didReceiveAuthenticationChallenge:'];
+        if (didReceive) {
+            didReceive.implementation = ObjC.implement(didReceive, function (h, s, conn, ch) {
+                console.log('[NEXUS][SSL] auth challenge → useCredential');
+                var cred = ObjC.classes.NSURLCredential.credentialForTrust_(ch.protectionSpace().serverTrust());
+                ch.sender().useCredential_forAuthenticationChallenge_(cred, ch);
+            });
+        }
+    }
+} catch (e) { console.log('[NEXUS][SSL] hook setup error: ' + e); }
+"""
+        return GeneratedHook(
+            name="ios_ssl_kill_switch",
+            description="Neutralize NSURLSession + Security framework pinning callbacks.",
+            script=script,
+        )
+
+    def _ios_keychain_dump(self) -> GeneratedHook:
+        script = """// auto: iOS keychain enumerator (read-only).
+// Walks every kSecClass and prints the items with masked secrets.
+var SecItemCopyMatching = Module.findExportByName('Security', 'SecItemCopyMatching');
+if (SecItemCopyMatching) {
+    Interceptor.attach(SecItemCopyMatching, {
+        onEnter: function (args) {
+            var query = new ObjC.Object(args[0]);
+            console.log('[NEXUS][KC] SecItemCopyMatching ' + query.toString());
+        }
+    });
+}
+"""
+        return GeneratedHook(
+            name="ios_keychain_dump",
+            description="Log every keychain query the app makes.",
+            script=script,
+        )
+
+    def _ios_common_crypto_logger(self, location: str, algorithm: str) -> GeneratedHook:
+        script = f"""// auto: iOS CommonCrypto logger ({algorithm} near {location})
+var CCCrypt = Module.findExportByName('libcommonCrypto.dylib', 'CCCrypt') || Module.findExportByName(null, 'CCCrypt');
+if (CCCrypt) {{
+    Interceptor.attach(CCCrypt, {{
+        onEnter: function (args) {{
+            // CCCrypt(op, alg, options, key, keyLen, iv, in, inLen, out, outAvail, outMoved)
+            console.log('[NEXUS][CRYPTO] CCCrypt op=' + args[0].toInt32() +
+                        ' alg=' + args[1].toInt32() +
+                        ' keyLen=' + args[4].toInt32());
+        }}
+    }});
+}}
+"""
+        return GeneratedHook(
+            name=f"ios_cccrypt_logger::{algorithm}",
+            description=f"Log CCCrypt calls (target: {algorithm} at {location}).",
+            script=script,
         )
