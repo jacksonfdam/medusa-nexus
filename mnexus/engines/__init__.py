@@ -6,8 +6,10 @@ from mnexus.engines.base import BaseEngine, EngineStatus
 from mnexus.engines.burp_engine import BurpEngine
 from mnexus.engines.frida_engine import FridaEngine
 from mnexus.engines.ghidra_engine import GhidraEngine
+from mnexus.engines.ipatool_engine import IPAToolEngine
 from mnexus.engines.jadx_engine import JADXEngine
 from mnexus.engines.mobsf_engine import MobSFEngine
+from mnexus.engines.vphone_engine import VPhoneEngine
 
 __all__ = [
     "ADBEngine",
@@ -17,6 +19,8 @@ __all__ = [
     "EngineStatus",
     "FridaEngine",
     "GhidraEngine",
+    "IPAToolEngine",
     "JADXEngine",
     "MobSFEngine",
+    "VPhoneEngine",
 ]
