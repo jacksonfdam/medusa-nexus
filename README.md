@@ -99,6 +99,26 @@ Idempotent — safe to re-run. `NO_COLOR=1 ./scripts/setup.sh` kills ANSI output
 | `--doctor` | only run `mnexus doctor` |
 | `--help` | print usage |
 
+### iOS lab via super-tart-vphone (research-only, opt-in)
+
+The `vphone` engine wraps [`wh1te4ever/super-tart-vphone`](https://github.com/wh1te4ever/super-tart-vphone) — a fork of Tart that boots **real iOS** in a VM on Apple Silicon. With it, every iOS Frida recipe in the library runs against a local VM (`frida -H 127.0.0.1:27042`) instead of needing a physical jailbroken iPhone.
+
+**Research-only.** Requires Apple Silicon, macOS Sequoia 15.7.4+ / Tahoe 26.3+, and SIP + AMFI disabled (`csrutil disable && csrutil allow-research-guests enable`). The full integration plan, the four-wave breakdown, and the explicit yes/no automation matrix live in [`docs/VPHONE_PLAN.md`](docs/VPHONE_PLAN.md).
+
+```bash
+./scripts/setup-vphone.sh           # checks prereqs + clones + builds + writes MNEXUS_TART_BIN
+./scripts/setup-vphone.sh --check   # status report only — never modifies the host
+
+source ~/.mnexus/env.sh
+mnexus doctor                        # vphone row appears with `research mode · N VMs`
+mnexus vphone list                   # short status table
+mnexus vphone start ios-test         # tart run in the background
+mnexus vphone ssh ios-test -- uname -a
+mnexus vphone install ios-test ~/Downloads/target.ipa
+```
+
+The first-boot path (firmware extraction, bootrom + iBSS + iBEC + LLB + TXM + kernelcache patching, `idevicerestore`, Cryptex injection over SSH ramdisk) is **manual** — the upstream [`GUIDE.md`](https://github.com/wh1te4ever/super-tart-vphone/blob/main/GUIDE.md) walks you through it. We don't automate that path because it depends on hand-tuned offsets per cloudOS build and we never redistribute Apple firmware.
+
 ### Starting MobSF (and getting past the `MISSING` doctor row)
 
 ```bash
