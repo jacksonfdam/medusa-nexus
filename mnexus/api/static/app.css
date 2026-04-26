@@ -1,6 +1,21 @@
 /* MEDUSA NEXUS — design system, 1:1 with docs/DESIGN_LANGUAGE.md */
 
-:root {
+/* ─── design tokens ─────────────────────────────────────────────────────
+ * Two themes ship in-tree — `nexus` (default, cyberpunk neon) and `dracula`
+ * (https://draculatheme.com). Switch by setting `data-theme="<name>"` on the
+ * <html> element; the JS theme manager handles that and persists the choice
+ * in localStorage so it survives reloads. Adding more themes = one extra
+ * `[data-theme="…"]` block below.
+ *
+ * Three primaries drive the palette:
+ *   --cyan     → the loudest accent (titles, headings, prompts).
+ *   --acid     → "good" / connected / safe.
+ *   --magenta  → secondary accent (kickers, comments, mitigations).
+ * The severity colours stay consistent across themes — red is red.
+ */
+
+:root,
+:root[data-theme="nexus"] {
     /* Backgrounds */
     --bg-base: #000;
     --bg-panel: rgba(8, 51, 68, 0.20);
@@ -16,6 +31,7 @@
     --acid: #22DE80;
     --magenta: #E879F9;
     --muted: rgba(0, 255, 255, 0.60);
+    --fg: #00FFFF;
 
     /* Borders */
     --border: rgba(0, 255, 255, 0.30);
@@ -36,11 +52,64 @@
     --mono: "Courier Prime", ui-monospace, Menlo, monospace;
 }
 
+/* Dracula — official palette from draculatheme.com.
+ *   bg            #282A36
+ *   currentLine   #44475A
+ *   fg            #F8F8F2
+ *   comment       #6272A4
+ *   cyan          #8BE9FD
+ *   green         #50FA7B
+ *   orange        #FFB86C
+ *   pink          #FF79C6
+ *   purple        #BD93F9
+ *   red           #FF5555
+ *   yellow        #F1FA8C
+ *
+ * Mapping into our roles:
+ *   --cyan   = dracula cyan (loudest accent)
+ *   --acid   = dracula green (good / connected)
+ *   --magenta= dracula purple (kickers + mitigation labels)
+ *   --fg     = dracula fg (primary text)
+ *   --muted  = dracula comment
+ *   severities — red/orange/yellow/green from the palette directly.
+ */
+:root[data-theme="dracula"] {
+    --bg-base: #282A36;
+    --bg-panel: rgba(68, 71, 90, 0.30);
+    --bg-panel-hover: rgba(68, 71, 90, 0.50);
+    --bg-accent-panel: rgba(189, 147, 249, 0.12);
+    --bg-crit-panel: rgba(255, 85, 85, 0.10);
+    --bg-high-panel: rgba(255, 184, 108, 0.10);
+    --bg-med-panel: rgba(241, 250, 140, 0.08);
+    --bg-code: #21222C;
+
+    --cyan: #8BE9FD;
+    --acid: #50FA7B;
+    --magenta: #BD93F9;
+    --muted: #6272A4;
+    --fg: #F8F8F2;
+
+    --border: rgba(98, 114, 164, 0.45);
+    --border-hover: rgba(189, 147, 249, 0.60);
+    --border-accent: rgba(80, 250, 123, 0.55);
+    --border-crit: rgba(255, 85, 85, 0.60);
+
+    --sev-crit: #FF5555;
+    --sev-high: #FFB86C;
+    --sev-med: #F1FA8C;
+    --sev-low: #50FA7B;
+    --sev-info: #6272A4;
+
+    /* Dracula doesn't have a CRT/scanline aesthetic — soften the overlay
+       so the theme reads cleanly. */
+    --scanline: rgba(248, 248, 242, 0.02);
+}
+
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
     background: var(--bg-base);
-    color: var(--cyan);
+    color: var(--fg);
     font-family: var(--mono);
     font-size: 14px;
     line-height: 1.5;

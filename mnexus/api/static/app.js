@@ -12,6 +12,49 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const h = (strings, ...values) => String.raw({ raw: strings }, ...values);
 
+/* ─── theme manager ───
+ *
+ * Two themes ship: `nexus` (default cyberpunk) and `dracula`. The CSS lives
+ * under [data-theme="<name>"] in app.css; this manager just toggles the
+ * attribute and persists the choice. The early <head> script in index.html
+ * applies the saved theme before paint, so we never flash the wrong colors.
+ *
+ * Adding a third theme: append to AVAILABLE_THEMES and add the matching
+ * [data-theme="…"] block to app.css. No code changes elsewhere.
+ */
+const THEME_KEY = "nexus.theme";
+const AVAILABLE_THEMES = [
+    {
+        id: "nexus",
+        name: "🔱 Nexus",
+        kicker: "default · cyberpunk neon",
+        swatches: ["#000000", "#00FFFF", "#22DE80", "#E879F9", "#FF3860"],
+    },
+    {
+        id: "dracula",
+        name: "🧛 Dracula",
+        kicker: "draculatheme.com",
+        swatches: ["#282A36", "#8BE9FD", "#50FA7B", "#BD93F9", "#FF5555"],
+    },
+];
+
+function getTheme() {
+    try { return localStorage.getItem(THEME_KEY) || "nexus"; }
+    catch (e) { return "nexus"; }
+}
+
+function setTheme(id) {
+    if (!AVAILABLE_THEMES.some((t) => t.id === id)) return;
+    document.documentElement.setAttribute("data-theme", id);
+    try { localStorage.setItem(THEME_KEY, id); } catch (e) { /* ignore */ }
+    // Notify listeners (e.g. the settings page) so swatches re-render.
+    window.dispatchEvent(new CustomEvent("nexus:theme", { detail: { id } }));
+}
+
+function applyThemeAttr() {
+    document.documentElement.setAttribute("data-theme", getTheme());
+}
+
 async function getJSON(url) {
     const r = await fetch(url, { cache: "no-store" });
     if (!r.ok) throw new Error(`${url} → ${r.status}`);
@@ -28,6 +71,12 @@ function classifyRisk(score) {
 function chip(sev) {
     const cls = ["crit", "high", "med", "low", "info"].includes(sev) ? sev : "info";
     return `<span class="chip ${cls}">${cls.toUpperCase()}</span>`;
+}
+
+/* Platform glyph — rendered next to the bundle id everywhere a project is listed. */
+function platformGlyph(platform) {
+    if (platform === "ios") return `<span title="iOS" style="color:#fff">🍎</span>`;
+    return `<span title="Android" style="color:var(--acid)">🤖</span>`;
 }
 
 function sectionHeader(ascii, kicker, title) {
@@ -156,7 +205,7 @@ function renderProjects(projects) {
           <div class="project-head">
             <div class="project-icon" style="background:${iconColor(p.package_name || p.id)}"></div>
             <div class="project-title">
-              <span class="pkg">${p.package_name || p.name || p.id}</span>
+              <span class="pkg">${platformGlyph(p.platform)} ${p.package_name || p.name || p.id}</span>
               <span class="ver">${p.version_name || ""}${p.updated_at ? " · " + p.updated_at.slice(0, 10) : ""}</span>
             </div>
             ${chip(sev.toLowerCase())}
@@ -253,7 +302,7 @@ async function mount_projects() {
         return `
         <a class="table-row" href="#/project/${encodeURIComponent(p.id)}/overview" style="grid-template-columns: 40px 1fr 140px 90px 100px 120px 140px;text-decoration:none;color:inherit">
           <div class="project-icon" style="background:${iconColor(p.package_name || p.id)};width:24px;height:24px"></div>
-          <span class="t-mono" style="font-weight:700">${p.package_name || p.name || p.id}</span>
+          <span class="t-mono" style="font-weight:700">${platformGlyph(p.platform)} ${p.package_name || p.name || p.id}</span>
           <span class="t-muted">${p.version_name || "—"}</span>
           <span class="t-mono" style="color:var(--sev-${classifyRisk(score)})">${score.toFixed(1)}</span>
           <span class="t-muted">${p.counts || "—"}</span>
@@ -270,12 +319,12 @@ async function mount_projects() {
 function view_scan() {
     return h`
     <div class="main">
-      ${sectionHeader("I", "03 // INTAKE", "APK RECONNAISSANCE")}
+      ${sectionHeader("I", "03 // INTAKE", "MOBILE RECONNAISSANCE")}
       <section class="dropzone" id="dz">
-        <div class="heading">[ DROP .APK / .XAPK HERE ]</div>
+        <div class="heading">[ DROP .APK / .XAPK / .IPA HERE ]</div>
         <div class="sub">or click BROWSE · or pull from device</div>
-        <div class="wink">SHA-256 gets computed. apktool detects package+version. ingest runs.</div>
-        <input type="file" id="dz-picker" accept=".apk,.xapk" style="display:none" />
+        <div class="wink">SHA-256 gets computed. The right engine detects bundle id + version. Ingest runs.</div>
+        <input type="file" id="dz-picker" accept=".apk,.xapk,.ipa" style="display:none" />
         <div class="actions">
           <button class="btn primary" onclick="document.getElementById('dz-picker').click()">[ BROWSE ]</button>
           <a class="btn" href="#/device/pull">[ PULL FROM DEVICE ]</a>
@@ -713,14 +762,13 @@ function view_recipes() {
     return h`
     <div class="main">
       ${sectionHeader("R", "25 // AUTOMATION", "RECIPES LIBRARY")}
-      <section class="row">
-        <span class="chip low">ALL · 58</span>
-        <span class="chip info">SSL · 12</span>
-        <span class="chip info">ROOT · 9</span>
-        <span class="chip info">CRYPTO · 14</span>
-        <span class="chip info">IPC · 8</span>
+      <section class="row" style="flex-wrap:wrap;gap:8px">
+        <span class="muted small">platform:</span>
+        <button class="btn primary" data-rplat="">[ ALL ]</button>
+        <button class="btn" data-rplat="android">[ 🤖 ANDROID ]</button>
+        <button class="btn" data-rplat="ios">[ 🍎 iOS ]</button>
         <span class="spacer"></span>
-        <div class="input" style="width:280px"><span class="prompt">&gt;</span><input placeholder="search recipes…"><span class="cursor">_</span></div>
+        <div class="input" style="width:280px"><span class="prompt">&gt;</span><input id="recipes-search" placeholder="search recipes…"><span class="cursor">_</span></div>
       </section>
       <section class="recipes-grid">
         ${recipes.map(([cat, origin, name, desc, compat]) => `
@@ -799,6 +847,12 @@ function view_settings() {
     return h`
     <div class="main">
       ${sectionHeader("S", "27 // SHELL", "SETTINGS")}
+
+      <section class="panel">
+        <div class="panel-head">// THEME</div>
+        <div class="panel-body col" id="theme-picker">${renderThemePicker()}</div>
+      </section>
+
       <section class="panel">
         <div class="panel-head">// ENGINE PATHS</div>
         <div class="panel-body col">
@@ -833,6 +887,45 @@ function view_settings() {
         </div>
       </section>
     </div>`;
+}
+
+function bindThemePicker() {
+    const root = $("#theme-picker");
+    if (!root) return;
+    root.addEventListener("click", (e) => {
+        const card = e.target.closest("[data-theme-id]");
+        if (!card) return;
+        const id = card.dataset.themeId;
+        if (id === getTheme()) return;
+        setTheme(id);
+        root.innerHTML = renderThemePicker();
+    });
+}
+
+function renderThemePicker() {
+    const active = getTheme();
+    return AVAILABLE_THEMES.map((t) => {
+        const isOn = t.id === active;
+        const swatches = t.swatches.map((c) =>
+            `<span style="display:inline-block;width:18px;height:18px;border:1px solid var(--border);border-radius:2px;background:${c}"></span>`
+        ).join("");
+        return `
+          <label class="row theme-card" data-theme-id="${t.id}" style="
+              cursor:pointer; padding:12px;
+              background:${isOn ? "var(--bg-accent-panel)" : "var(--bg-panel)"};
+              border:1px solid ${isOn ? "var(--border-accent)" : "var(--border)"};
+              border-radius:2px; gap:14px; align-items:center;
+              transition:border-color 120ms, background 120ms;
+          ">
+            <input type="radio" name="theme" value="${t.id}" ${isOn ? "checked" : ""} style="accent-color:var(--acid)">
+            <div class="col" style="gap:2px;flex:1;min-width:0">
+              <span class="t-mono" style="color:${isOn ? "var(--acid)" : "var(--cyan)"};font-weight:700;letter-spacing:2px">${t.name}</span>
+              <span class="muted small">${t.kicker}</span>
+            </div>
+            <div class="row" style="gap:4px">${swatches}</div>
+            ${isOn ? '<span class="chip low" style="margin-left:8px">ACTIVE</span>' : ""}
+          </label>`;
+    }).join("");
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1661,8 +1754,24 @@ async function mount_project_overview(ctx) {
             <span class="t-muted">[${f.source_engine || "?"}]</span>
         </a>`).join("") || `<div class="empty-state">no findings yet — every static engine returned []. Wire real detection in iteration 2.</div>`;
 
+    // iOS-flavored labels for the surface summary.
+    const isIos = project.platform === "ios";
+    const surfaceCards = isIos
+        ? [
+            ["URL SCHEMES", `${(surface.url_schemes || []).length}`],
+            ["UNIVERSAL LINKS", `${(surface.deeplinks || []).filter((d) => !((surface.url_schemes || []).includes(d))).length}`],
+            ["FRAMEWORKS", `${(surface.native_libraries || []).length}`],
+            ["JB DETECTION", surface.jailbreak_detection_detected ? `detected · ${surface.jailbreak_detection_library || "?"}` : "none"],
+        ]
+        : [
+            ["COMPONENTS", `${(surface.exported_components || []).length} exported`],
+            ["DEEP LINKS", `${(surface.deeplinks || []).length}`],
+            ["NATIVE LIBS", `${(surface.native_libraries || []).length}`],
+            ["SSL PINNING", surface.ssl_pinning_detected ? "detected · " + (surface.ssl_pinning_library || "?") : "none"],
+        ];
+
     main.innerHTML = h`
-      <div class="muted small uppercase">🔱 NEXUS / ${id} / overview · ${project.package_name || "—"} v${project.version_name || "?"}</div>
+      <div class="muted small uppercase">🔱 NEXUS / ${id} / overview · ${platformGlyph(project.platform)} ${project.package_name || "—"} v${project.version_name || "?"}</div>
       ${projectTabs(id, "overview")}
       <section class="row" style="align-items:flex-start;gap:24px">
         <div class="col" style="width:280px">
@@ -1692,11 +1801,8 @@ async function mount_project_overview(ctx) {
           </section>
           <section class="panel">
             <div class="panel-head">// ATTACK SURFACE</div>
-            <div class="panel-body row" style="gap:24px">
-              <div class="col grow"><span class="muted small uppercase">COMPONENTS</span><span class="t-mono">${(surface.exported_components || []).length} exported</span></div>
-              <div class="col grow"><span class="muted small uppercase">DEEP LINKS</span><span class="t-mono">${(surface.deeplinks || []).length}</span></div>
-              <div class="col grow"><span class="muted small uppercase">NATIVE LIBS</span><span class="t-mono">${(surface.native_libraries || []).length}</span></div>
-              <div class="col grow"><span class="muted small uppercase">SSL PINNING</span><span class="t-mono">${surface.ssl_pinning_detected ? "detected · " + (surface.ssl_pinning_library || "?") : "none"}</span></div>
+            <div class="panel-body row" style="gap:24px;flex-wrap:wrap">
+              ${surfaceCards.map(([label, value]) => `<div class="col grow" style="min-width:140px"><span class="muted small uppercase">${label}</span><span class="t-mono">${value}</span></div>`).join("")}
             </div>
           </section>
         </div>
@@ -3039,22 +3145,56 @@ function mount_device_logcat() {
 }
 
 async function mount_recipes() {
-    let recipes = [];
-    try { recipes = await getJSON("/v1/recipes"); } catch (e) { /* stay on sample */ }
-    if (!recipes.length) return;
+    let allRecipes = [];
+    try { allRecipes = await getJSON("/v1/recipes"); } catch (e) { /* stay on sample */ }
+    if (!allRecipes.length) return;
     const grid = $(".recipes-grid");
     if (!grid) return;
-    grid.innerHTML = recipes.map((r) => `
-        <div class="recipe-card">
-          <div class="cat-row"><span class="cat">${r.category}</span><span class="grow"></span><span class="origin">${r.origin}</span></div>
-          <div class="name">${r.name}</div>
-          <div class="desc">${r.description}</div>
-          <div class="foot">
-            <span class="compat">${r.compatibility}</span>
-            <button class="btn" data-preview="${r.name}" style="padding:4px 10px">[ PREVIEW ]</button>
-            <button class="btn primary" data-load="${r.name}" style="padding:4px 10px">[ LOAD ]</button>
-          </div>
-        </div>`).join("");
+
+    let activePlatform = "";
+    let searchTerm = "";
+    const render = () => {
+        const filtered = allRecipes.filter((r) => {
+            if (activePlatform && (r.platform || "android") !== activePlatform && r.platform !== "both") return false;
+            if (searchTerm && !`${r.name} ${r.description} ${r.category}`.toLowerCase().includes(searchTerm)) return false;
+            return true;
+        });
+        grid.innerHTML = filtered.length
+          ? filtered.map((r) => `
+            <div class="recipe-card">
+              <div class="cat-row">
+                <span class="cat">${r.category}</span>
+                <span class="grow"></span>
+                <span title="${r.platform || "android"}">${r.platform === "ios" ? "🍎" : r.platform === "both" ? "🤖🍎" : "🤖"}</span>
+                <span class="origin">${r.origin}</span>
+              </div>
+              <div class="name">${escapeHtml(r.name)}</div>
+              <div class="desc">${escapeHtml(r.description || "")}</div>
+              <div class="foot">
+                <span class="compat">${escapeHtml(r.compatibility || "")}</span>
+                <button class="btn" data-preview="${r.name}" style="padding:4px 10px">[ PREVIEW ]</button>
+                <button class="btn primary" data-load="${r.name}" style="padding:4px 10px">[ LOAD ]</button>
+              </div>
+            </div>`).join("")
+          : `<div class="empty-state">no recipes match the current filter</div>`;
+        bindRecipeButtons();
+    };
+
+    $$('[data-rplat]').forEach((btn) => btn.addEventListener("click", () => {
+        activePlatform = btn.dataset.rplat;
+        $$('[data-rplat]').forEach((b) => b.classList.toggle("primary", b === btn));
+        render();
+    }));
+    const searchInp = $("#recipes-search");
+    if (searchInp) searchInp.addEventListener("input", (e) => {
+        searchTerm = e.target.value.trim().toLowerCase();
+        render();
+    });
+    render();
+    return;  // skip the original button-binding loop below
+}
+
+function bindRecipeButtons() {
 
     // Preview button → open modal-ish overlay with the script.
     $$("[data-preview]").forEach((btn) => btn.addEventListener("click", async () => {
@@ -3106,18 +3246,24 @@ function showScriptOverlay(name, script) {
 }
 
 async function mount_settings() {
+    bindThemePicker();
+
     const s = await getJSON("/v1/settings").catch(() => null);
     if (!s) return;
     const main = $(".main");
     if (!main) return;
-    // Re-render the panels with real values.
-    const pathsPanel = $$(".panel")[0]?.querySelector(".panel-body");
+    // Re-render the panels with real values. Skip the THEME panel (index 0)
+    // and target ENGINE PATHS / SERVICE URLS by their headings instead of
+    // brittle indices.
+    const allPanels = $$(".panel");
+    const findPanelByHead = (label) => allPanels.find((p) => (p.querySelector(".panel-head")?.textContent || "").includes(label));
+    const pathsPanel = findPanelByHead("ENGINE PATHS")?.querySelector(".panel-body");
     if (pathsPanel) {
         pathsPanel.innerHTML = Object.entries(s.paths).map(([k, v]) =>
             `<div class="row"><span class="muted small" style="width:140px">${k.toUpperCase()}</span><code>${v || "(unset)"}</code></div>`
         ).join("");
     }
-    const servicesPanel = $$(".panel")[1]?.querySelector(".panel-body");
+    const servicesPanel = findPanelByHead("SERVICE URLS")?.querySelector(".panel-body");
     if (servicesPanel) {
         servicesPanel.innerHTML = `
           <div class="row"><span class="muted small" style="width:140px">MOBSF</span><code>${s.services.mobsf_url}</code><span class="chip ${s.services.mobsf_has_api_key ? "low" : "high"}">${s.services.mobsf_has_api_key ? "KEY SET" : "NO KEY"}</span></div>
@@ -3446,8 +3592,66 @@ function view_project_components(ctx) {
 
 async function mount_project_components(ctx) {
     const id = ctx.params.id;
-    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/components`).catch(() => null);
+    const [project, data] = await Promise.all([
+        getJSON(`/v1/projects/${encodeURIComponent(id)}`).catch(() => null),
+        getJSON(`/v1/projects/${encodeURIComponent(id)}/components`).catch(() => null),
+    ]);
     if (!data) return;
+
+    // iOS doesn't have manifest components in the Android sense — repurpose
+    // this view to show URL schemes + entitlements when the project is iOS.
+    if (project && project.platform === "ios") {
+        const surface = project.attack_surface || {};
+        const tabs = $("#components-tabs");
+        if (tabs) tabs.innerHTML = `<span class="chip info">URL SCHEMES · ${(surface.url_schemes || []).length}</span>
+          <span class="chip info">UNIVERSAL LINKS · ${(surface.deeplinks || []).filter((d) => !((surface.url_schemes || []).includes(d))).length}</span>
+          <span class="chip ${surface.entitlements?.length ? "low" : "info"}">ENTITLEMENTS · ${(surface.entitlements || []).length}</span>`;
+        const cnt = $("#components-count");
+        if (cnt) cnt.textContent = `${(surface.url_schemes || []).length} URL schemes · ${(surface.entitlements || []).length} entitlements`;
+
+        const tbl = $("#components-table");
+        if (tbl) {
+            const ulinks = (surface.deeplinks || []).filter((d) => !((surface.url_schemes || []).includes(d)));
+            tbl.innerHTML = `
+              <div class="table-hdr" style="grid-template-columns: 130px 1fr 90px"><span>KIND</span><span>TARGET</span><span></span></div>`
+              + (surface.url_schemes || []).map((s) => `
+                <div class="table-row" style="grid-template-columns: 130px 1fr 90px">
+                  <span class="t-mono small">URL SCHEME</span>
+                  <code class="t-mono" style="color:var(--magenta)">${escapeHtml(s)}://</code>
+                  <span style="text-align:right">${s.toLowerCase() === "http" || s.toLowerCase() === "https" ? '<span class="chip high">RESERVED</span>' : '<span class="chip info">CUSTOM</span>'}</span>
+                </div>`).join("")
+              + ulinks.map((d) => `
+                <div class="table-row" style="grid-template-columns: 130px 1fr 90px">
+                  <span class="t-mono small">UNIVERSAL LINK</span>
+                  <code class="t-mono" style="color:var(--cyan)">${escapeHtml(d)}</code>
+                  <span style="text-align:right"><span class="chip low">VALIDATED</span></span>
+                </div>`).join("");
+        }
+
+        const dl = $("#components-deeplinks");
+        if (dl) {
+            const all = [...(surface.url_schemes || []).map((s) => `${s}://`), ...((surface.deeplinks || []).filter((d) => !(surface.url_schemes || []).includes(d)))];
+            dl.innerHTML = all.length ? all.map((l) => `<div class="row"><code class="t-mono" style="color:var(--magenta)">${escapeHtml(l)}</code></div>`).join("")
+                                      : `<div class="empty-state">no deep-link schemes or universal links declared</div>`;
+        }
+
+        const perms = $("#components-permissions");
+        if (perms) {
+            const ents = surface.entitlements || [];
+            perms.innerHTML = ents.length
+                ? ents.map((e) => `<div class="t-mono small" style="padding:2px 0">${escapeHtml(e)}</div>`).join("")
+                : `<div class="empty-state">no entitlements declared (typical for sandboxed iOS apps)</div>`;
+        }
+        // Re-label the panel headers from "PERMISSIONS DECLARED" → "ENTITLEMENTS".
+        $$('.panel-head').forEach((el) => {
+            const t = el.textContent.trim();
+            if (t.startsWith("// PERMISSIONS DECLARED")) el.firstChild.textContent = "// ENTITLEMENTS";
+            if (t.startsWith("// EXPORTED COMPONENTS")) el.firstChild.textContent = "// URL SCHEMES + UNIVERSAL LINKS";
+            if (t.startsWith("// DEEP LINKS")) el.firstChild.textContent = "// DEEP LINKS (URL SCHEMES + UNIVERSAL LINKS)";
+        });
+        return;
+    }
+    // ─── Android path (unchanged) ─────────────────────────────────────
 
     const byType = data.by_type || {};
     $("#components-tabs").innerHTML = ["activity", "service", "receiver", "provider"].map((t) =>
@@ -4285,6 +4489,7 @@ function initSidebar() {
 window.addEventListener("hashchange", renderRoute);
 window.addEventListener("DOMContentLoaded", () => {
     if (!location.hash) location.replace("#/dashboard");
+    applyThemeAttr();
     initSidebar();
     renderRoute();
     tickClock();
