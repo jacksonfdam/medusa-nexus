@@ -22,6 +22,8 @@ class NexusConfig(BaseModel):
     ghidra_path: Path | None = Field(default=None, description="Ghidra install dir. Headless does the dirty work.")
     medusa_path: Path | None = Field(default=None, description="ch0pin/medusa checkout. Recipes live here.")
     stheno_path: Path | None = Field(default=None, description="ch0pin/Stheno checkout. Patches APKs so you don't have to.")
+    vphone_path: Path | None = Field(default=None, description="wh1te4ever/super-tart-vphone checkout (research only).")
+    tart_bin: Path | None = Field(default=None, description="Built `tart` binary from super-tart-vphone (set by scripts/setup-vphone.sh).")
 
     # ─── external services ───
     mobsf_url: str = Field(default="http://localhost:8000", description="MobSF REST base URL.")
