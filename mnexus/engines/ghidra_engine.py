@@ -1,8 +1,12 @@
 """Ghidra engine — the NSA's gift that keeps decompiling. Headless mode only.
 
-Real Ghidra runs `analyzeHeadless` on every `.so`. Out of the box we don't
-ship that — but we can still scan native binaries for revealing strings the
-same way Ghidra's post-script would have surfaced them.
+Real Ghidra runs `analyzeHeadless` on every `.so` (Android) and Mach-O
+binary (iOS). Out of the box we don't ship Ghidra — but we can still scan
+native binaries for revealing strings the same way Ghidra's post-script
+would have surfaced them, on **both platforms**.
+
+Format autodetection: ELF (`\\x7fELF`) → Android-flavoured patterns,
+Mach-O magic (FE ED FA CE/CF or CA FE BA BE) → iOS-flavoured patterns.
 """
 
 from __future__ import annotations
@@ -17,6 +21,8 @@ from mnexus.models.attack_surface import CryptoOperation
 from mnexus.models.finding import Finding, FindingCategory, Severity
 
 
+# Patterns shared by both formats — compiled cryptography libs reuse the same
+# C symbol names whether the host is Android NDK or iOS.
 _NATIVE_PATTERNS = {
     "openssl":    re.compile(rb"OpenSSL [0-9]"),
     "boringssl":  re.compile(rb"BoringSSL"),
@@ -28,6 +34,38 @@ _NATIVE_PATTERNS = {
     "magisk":     re.compile(rb"magisk|supersu"),
     "rootcheck":  re.compile(rb"/system/xbin/su|/sbin/magisk"),
 }
+
+# iOS-specific binary signals — only meaningful in Mach-O context.
+_IOS_NATIVE_PATTERNS = {
+    "common_crypto":     re.compile(rb"_CCCrypt|_CCDigest|_CCHmac"),
+    "kSecAttrAccess":    re.compile(rb"kSecAttrAccessible(?:When|After|Always)\w*"),
+    "url_session":       re.compile(rb"NSURLSession(?:Configuration)?"),
+    "set_pinning_flags": re.compile(rb"SSLContextSetSessionOption|SSLSetTrustedRoots"),
+    "wkwebview":         re.compile(rb"WKWebView|WKWebsiteDataStore"),
+    "nslog_secret":      re.compile(rb"NSLog.*?(password|token|secret|api[_-]?key)", re.IGNORECASE),
+    "pt_deny_attach":    re.compile(rb"PT_DENY_ATTACH"),
+    "jb_paths":          re.compile(rb"/Applications/Cydia\.app|/var/lib/cydia|/private/var/lib/apt"),
+    "jb_classes":        re.compile(rb"IOSSecuritySuite|tsProtector|JailProtect"),
+    "fork_check":        re.compile(rb"_fork|sysctl"),
+}
+
+
+_MACHO_MAGIC = (
+    b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
+    b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+)
+
+
+def _binary_format(blob: bytes) -> str:
+    """Return 'elf', 'macho', or 'unknown'."""
+    if not blob:
+        return "unknown"
+    if blob[:4] == b"\x7fELF":
+        return "elf"
+    if blob[:4] in _MACHO_MAGIC:
+        return "macho"
+    return "unknown"
 
 
 class GhidraEngine(BaseEngine):
@@ -71,19 +109,43 @@ class GhidraEngine(BaseEngine):
         )
 
     async def execute(self, context: AnalysisContext) -> list[Finding]:
-        """Read every .so in the APK; emit findings on what we recognize."""
+        """Read every native binary in the APK or IPA; emit findings.
+
+        APKs ship `.so` ELF blobs under `lib/<abi>/`. IPAs ship the main
+        Mach-O binary at `Payload/<App>.app/<CFBundleExecutable>` plus any
+        `Payload/<App>.app/Frameworks/*.framework/<Name>` mach-o blobs. We
+        autodetect format from magic bytes — no extension reliance.
+        """
         findings: list[Finding] = []
         crypto_ops: list[CryptoOperation] = []
+        jb_detected = False
+        jb_library: str | None = None
 
         try:
             with zipfile.ZipFile(context.apk_path) as zf:
-                so_names = [n for n in zf.namelist() if n.startswith("lib/") and n.endswith(".so")]
-                for n in so_names:
+                # Pull candidate paths from both layouts.
+                candidates = [
+                    n for n in zf.namelist()
+                    if (n.startswith("lib/") and n.endswith(".so"))
+                    or (n.startswith("Payload/") and (n.endswith(".framework/") or "/Frameworks/" in n or _looks_like_main_macho(n)))
+                ]
+                # Mach-O binaries don't always have an extension — open and sniff.
+                for n in candidates:
+                    if n.endswith("/"):
+                        continue
                     try:
                         data = zf.read(n)
                     except Exception:  # noqa: BLE001
                         continue
-                    self._scan_native(n, data, findings, crypto_ops)
+                    fmt = _binary_format(data)
+                    if fmt == "elf":
+                        self._scan_elf(n, data, findings, crypto_ops)
+                    elif fmt == "macho":
+                        result = self._scan_macho(n, data, findings, crypto_ops)
+                        if result.get("jb_detected"):
+                            jb_detected = True
+                            jb_library = jb_library or result.get("jb_library")
+                    # else: not a native binary, skip silently.
         except Exception:  # noqa: BLE001
             return findings
 
@@ -92,10 +154,13 @@ class GhidraEngine(BaseEngine):
         context.extras.setdefault("static", {})
         context.extras["static"]["ghidra"] = {
             "crypto_operations": crypto_ops,
+            "jailbreak_detection_detected": jb_detected,
+            "jailbreak_detection_library": jb_library,
         }
         return findings
 
-    def _scan_native(self, name: str, data: bytes, findings: list[Finding], crypto_ops: list[CryptoOperation]) -> None:
+    def _scan_elf(self, name: str, data: bytes, findings: list[Finding], crypto_ops: list[CryptoOperation]) -> None:
+        """Android-flavoured native scan — ELF .so file."""
         for key, pat in _NATIVE_PATTERNS.items():
             if not pat.search(data):
                 continue
@@ -141,6 +206,121 @@ class GhidraEngine(BaseEngine):
                     masvs="MSTG-RESILIENCE-2",
                 ))
 
+    def _scan_macho(self, name: str, data: bytes, findings: list[Finding], crypto_ops: list[CryptoOperation]) -> dict[str, object]:
+        """iOS-flavoured native scan — Mach-O main binary or framework."""
+        out: dict[str, object] = {"jb_detected": False, "jb_library": None}
+        # Shared signals first (crypto libs / anti-frida).
+        for key, pat in _NATIVE_PATTERNS.items():
+            if not pat.search(data):
+                continue
+            if key in ("aes", "rsa"):
+                crypto_ops.append(CryptoOperation(
+                    location=name, algorithm=("AES" if key == "aes" else "RSA"),
+                    key_source="unknown",
+                ))
+            elif key == "antiframe":
+                findings.append(Finding(
+                    title=f"Anti-Frida tripwire in {Path(name).name}",
+                    description="The Mach-O image references `frida`/`gadget` strings — likely a runtime check.",
+                    severity=Severity.MEDIUM,
+                    category=FindingCategory.OBFUSCATION,
+                    source_engine=self.name,
+                    evidence="frida|gadget|gum-js",
+                    location=name,
+                    cwe_id="CWE-693",
+                    masvs="MSTG-RESILIENCE-4",
+                    platform_hint="ios",
+                    remediation="Frida users will bypass it. Layered defenses (server-side attestation) buy you more.",
+                ))
+
+        # iOS-specific signals.
+        for key, pat in _IOS_NATIVE_PATTERNS.items():
+            if not pat.search(data):
+                continue
+            if key == "common_crypto":
+                crypto_ops.append(CryptoOperation(location=name, algorithm="CommonCrypto", key_source="unknown"))
+            elif key == "kSecAttrAccess":
+                # Find the specific accessibility constant referenced.
+                m = pat.search(data)
+                token = m.group(0).decode("utf-8", errors="replace") if m else ""
+                if "Always" in token:
+                    findings.append(Finding(
+                        title=f"Keychain accessibility set to {token}",
+                        description=("`kSecAttrAccessibleAlways[ThisDeviceOnly]` keeps secrets readable when the "
+                                     "device is locked — and on older iOS, even after a passcode wipe."),
+                        severity=Severity.MEDIUM,
+                        category=FindingCategory.STORAGE,
+                        source_engine=self.name,
+                        evidence=token,
+                        location=name,
+                        cwe_id="CWE-312",
+                        masvs="MSTG-STORAGE-2",
+                        platform_hint="ios",
+                        remediation="Switch to `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (or stricter — `…AfterFirstUnlock` only when running in the background).",
+                    ))
+            elif key == "nslog_secret":
+                findings.append(Finding(
+                    title=f"`NSLog` references potential secret in {Path(name).name}",
+                    description="A format string near `NSLog` mentions password/token/secret/api_key — likely live logging of credentials.",
+                    severity=Severity.HIGH,
+                    category=FindingCategory.PRIVACY,
+                    source_engine=self.name,
+                    evidence="NSLog(...secret|token|password|api_key...)",
+                    location=name,
+                    cwe_id="CWE-532",
+                    masvs="MSTG-STORAGE-3",
+                    platform_hint="ios",
+                    remediation="Strip every NSLog of sensitive values from release builds. Wrap with `#if DEBUG`. Audit os_log too — `OS_LOG_TYPE_DEFAULT` strings are still device-readable.",
+                ))
+            elif key == "pt_deny_attach":
+                findings.append(Finding(
+                    title="`PT_DENY_ATTACH` anti-debug present",
+                    description="Calls `ptrace(PT_DENY_ATTACH)` to refuse debugger attachments. Bypassed easily with a Frida hook on `ptrace`.",
+                    severity=Severity.LOW,
+                    category=FindingCategory.OBFUSCATION,
+                    source_engine=self.name,
+                    evidence="PT_DENY_ATTACH",
+                    location=name,
+                    masvs="MSTG-RESILIENCE-2",
+                    platform_hint="ios",
+                ))
+            elif key == "jb_paths":
+                out["jb_detected"] = True
+                out["jb_library"] = "custom"
+            elif key == "jb_classes":
+                out["jb_detected"] = True
+                # Pick the first matching class as the library hint.
+                m = pat.search(data)
+                if m:
+                    out["jb_library"] = m.group(0).decode("utf-8", errors="replace").lower()
+            elif key == "set_pinning_flags":
+                findings.append(Finding(
+                    title=f"Custom SSL pinning callbacks in {Path(name).name}",
+                    description="`SSLContextSetSessionOption`/`SSLSetTrustedRoots` indicate hand-rolled certificate pinning.",
+                    severity=Severity.INFO,
+                    category=FindingCategory.NETWORK,
+                    source_engine=self.name,
+                    evidence="SSLContextSetSessionOption | SSLSetTrustedRoots",
+                    location=name,
+                    masvs="MSTG-NETWORK-4",
+                    platform_hint="ios",
+                ))
+
+        if out["jb_detected"]:
+            findings.append(Finding(
+                title=f"Jailbreak-detection markers in {Path(name).name}",
+                description=(f"Library: {out['jb_library'] or 'custom'}. The binary references typical "
+                             "jailbreak file paths or detection class names."),
+                severity=Severity.LOW,
+                category=FindingCategory.OBFUSCATION,
+                source_engine=self.name,
+                evidence=str(out["jb_library"] or "/Applications/Cydia.app, …"),
+                location=name,
+                masvs="MSTG-RESILIENCE-1",
+                platform_hint="ios",
+            ))
+        return out
+
     async def analyze_native_lib(self, so_path: Path) -> dict[str, object]:  # pragma: no cover - stub
         _ = so_path
         return {}
@@ -151,3 +331,17 @@ class GhidraEngine(BaseEngine):
         )
         stdout, _ = await proc.communicate()
         return stdout.decode("utf-8", errors="replace")
+
+
+def _looks_like_main_macho(name: str) -> bool:
+    """Path heuristic: Payload/X.app/X (no extension, executable) or framework binary."""
+    if not name.startswith("Payload/"):
+        return False
+    parts = name.split("/")
+    # Payload/Foo.app/Foo  — main binary
+    if len(parts) == 3 and parts[1].endswith(".app") and not parts[2].endswith((".plist", ".png", ".jpg", ".car", ".nib", ".strings", ".storyboardc")):
+        return True
+    # Payload/Foo.app/Frameworks/Bar.framework/Bar
+    if "/Frameworks/" in name and len(parts) >= 5 and parts[-1].split(".")[-1] not in ("plist", "nib", "strings"):
+        return True
+    return False
