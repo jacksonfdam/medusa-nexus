@@ -129,6 +129,7 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/url",             "Print the URL of the running server."),
         ("/devices",         "List ADB-connected devices."),
         ("/adb <args>",      "Run a one-shot adb command (recorded in the audit log)."),
+        ("/vphone <verb>",   "super-tart-vphone: list · info · start · stop · ssh · install · status."),
         ("/clear",           "Clear the screen."),
         ("/exit, /quit",     "Leave the REPL."),
     ]
@@ -460,6 +461,136 @@ def _adb(state: ReplState, args: list[str]) -> None:
     console.print(Panel(out, title=f"[bold {style}]$ adb {' '.join(args)}[/bold {style}]", border_style=style, box=ROUNDED))
 
 
+def _vphone(state: ReplState, args: list[str]) -> None:
+    """`/vphone [list|info|start|stop|ssh|install|status] …` — super-tart-vphone control."""
+    verb = (args[0] if args else "list").lower()
+    rest = args[1:]
+    eng = state.nexus.engines.get("vphone")
+    if eng is None:
+        console.print("[red]vphone engine not registered[/red]")
+        return
+
+    if verb == "status":
+        # Same shape as /v1/doctor — but only for vphone.
+        result = asyncio.run(eng.health_check())
+        style = "green" if result.installed else "yellow"
+        console.print(Panel(
+            f"[bold {style}]{('● OK' if result.installed else '● MISSING')}[/bold {style}]   "
+            f"[dim]{result.message}[/dim]\n"
+            f"[cyan]version:[/cyan] {result.version or '—'}\n"
+            f"[cyan]path:[/cyan]    {result.path or '—'}",
+            title="[bold cyan]🔱 vphone status[/bold cyan]",
+            border_style=style, box=ROUNDED,
+        ))
+        return
+
+    if verb in ("list", "ls"):
+        rows = asyncio.run(eng.list_vms())
+        if not rows:
+            console.print("[dim]no VMs (or `tart` not configured) — run scripts/setup-vphone.sh[/dim]")
+            return
+        table = Table(box=ROUNDED, border_style="dim cyan", show_header=True, header_style="bold magenta")
+        table.add_column("name", style="bold cyan", no_wrap=True)
+        table.add_column("state")
+        table.add_column("size", style="dim")
+        table.add_column("source", style="dim")
+        for r in rows:
+            state_label = r.get("state", "")
+            running = r.get("running")
+            chip = Text(state_label, style="bold green" if running else "dim")
+            table.add_row(r.get("name", ""), chip, r.get("size", ""), r.get("source", ""))
+        console.print(table)
+        return
+
+    if verb == "info":
+        if not rest:
+            console.print("[red]usage:[/red] /vphone info <name>")
+            return
+        info = asyncio.run(eng.vm_info(rest[0]))
+        if not info.get("exists"):
+            console.print(f"[red]no such VM:[/red] {rest[0]} — {info.get('reason', '')}")
+            return
+        console.print(Panel(
+            "\n".join(f"[cyan]{k}:[/cyan] {v}" for k, v in info.items() if k not in ("raw", "exists")),
+            title=f"[bold cyan]🔱 vphone · {rest[0]}[/bold cyan]",
+            border_style="cyan", box=ROUNDED,
+        ))
+        return
+
+    if verb in ("start", "boot"):
+        if not rest:
+            console.print("[red]usage:[/red] /vphone start <name>")
+            return
+        try:
+            res = asyncio.run(eng.start(rest[0]))
+        except RuntimeError as e:
+            console.print(f"[red]start failed:[/red] {e}")
+            return
+        if res.get("already_running"):
+            console.print(f"[yellow]already running:[/yellow] pid={res['pid']}")
+        else:
+            console.print(f"[green]✓ started[/green] [bold cyan]{rest[0]}[/bold cyan] · pid={res['pid']} · ssh: {res['ssh_endpoint']}")
+        return
+
+    if verb == "stop":
+        if not rest:
+            console.print("[red]usage:[/red] /vphone stop <name>")
+            return
+        try:
+            res = asyncio.run(eng.stop(rest[0]))
+        except RuntimeError as e:
+            console.print(f"[red]stop failed:[/red] {e}")
+            return
+        marker = "✓" if res["exit"] == 0 else "✕"
+        style = "green" if res["exit"] == 0 else "red"
+        console.print(f"[bold {style}]{marker}[/bold {style}] stop {rest[0]} · exit={res['exit']}")
+        if res["output"].strip():
+            console.print(f"[dim]{res['output'].strip()[:200]}[/dim]")
+        return
+
+    if verb == "ssh":
+        if len(rest) < 2:
+            console.print("[red]usage:[/red] /vphone ssh <name> -- <cmd…>")
+            return
+        # Drop a leading `--` separator if the user typed it.
+        target = rest[0]
+        cmd_tokens = rest[1:]
+        if cmd_tokens and cmd_tokens[0] == "--":
+            cmd_tokens = cmd_tokens[1:]
+        cmd = " ".join(cmd_tokens)
+        if not cmd:
+            console.print("[red]empty command[/red]")
+            return
+        res = asyncio.run(eng.ssh(target, cmd))
+        title_style = "green" if res["exit"] == 0 else "red"
+        console.print(Panel(
+            res["output"].strip() or "(no output)",
+            title=f"[bold {title_style}]$ ssh {target} -- {cmd}[/bold {title_style}]  [dim]exit={res['exit']}[/dim]",
+            border_style=title_style, box=ROUNDED,
+        ))
+        return
+
+    if verb == "install":
+        if len(rest) < 2:
+            console.print("[red]usage:[/red] /vphone install <name> <ipa-path>")
+            return
+        ipa = Path(rest[1]).expanduser()
+        if not ipa.exists():
+            console.print(f"[red]not found:[/red] {ipa}")
+            return
+        spinner = Spinner("dots", text=Text(f"installing {ipa.name} → {rest[0]}…", style="cyan"))
+        with Live(spinner, console=console, transient=True):
+            res = asyncio.run(eng.install_ipa(rest[0], ipa))
+        if res.get("ok"):
+            console.print(f"[green]✓ installed[/green] [bold cyan]{res.get('bundle','')}[/bold cyan]")
+        else:
+            console.print("[red]✕ install failed[/red]")
+            console.print(Panel(res.get("log", "(no log)"), border_style="red", box=ROUNDED))
+        return
+
+    console.print(f"[red]unknown vphone verb:[/red] {verb}  (try: list · info · start · stop · ssh · install · status)")
+
+
 def _clear(state: ReplState, args: list[str]) -> None:
     console.clear()
     show_banner()
@@ -485,6 +616,8 @@ SLASH_COMMANDS = {
     "url":      _url,
     "devices":  _devices,
     "adb":      _adb,
+    "vphone":   _vphone,
+    "vphones":  _vphone,
     "clear":    _clear,
     "exit":     _exit,
     "quit":     _exit,
@@ -706,6 +839,26 @@ def dev_cmd(ctx: click.Context, host: str, port: int) -> None:
         uvicorn.run("mnexus.api.main:app", host=host, port=port, reload=True, log_level="info")
     except KeyboardInterrupt:
         console.print("\n[dim]bye 🔱[/dim]")
+
+
+@cli.command(name="vphone", help="super-tart-vphone control (research-only).",
+             context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@click.argument("verb", required=False, default="list",
+                type=click.Choice(["list", "ls", "info", "start", "stop", "ssh", "install", "status"]))
+@click.argument("rest", nargs=-1)
+@click.pass_context
+def vphone_cmd(ctx: click.Context, verb: str, rest: tuple[str, ...]) -> None:
+    """Flat CLI for vphones — same verbs as the REPL's `/vphone`.
+
+    Examples:
+        mnexus vphone list
+        mnexus vphone status
+        mnexus vphone start ios-test
+        mnexus vphone ssh ios-test -- uname -a
+        mnexus vphone install ios-test ~/Downloads/target.ipa
+    """
+    state = ReplState(ctx.obj["config"])
+    _vphone(state, [verb, *rest])
 
 
 def main() -> None:
