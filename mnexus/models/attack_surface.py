@@ -43,16 +43,16 @@ class CryptoOperation(BaseModel):
 class AttackSurface(BaseModel):
     """Aggregated map of what's exposed.
 
-    Built once per ingest, mutated by the correlator. The UI renders it as the
-    graph + the Overview risk mini. Treat it as the single source of truth for
-    "what could go wrong, and where".
+    Built once per ingest, mutated by the correlator. Most fields are
+    platform-agnostic. iOS-specific fields default to empty so existing
+    Android projects deserialize unchanged.
     """
 
     exported_components: list[ExportedComponent] = Field(default_factory=list)
     deeplinks: list[str] = Field(default_factory=list)
     native_libraries: list[NativeLibrary] = Field(default_factory=list)
     api_endpoints: list[str] = Field(default_factory=list)
-    permissions: list[str] = Field(default_factory=list)
+    permissions: list[str] = Field(default_factory=list)  # Android <uses-permission>
     sdk_fingerprint: dict[str, str] = Field(default_factory=dict)  # sdk_name → version
     crypto_operations: list[CryptoOperation] = Field(default_factory=list)
 
@@ -61,6 +61,14 @@ class AttackSurface(BaseModel):
     root_detection_detected: bool = False
     root_detection_library: str | None = None  # "rootbeer" | "safetynet" | "custom" | None
     emulator_detection_detected: bool = False
+
+    # ─── iOS-specific fields ───
+    entitlements: list[str] = Field(default_factory=list, description="iOS entitlements declared in the embedded provisioning profile.")
+    url_schemes: list[str] = Field(default_factory=list, description="iOS CFBundleURLSchemes — analog to Android deep-link schemes.")
+    app_transport_security: dict[str, object] = Field(default_factory=dict, description="iOS NSAppTransportSecurity dict from Info.plist.")
+    provisioning_profile: dict[str, object] | None = Field(default=None, description="iOS embedded.mobileprovision metadata: team_id, distribution type, expiry.")
+    jailbreak_detection_detected: bool = False
+    jailbreak_detection_library: str | None = None  # "iosSecuritySuite" | "tsProtector" | "custom" | None
 
     findings: list[Finding] = Field(default_factory=list)
 

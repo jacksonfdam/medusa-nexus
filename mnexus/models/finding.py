@@ -69,6 +69,11 @@ class Finding(BaseModel):
         ),
     )
 
+    platform_hint: str = Field(
+        default="both",
+        description="Which platform this finding applies to: 'android' | 'ios' | 'both'. Drives MASTG link routing + recipe filtering.",
+    )
+
     confirmed: bool = Field(default=False, description="True once a dynamic run reproduced the issue.")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
