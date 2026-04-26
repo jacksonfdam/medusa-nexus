@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from mnexus.config import NexusConfig
 from mnexus.core.orchestrator import MedusaNexus
+from mnexus.engines.vphone_engine import VPhoneEngine
 from mnexus.intelligence.correlator import FindingCorrelator
 from mnexus.intelligence.hook_generator import HookGenerator
 from mnexus.models.finding import FindingCategory, Severity
@@ -37,9 +38,17 @@ _STATIC = _API_DIR / "static"
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.nexus = MedusaNexus(NexusConfig.from_env())
+    nexus = MedusaNexus(NexusConfig.from_env())
+    app.state.nexus = nexus
+    # VPhone calls go through the same audit log as adb calls. Wire the
+    # engine's `recorder` to our `_record_external_run` shim so the UI can
+    # render `transport="vphone"` rows alongside `transport="adb"`.
+    if (vphone := nexus.engines.get("vphone")) is not None:
+        async def _vphone_recorder(argv: list[str], rc: int, output: str, note: str) -> None:
+            await _record_external_run(argv, rc, output, note=note, transport="vphone")
+        vphone.recorder = _vphone_recorder  # type: ignore[attr-defined]
     yield
-    app.state.nexus.db.close()
+    nexus.db.close()
 
 
 app = FastAPI(
@@ -59,12 +68,44 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 
 
+def _asset_version() -> str:
+    """Short fingerprint of the SPA assets — used as a cache-busting query.
+
+    Hashing the (filename, mtime) pairs is enough: every edit to app.js or
+    app.css updates an mtime, the hash rolls, and the browser refetches.
+    """
+    try:
+        sig = ":".join(
+            f"{p.name}@{p.stat().st_mtime_ns}"
+            for p in sorted(_STATIC.glob("app.*"))
+        )
+    except Exception:  # noqa: BLE001
+        return "dev"
+    return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:10]
+
+
 # ─── shell + favicon ──────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index() -> HTMLResponse:
     html = (_TEMPLATES / "index.html").read_text(encoding="utf-8")
+    html = html.replace("__ASSET_VERSION__", _asset_version())
     return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.middleware("http")
+async def _no_cache_static(request, call_next):  # type: ignore[no-untyped-def]
+    """Force browsers to revalidate the SPA's CSS+JS on every visit.
+
+    Combined with the cache-busting `?v=<hash>` query string, this makes
+    sure the page never silently runs against the previous deploy's assets
+    after a hot-reload — which is exactly the trap the theme switcher fell
+    into the first time it shipped.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static/app."):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -176,7 +217,7 @@ async def rescan_project(project_id: str) -> dict[str, Any]:
     if not apk_path.exists():
         raise HTTPException(410, f"APK no longer present at {apk_path} — re-import")
     try:
-        refreshed = await nexus.ingest_apk(
+        refreshed = await nexus.ingest(
             apk_path,
             package_name=project.package_name,
             version=project.version_name,
@@ -214,10 +255,38 @@ async def upload_apk(
     package: str | None = Form(default=None),
     version: str | None = Form(default=None),
 ) -> dict[str, Any]:
-    """Receive an APK, detect package+version if absent, run ingest_apk.
+    """Receive an APK or IPA, autodetect platform, run the right pipeline.
 
-    Returns the stored Project JSON. The SPA redirects to
-    /#/project/{project_id}/overview on success.
+    Despite the path (`/apks/upload`, kept for back-compat), this endpoint
+    accepts both Android APKs and iOS IPAs — we sniff the zip contents and
+    route accordingly. The SPA redirects to /#/project/{project_id}/overview
+    on success either way.
+    """
+    return await _ingest_upload(file, package, version)
+
+
+@app.post("/v1/ipas/upload")
+async def upload_ipa(
+    file: UploadFile = File(...),
+    package: str | None = Form(default=None),
+    version: str | None = Form(default=None),
+) -> dict[str, Any]:
+    """Explicit iOS upload endpoint. Same shape as `/v1/apks/upload`."""
+    return await _ingest_upload(file, package, version, hint="ios")
+
+
+async def _ingest_upload(
+    file: UploadFile,
+    package: str | None,
+    version: str | None,
+    *,
+    hint: str | None = None,
+) -> dict[str, Any]:
+    """Shared upload + ingest path used by `/v1/apks/upload` + `/v1/ipas/upload`.
+
+    Detects platform from the zip contents (AndroidManifest.xml → android,
+    Payload/*.app/Info.plist → ios). The `hint` parameter forces a platform
+    when the caller already knows.
     """
     nexus: MedusaNexus = app.state.nexus
     workspace = nexus.config.workspace
@@ -228,39 +297,46 @@ async def upload_apk(
 
     upload_id = uuid.uuid4().hex[:8]
     safe_name = Path(file.filename).name
-    apk_path = workspace / f"upload-{upload_id}-{safe_name}"
+    artifact_path = workspace / f"upload-{upload_id}-{safe_name}"
     digest = hashlib.sha256()
     size = 0
-    with apk_path.open("wb") as fh:
+    with artifact_path.open("wb") as fh:
         while chunk := await file.read(1024 * 1024):
             fh.write(chunk)
             digest.update(chunk)
             size += len(chunk)
     if size == 0:
-        apk_path.unlink(missing_ok=True)
+        artifact_path.unlink(missing_ok=True)
         raise HTTPException(400, "uploaded file was empty")
 
-    # Detect package + version if the caller didn't supply them.
+    # Detect platform from contents unless the caller hinted.
+    platform = hint or _detect_platform(artifact_path) or _platform_from_suffix(artifact_path)
+
+    # Detect package + version via the right engine (apktool for Android, ipatool for iOS).
     if not package or not version:
-        detected = await _detect_manifest(nexus, apk_path)
+        detected = await _detect_metadata(nexus, artifact_path, platform)
         package = package or detected.get("package") or ""
         version = version or detected.get("version_name") or "unknown"
 
     if not package:
-        apk_path.unlink(missing_ok=True)
+        artifact_path.unlink(missing_ok=True)
         raise HTTPException(
             400,
-            "could not auto-detect package name — pass `package` form field "
-            "(or install apktool so the detection path works)",
+            f"could not auto-detect {'bundle id' if platform == 'ios' else 'package name'} — "
+            f"pass `package` form field explicitly",
         )
 
     try:
-        project = await nexus.ingest_apk(apk_path, package_name=package, version=version)
+        if platform == "ios":
+            project = await nexus._ingest_ipa(artifact_path, package_name=package, version=version)
+        else:
+            project = await nexus.ingest_apk(artifact_path, package_name=package, version=version)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"ingest failed: {exc.__class__.__name__}: {exc}") from exc
 
     return {
         "project_id": project.id,
+        "platform": project.platform,
         "apk_size_bytes": size,
         "apk_sha256": digest.hexdigest(),
         "package": project.package_name,
@@ -269,15 +345,41 @@ async def upload_apk(
     }
 
 
-async def _detect_manifest(nexus: MedusaNexus, apk_path: Path) -> dict[str, str]:
-    """Run apktool to extract the manifest. Empty dict on any failure."""
-    engine = nexus.engines.get("apktool")
+def _detect_platform(path: Path) -> str | None:
+    """Peek inside the zip — `AndroidManifest.xml` → android,
+    `Payload/*.app/Info.plist` → ios. None if neither found."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+    except zipfile.BadZipFile:
+        return None
+    if "AndroidManifest.xml" in names:
+        return "android"
+    if any(n.startswith("Payload/") and n.endswith(".app/Info.plist") for n in names):
+        return "ios"
+    return None
+
+
+def _platform_from_suffix(path: Path) -> str:
+    return "ios" if path.suffix.lower() == ".ipa" else "android"
+
+
+async def _detect_metadata(nexus: MedusaNexus, path: Path, platform: str) -> dict[str, str]:
+    """Pull bundle id / package + version from the right engine. Empty on failure."""
+    engine_name = "ipatool" if platform == "ios" else "apktool"
+    engine = nexus.engines.get(engine_name)
     if engine is None:
         return {}
     try:
-        return await engine.extract_manifest(apk_path)  # type: ignore[attr-defined]
+        return await engine.extract_manifest(path)  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
         return {}
+
+
+# Back-compat shim — kept because tests import `_detect_manifest`.
+async def _detect_manifest(nexus: MedusaNexus, apk_path: Path) -> dict[str, str]:
+    return await _detect_metadata(nexus, apk_path, "android")
 
 
 # ─── device (ADB) ─────────────────────────────────────────────────────────
@@ -1204,6 +1306,7 @@ async def _adb(
     text = stdout.decode("utf-8", errors="replace") if decode else ""
     entry = {
         "ts": started,
+        "transport": "adb",
         "serial": serial or "—",
         "command": " ".join(full),
         "exit": proc.returncode,
@@ -1212,6 +1315,32 @@ async def _adb(
     }
     _ADB_LOG.append(entry)
     return proc.returncode, text
+
+
+async def _record_external_run(
+    argv: list[str],
+    rc: int,
+    output: str,
+    *,
+    note: str,
+    transport: str,
+    serial: str | None = None,
+) -> None:
+    """Append an audit-log entry for a run that happened outside `_adb`.
+
+    Used by `VPhoneEngine.recorder` so vphone calls land in the same ring
+    buffer as adb calls, with `transport="vphone"` so the UI can colour
+    them differently.
+    """
+    _ADB_LOG.append({
+        "ts": datetime.now(UTC).isoformat(),
+        "transport": transport,
+        "serial": serial or "—",
+        "command": " ".join(argv),
+        "exit": rc,
+        "output": (output or "")[:4000],
+        "note": note,
+    })
 
 
 async def _adb_or_503(args: list[str], *, serial: str | None = None, note: str = "") -> tuple[int, str]:
@@ -1608,13 +1737,142 @@ async def device_logcat_clear(serial: str) -> dict[str, Any]:
     return {"serial": serial, "exit": rc, "output": out}
 
 
+# ─── vphone (super-tart-vphone — research-only iOS VM) ───────────────────
+# Same shape as `/v1/devices/{serial}/...` but powered by the VPhoneEngine
+# instead of adb. Audit-log rows from these endpoints carry `transport="vphone"`
+# so the Command Log can colour them differently from ADB rows.
+
+def _vphone_engine() -> "VPhoneEngine":  # noqa: F821
+    nexus: MedusaNexus = app.state.nexus
+    eng = nexus.engines.get("vphone")
+    if eng is None:
+        raise HTTPException(503, "vphone engine not registered")
+    return eng  # type: ignore[return-value]
+
+
+@app.get("/v1/vphones")
+async def vphones_list() -> list[dict[str, Any]]:
+    """List super-tart VMs. Empty list when the binary isn't configured yet."""
+    return await _vphone_engine().list_vms()
+
+
+@app.get("/v1/vphones/{name}")
+async def vphones_info(name: str) -> dict[str, Any]:
+    return await _vphone_engine().vm_info(name)
+
+
+@app.post("/v1/vphones/{name}/start")
+async def vphones_start(name: str, extra_args: str = Form(default="")) -> dict[str, Any]:
+    """Start a VM in the background. `extra_args` is split on whitespace and
+    forwarded as additional `tart run` flags (e.g. `--no-graphics`)."""
+    extras = [tok for tok in (extra_args or "").split() if tok]
+    try:
+        return await _vphone_engine().start(name, extra_args=extras)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/v1/vphones/{name}/stop")
+async def vphones_stop(name: str) -> dict[str, Any]:
+    try:
+        return await _vphone_engine().stop(name)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/v1/vphones/{name}/ssh")
+async def vphones_ssh(name: str, command: str = Form(...)) -> dict[str, Any]:
+    """Run a one-shot shell command over SSH inside the VM.
+
+    No blocklist here — the user has already accepted research-mode
+    posture on the host. Every command is recorded in the audit log."""
+    if not command.strip():
+        raise HTTPException(400, "empty command")
+    return await _vphone_engine().ssh(name, command)
+
+
+@app.post("/v1/vphones/{name}/install")
+async def vphones_install(name: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    """Push an IPA into the VM, ldid-resign, register with SpringBoard."""
+    if not file.filename:
+        raise HTTPException(400, "no filename on upload")
+    nexus: MedusaNexus = app.state.nexus
+    staging = nexus.config.workspace / "vphone-stage"
+    staging.mkdir(parents=True, exist_ok=True)
+    local = staging / Path(file.filename).name
+    with local.open("wb") as fh:
+        while chunk := await file.read(1024 * 1024):
+            fh.write(chunk)
+    try:
+        return await _vphone_engine().install_ipa(name, local)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/v1/vphones/{name}/file")
+async def vphones_file_get(name: str, path: str) -> Response:
+    """Pull a file out of the VM via scp."""
+    if not path or path.startswith(("|", "&", ";")):
+        raise HTTPException(400, "bad path")
+    nexus: MedusaNexus = app.state.nexus
+    local_dir = nexus.config.workspace / "vphone-pulled"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(path).name or "file"
+    local = local_dir / f"{uuid.uuid4().hex[:8]}-{safe_name}"
+    res = await _vphone_engine().pull(name, path, local)
+    if res["exit"] != 0 or not local.exists():
+        raise HTTPException(500, f"scp failed: {res['output'][:200]}")
+    return FileResponse(str(local), filename=safe_name)
+
+
+@app.post("/v1/vphones/{name}/file/upload")
+async def vphones_file_upload(
+    name: str,
+    file: UploadFile = File(...),
+    dest: str = Form(default="/var/mobile/Media"),
+) -> dict[str, Any]:
+    """Push an arbitrary file into the VM under `dest`."""
+    if not file.filename:
+        raise HTTPException(400, "no filename")
+    nexus: MedusaNexus = app.state.nexus
+    staging = nexus.config.workspace / "vphone-push"
+    staging.mkdir(parents=True, exist_ok=True)
+    local = staging / Path(file.filename).name
+    with local.open("wb") as fh:
+        while chunk := await file.read(1024 * 1024):
+            fh.write(chunk)
+    remote = dest.rstrip("/") + "/" + Path(file.filename).name
+    return await _vphone_engine().push(name, local, remote)
+
+
+@app.post("/v1/vphones/{name}/screenshot")
+async def vphones_screenshot(name: str) -> dict[str, Any]:
+    """Capture the VM's VNC screen as PNG. Returns a 501 envelope when
+    no VNC client (vncsnapshot/vncdotool) is on the host PATH."""
+    res = await _vphone_engine().screenshot(name)
+    if not res.get("ok"):
+        raise HTTPException(501, detail=res)
+    return res
+
+
 # ─── recipes (Medusa / Stheno on disk) ───────────────────────────────────
 
 @app.get("/v1/recipes")
-async def list_recipes() -> list[dict[str, Any]]:
-    """Enumerate Medusa/Stheno modules on disk + the always-there auto ones."""
+async def list_recipes(platform: str | None = None) -> list[dict[str, Any]]:
+    """Enumerate built-in + Medusa/Stheno recipes on disk.
+
+    `platform` filters to "android" / "ios" / "both" — defaults to all.
+    Built-ins always carry a `platform` field; Medusa modules default to
+    "android" since that's where Medusa originated.
+    """
+    from mnexus.recipes import BUILTIN_RECIPES
     nexus: MedusaNexus = app.state.nexus
     recipes: list[dict[str, Any]] = []
+
+    # Built-in recipes always available — same shape as the disk ones, minus the script.
+    for r in BUILTIN_RECIPES:
+        item = {k: v for k, v in r.items() if k != "script"}
+        recipes.append(item)
 
     if nexus.config.medusa_path and nexus.config.medusa_path.exists():
         modules_dir = nexus.config.medusa_path / "modules"
@@ -1624,6 +1882,7 @@ async def list_recipes() -> list[dict[str, Any]]:
                     "name": path.stem,
                     "origin": "medusa",
                     "category": _guess_category(path.stem),
+                    "platform": "android",
                     "description": f"Medusa recipe loaded from {path.name}",
                     "compatibility": "frida ≥ 16",
                     "path": str(path),
@@ -1634,18 +1893,14 @@ async def list_recipes() -> list[dict[str, Any]]:
             "name": "inject_frida_gadget",
             "origin": "stheno",
             "category": "PATCH",
+            "platform": "android",
             "description": "Stheno patches the APK with frida-gadget. No root? No problem.",
             "compatibility": "non-rooted · re-sign required",
         })
 
-    # Always-on auto recipes, generated from findings at runtime.
-    recipes.append({
-        "name": "cipher_key_leak",
-        "origin": "auto",
-        "category": "CRYPTO",
-        "description": "Logs SecretKeySpec ctor args + Cipher.doFinal in/out. Bring popcorn.",
-        "compatibility": "auto-generated from findings",
-    })
+    if platform and platform.lower() not in ("all", ""):
+        wanted = platform.lower()
+        recipes = [r for r in recipes if r.get("platform", "android") in (wanted, "both")]
     return recipes
 
 
@@ -1667,6 +1922,13 @@ def _guess_category(name: str) -> str:
 @app.get("/v1/recipes/{name}/script")
 async def recipe_script(name: str) -> dict[str, Any]:
     """Return the Frida script text for a recipe (unevaluated)."""
+    from mnexus.recipes import BUILTIN_RECIPES
+    # Built-in recipes first — guaranteed to exist.
+    for r in BUILTIN_RECIPES:
+        if r["name"] == name:
+            return {"name": name, "script": r["script"], "platform": r.get("platform", "both")}
+
+    # Fall through to Medusa modules on disk.
     nexus: MedusaNexus = app.state.nexus
     frida = nexus.engines.get("frida")
     try:
@@ -2076,11 +2338,15 @@ async def project_correlations(project_id: str) -> list[dict[str, Any]]:
 
 @app.get("/v1/projects/{project_id}/hooks")
 async def project_hooks(project_id: str) -> list[dict[str, Any]]:
-    """Auto-hooks generated from the project's static surface."""
+    """Auto-hooks generated from the project's static surface (platform-aware)."""
     p = _require_project(project_id)
     if not p.attack_surface:
         return []
-    hooks = HookGenerator().for_attack_surface(p.attack_surface)
+    try:
+        hooks = HookGenerator().for_attack_surface(p.attack_surface, platform=p.platform)
+    except TypeError:
+        # Back-compat — older signature without `platform`.
+        hooks = HookGenerator().for_attack_surface(p.attack_surface)
     return [
         {
             "name": h.name,
