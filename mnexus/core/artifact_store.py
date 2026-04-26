@@ -36,7 +36,8 @@ class ArtifactStore:
                 apk_sha256 TEXT NOT NULL,
                 payload TEXT NOT NULL,          -- full Project JSON
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                platform TEXT NOT NULL DEFAULT 'android'
             );
 
             CREATE TABLE IF NOT EXISTS findings (
@@ -62,6 +63,12 @@ class ArtifactStore:
             CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
             """
         )
+        # Migration: add `platform` column to legacy projects tables that
+        # predate the iOS work. SQLite has no `IF NOT EXISTS` for ALTER TABLE,
+        # so we check pragma first.
+        cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(projects)").fetchall()}
+        if "platform" not in cols:
+            self._conn.execute("ALTER TABLE projects ADD COLUMN platform TEXT NOT NULL DEFAULT 'android'")
         self._conn.commit()
 
     # ─── projects ───
@@ -71,8 +78,8 @@ class ArtifactStore:
         self._conn.execute(
             """
             INSERT OR REPLACE INTO projects
-                (id, name, package_name, version_name, apk_sha256, payload, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, name, package_name, version_name, apk_sha256, payload, created_at, updated_at, platform)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project.id,
@@ -83,6 +90,7 @@ class ArtifactStore:
                 payload,
                 project.created_at.isoformat(),
                 project.updated_at.isoformat(),
+                project.platform,
             ),
         )
         if project.attack_surface:
@@ -114,7 +122,7 @@ class ArtifactStore:
 
     def list_projects(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT id, name, package_name, version_name, updated_at FROM projects ORDER BY updated_at DESC"
+            "SELECT id, name, package_name, version_name, updated_at, platform FROM projects ORDER BY updated_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 
