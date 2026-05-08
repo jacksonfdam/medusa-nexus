@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from mnexus.models.play_account import PlayAccount
+from mnexus.models.play_scan import PlayScanRecord
 from mnexus.models.project import Project
 
 
@@ -86,6 +87,28 @@ class ArtifactStore:
             -- belt that keeps the DB honest under concurrent writes.
             CREATE UNIQUE INDEX IF NOT EXISTS idx_play_accounts_one_default
                 ON play_accounts(is_default) WHERE is_default = 1;
+
+            CREATE TABLE IF NOT EXISTS playintel_scans (
+                id TEXT PRIMARY KEY,
+                package TEXT NOT NULL,
+                version_name TEXT NOT NULL DEFAULT '',
+                version_code INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL,
+                source_label TEXT NOT NULL,
+                apk_sha256 TEXT NOT NULL DEFAULT '',
+                scanned_at TEXT NOT NULL,
+                firebase_project_count INTEGER NOT NULL DEFAULT 0,
+                confirmed_secrets_count INTEGER NOT NULL DEFAULT 0,
+                suspected_secrets_count INTEGER NOT NULL DEFAULT 0,
+                vulnerability_count INTEGER NOT NULL DEFAULT 0,
+                findings_count INTEGER NOT NULL DEFAULT 0,
+                saved_files_count INTEGER NOT NULL DEFAULT 0,
+                payload TEXT NOT NULL              -- full /scan JSON
+            );
+            CREATE INDEX IF NOT EXISTS idx_playintel_scans_package
+                ON playintel_scans(package, scanned_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_playintel_scans_recent
+                ON playintel_scans(scanned_at DESC);
             """
         )
         # Migration: add `platform` column to legacy projects tables that
@@ -259,8 +282,115 @@ class ArtifactStore:
                 (gsfid, datetime.now(UTC).isoformat(), name),
             )
 
+    # ─── playintel scan history ───
+
+    def save_play_scan(self, record: PlayScanRecord) -> None:
+        """Persist one PlayIntel scan run to the history table.
+
+        The full payload is JSON-serialised once at write time so the
+        list view can stick to denormalised counts and only the detail
+        view pays the round-trip parse cost.
+        """
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO playintel_scans
+                    (id, package, version_name, version_code, source, source_label,
+                     apk_sha256, scanned_at,
+                     firebase_project_count, confirmed_secrets_count, suspected_secrets_count,
+                     vulnerability_count, findings_count, saved_files_count,
+                     payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    record.package,
+                    record.version_name,
+                    record.version_code,
+                    record.source,
+                    record.source_label,
+                    record.apk_sha256,
+                    record.scanned_at.isoformat(),
+                    record.firebase_project_count,
+                    record.confirmed_secrets_count,
+                    record.suspected_secrets_count,
+                    record.vulnerability_count,
+                    record.findings_count,
+                    record.saved_files_count,
+                    json.dumps(record.payload),
+                ),
+            )
+
+    def list_play_scans(
+        self,
+        *,
+        package: str | None = None,
+        limit: int = 100,
+    ) -> list[PlayScanRecord]:
+        """Recent-first scan history.
+
+        ``package`` filters to one app's history. ``limit`` caps the
+        result set so very long-running deployments don't drag the
+        listing endpoint.
+        """
+        if package:
+            rows = self._conn.execute(
+                "SELECT * FROM playintel_scans WHERE package = ? "
+                "ORDER BY scanned_at DESC LIMIT ?",
+                (package, max(1, min(int(limit), 1000))),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM playintel_scans ORDER BY scanned_at DESC LIMIT ?",
+                (max(1, min(int(limit), 1000)),),
+            ).fetchall()
+        return [_row_to_play_scan(r) for r in rows]
+
+    def get_play_scan(self, scan_id: str) -> PlayScanRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM playintel_scans WHERE id = ?", (scan_id,)
+        ).fetchone()
+        return _row_to_play_scan(row) if row else None
+
+    def delete_play_scan(self, scan_id: str) -> bool:
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM playintel_scans WHERE id = ?", (scan_id,)
+            )
+        return cur.rowcount > 0
+
     def close(self) -> None:
         self._conn.close()
+
+
+def _row_to_play_scan(row: sqlite3.Row) -> PlayScanRecord:
+    """Adapt a sqlite Row into a PlayScanRecord; payload is rehydrated
+    from JSON. Defensively tolerates malformed JSON by falling back to
+    an empty dict — a poisoned row shouldn't crash the listing
+    endpoint."""
+    try:
+        payload = json.loads(row["payload"]) if row["payload"] else {}
+        if not isinstance(payload, dict):
+            payload = {}
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    return PlayScanRecord(
+        id=row["id"],
+        package=row["package"],
+        version_name=row["version_name"] or "",
+        version_code=int(row["version_code"] or 0),
+        source=row["source"],
+        source_label=row["source_label"],
+        apk_sha256=row["apk_sha256"] or "",
+        scanned_at=datetime.fromisoformat(row["scanned_at"]),
+        firebase_project_count=int(row["firebase_project_count"] or 0),
+        confirmed_secrets_count=int(row["confirmed_secrets_count"] or 0),
+        suspected_secrets_count=int(row["suspected_secrets_count"] or 0),
+        vulnerability_count=int(row["vulnerability_count"] or 0),
+        findings_count=int(row["findings_count"] or 0),
+        saved_files_count=int(row["saved_files_count"] or 0),
+        payload=payload,
+    )
 
 
 def _row_to_account(row: sqlite3.Row) -> PlayAccount:
