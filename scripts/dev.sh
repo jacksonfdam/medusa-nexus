@@ -118,7 +118,12 @@ if [[ "$CHECK_ONLY" -eq 1 ]]; then
 fi
 
 # ─── 5. health-check watchdog (background) ─────────────────────────────
+# Polls every 5s by default — the previous 1s loop flooded the uvicorn
+# access log with /v1/health hits without giving meaningfully faster
+# reload-detection (uvicorn restart takes ~200-500ms; users see the
+# next ✓/✕ within 5s, which is plenty). Override via env.
 HEALTH_URL="http://${HOST}:${PORT}/v1/health"
+HEALTH_POLL_INTERVAL_S="${MNEXUS_HEALTH_POLL_INTERVAL_S:-5}"
 (
     LAST_STATE=""
     sleep 2
@@ -141,7 +146,7 @@ HEALTH_URL="http://${HOST}:${PORT}/v1/health"
             fi
             LAST_STATE="$STATE"
         fi
-        sleep 1
+        sleep "$HEALTH_POLL_INTERVAL_S"
     done
 ) &
 WATCH_PID=$!
