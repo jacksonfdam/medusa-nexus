@@ -57,17 +57,22 @@ def test_upload_rejects_empty_file(isolated_client: TestClient) -> None:
     assert "empty" in r.text.lower()
 
 
-def test_upload_without_package_and_no_detection_rejects(isolated_client: TestClient) -> None:
-    """When apktool can't parse the fake bytes, we require an explicit package name."""
+def test_upload_without_package_falls_back_to_filename(isolated_client: TestClient) -> None:
+    """Manifest auto-detect is best-effort. When the AXML decoder can't
+    parse the upload (gibberish bytes here, but the same path covers
+    Android-14+ compact-entry layouts our decoder doesn't yet handle),
+    the upload falls back to a sanitised filename stem instead of 400 —
+    the analyst should never have to re-upload a multi-hundred-MB APK
+    just because the manifest path didn't round-trip cleanly.
+    """
     fake_apk = io.BytesIO(b"not-a-real-apk")
     r = isolated_client.post(
         "/v1/apks/upload",
         files={"file": ("mystery.apk", fake_apk)},
     )
-    # The real apktool will fail to decode gibberish, so detection returns {}.
-    # If apktool isn't installed at all, detection also returns {}. Either way: 400.
-    assert r.status_code == 400
-    assert "package" in r.text.lower()
+    assert r.status_code == 200
+    body = r.json()
+    assert body["package"] == "mystery"
 
 
 def test_findings_endpoint_empty_for_fresh_project(isolated_client: TestClient) -> None:
