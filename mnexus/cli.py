@@ -464,9 +464,18 @@ def _adb(state: ReplState, args: list[str]) -> None:
 
 
 def _play_login(state: ReplState, args: list[str]) -> None:
-    """`/play-login --email <gmail> --aas <token>` — write playintel credentials."""
+    """`/play-login` — write playintel credentials.
+
+    Two modes:
+        /play-login --email <gmail> --aas <existing-token>
+        /play-login --email <gmail> --password <password>   ← mints AAS via /auth
+
+    Bare `/play-login` prompts interactively (password mode by default,
+    falling back to AAS if the user pastes a token starting with aas_).
+    """
     email = ""
     aas = ""
+    password = ""
     gsfid = ""
     it = iter(args)
     for tok in it:
@@ -474,6 +483,8 @@ def _play_login(state: ReplState, args: list[str]) -> None:
             email = next(it, "")
         elif tok in ("--aas", "-a"):
             aas = next(it, "")
+        elif tok in ("--password", "-p"):
+            password = next(it, "")
         elif tok in ("--gsfid",):
             gsfid = next(it, "")
         else:
@@ -481,20 +492,46 @@ def _play_login(state: ReplState, args: list[str]) -> None:
 
     if not email:
         email = Prompt.ask("[cyan]gmail[/cyan]").strip()
-    if not aas:
-        aas = Prompt.ask("[cyan]aas_token[/cyan] (long-lived master token)", password=True).strip()
-    if not email or not aas:
-        console.print("[red]email and aas token are both required[/red]")
+    if not aas and not password:
+        secret = Prompt.ask(
+            "[cyan]aas_token[/cyan] (paste existing token, or leave empty to enter password)",
+            password=True,
+        ).strip()
+        if secret.startswith("aas_") or len(secret) > 60:
+            aas = secret
+        else:
+            password = secret or Prompt.ask(
+                "[cyan]google password[/cyan] (or app password if 2FA is on)",
+                password=True,
+            ).strip()
+    if not email or not (aas or password):
+        console.print("[red]email and one of (aas, password) are required[/red]")
         return
 
-    from mnexus.playintel.play_client import PlayCredentials
+    from mnexus.playintel.play_client import PlayAuthError, PlayCredentials
 
-    creds = PlayCredentials(email=email, aas_token=aas, gsfid=gsfid)
+    if aas:
+        creds = PlayCredentials(email=email, aas_token=aas, gsfid=gsfid)
+    else:
+        spinner = Spinner("dots", text=Text("minting AAS token via /auth…", style="cyan"))
+        try:
+            with Live(spinner, console=console, transient=True):
+                creds = PlayCredentials.from_password(email, password)
+        except PlayAuthError as e:
+            console.print(f"[red]login failed:[/red] {e}")
+            return
+        if gsfid:
+            creds.gsfid = gsfid
+
     out = creds.save()
     console.print(f"[green]✓ wrote credentials → [/green]{out}")
+    if not aas:
+        console.print(
+            "[dim]Minted AAS token from password; the password itself was not stored.[/dim]"
+        )
     console.print(
         "[dim]Run [bold]/play-scan <package>[/bold] to verify. "
-        "First call will mint a GSFID via /checkin if you didn't provide one.[/dim]"
+        "First call mints a GSFID via /checkin if you didn't provide one.[/dim]"
     )
 
 
@@ -929,14 +966,25 @@ def scan(ctx: click.Context, apk_path: Path, package_name: str, version_name: st
     _scan(state, args)
 
 
-@cli.command(name="play-login", help="Write Play credentials to ~/.config/mnexus/playintel.ini.")
+@cli.command(name="play-login", help="Write Play credentials to ~/.config/mnexus/playintel.ini. Pass --password to mint an AAS token from email + password.")
 @click.option("--email", "-e", required=True, help="Gmail address tied to the Play account.")
-@click.option("--aas", "-a", "aas_token", required=True, help="AAS master token (long-lived).")
+@click.option("--aas", "-a", "aas_token", default="", help="AAS master token (long-lived). Omit to use --password mode.")
+@click.option("--password", "-p", default="", help="Google password / app password — exchanged for an AAS token via /auth (the password itself is not stored).")
 @click.option("--gsfid", default="", help="Optional Google Services Framework ID; minted by /checkin if omitted.")
 @click.pass_context
-def play_login(ctx: click.Context, email: str, aas_token: str, gsfid: str) -> None:
+def play_login(ctx: click.Context, email: str, aas_token: str, password: str, gsfid: str) -> None:
+    if not aas_token and not password:
+        click.echo("error: pass either --aas <token> or --password <pwd>", err=True)
+        ctx.exit(2)
     state = ReplState(ctx.obj["config"])
-    _play_login(state, ["--email", email, "--aas", aas_token, *(["--gsfid", gsfid] if gsfid else [])])
+    args = ["--email", email]
+    if aas_token:
+        args += ["--aas", aas_token]
+    if password:
+        args += ["--password", password]
+    if gsfid:
+        args += ["--gsfid", gsfid]
+    _play_login(state, args)
 
 
 @cli.command(name="play-scan", help="Stream an APK from Google Play and scan for Firebase / credential leaks.")

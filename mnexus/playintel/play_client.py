@@ -187,6 +187,31 @@ class PlayCredentials:
             locale=section.get("locale", "en-US"),
         )
 
+    @classmethod
+    def from_password(
+        cls,
+        email: str,
+        password: str,
+        *,
+        locale: str = "en-US",
+        http_client: httpx.Client | None = None,
+    ) -> PlayCredentials:
+        """Mint an AAS token by exchanging email + password.
+
+        Convenience wrapper: imports
+        :func:`mnexus.playintel.google_auth.mint_aas_token` lazily so
+        callers that already have an AAS token never pay the import cost
+        of the crypto path. Raises :class:`PlayAuthError` for any
+        Google-side rejection.
+        """
+        from mnexus.playintel.google_auth import GoogleAuthError, mint_aas_token
+
+        try:
+            aas = mint_aas_token(email, password, http_client=http_client)
+        except GoogleAuthError as exc:
+            raise PlayAuthError(str(exc)) from exc
+        return cls(email=email, aas_token=aas, locale=locale)
+
     def save(self, path: Path | None = None) -> Path:
         """Persist credentials to disk in apkeep INI format.
 
