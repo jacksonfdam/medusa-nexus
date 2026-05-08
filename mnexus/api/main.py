@@ -269,13 +269,15 @@ async def upload_apk(
 async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
     """Stream-scan an Android package via the playintel engine.
 
-    Body: ``{"package": "com.example", "apk_path": "/optional/local.apk",
-    "run_active_probes": true}``.
+    JSON body::
 
-    When ``apk_path`` is provided and exists, the local file is the source
-    of bytes (no Play traffic). Otherwise the engine attempts the Play
-    bridge (``poc-firebase-google``); if that's unavailable the call
-    returns a 503.
+        {"package": "com.example",
+         "apk_path": "/optional/local.apk",   # bypass Play streaming
+         "run_active_probes": true}
+
+    When ``apk_path`` is provided and exists, the local file is the
+    bytes source. Otherwise the native Play protocol client is used;
+    503 if no credentials are configured.
     """
     nexus: MedusaNexus = app.state.nexus
     package = (payload.get("package") or "").strip()
@@ -284,7 +286,6 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
     run_probes = bool(payload.get("run_active_probes", False))
     apk_override = payload.get("apk_path")
 
-    from mnexus.engines.play_intel_engine import PlayIntelEngine
     from mnexus.playintel.apk_source import LocalAPKSource, PlayProtocolSource
     from mnexus.playintel.play_client import PlayAuthError
 
@@ -301,24 +302,96 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
         except PlayAuthError as e:
             raise HTTPException(
                 503,
-                f"Play auth failed: {e}. Provide `apk_path` or configure "
-                "~/.config/apkeep/apkeep.ini.",
+                f"Play auth failed: {e}. Provide `apk_path` or run "
+                "`mnexus play-login`.",
             ) from e
         source = play_source
         source_label = "play"
 
-    engine = PlayIntelEngine(nexus.config)
     try:
-        outcome, findings = await engine.analyze_package(
-            package,
-            source=source,
-            workspace=nexus.config.workspace,
-            run_active_probes=run_probes,
-        )
+        return await _run_playintel_scan(nexus, package, source, source_label, run_probes)
     finally:
         if play_source is not None:
             play_source.close()
 
+
+@app.post("/v1/playintel/scan-upload")
+async def playintel_scan_upload(
+    file: UploadFile = File(...),
+    package: str = Form(...),
+    run_active_probes: bool = Form(default=False),
+) -> dict[str, Any]:
+    """Upload an APK and scan it locally via the playintel engine.
+
+    Multipart fields:
+
+    * ``file`` — the .apk / .xapk to scan.
+    * ``package`` — the Android package id to attribute results to.
+    * ``run_active_probes`` — flip on to hit Firebase / Firestore /
+      Storage with anonymous probes once configs are recovered.
+
+    The file is saved to ``<workspace>/playintel-uploads/<sha256>.apk``
+    (deduplicated by content hash). The same hash is reused on
+    subsequent uploads of the same APK so we don't bloat disk.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    pkg = (package or "").strip()
+    if not pkg:
+        raise HTTPException(400, "package required")
+    if not file.filename:
+        raise HTTPException(400, "no filename on upload")
+
+    upload_dir = nexus.config.workspace / "playintel-uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stream into a temp file while hashing so we don't buffer the
+    # whole APK in memory; rename to <sha>.apk once we know the digest.
+    digest = hashlib.sha256()
+    tmp_path = upload_dir / f"upload-{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with tmp_path.open("wb") as fh:
+            while chunk := await file.read(1024 * 1024):
+                digest.update(chunk)
+                fh.write(chunk)
+        sha = digest.hexdigest()
+        final_path = upload_dir / f"{sha}.apk"
+        if final_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        else:
+            tmp_path.rename(final_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    from mnexus.playintel.apk_source import LocalAPKSource
+
+    source = LocalAPKSource(final_path)
+    return await _run_playintel_scan(
+        nexus,
+        pkg,
+        source,
+        f"upload:{file.filename}",
+        bool(run_active_probes),
+    )
+
+
+async def _run_playintel_scan(
+    nexus: MedusaNexus,
+    package: str,
+    source,  # type: ignore[no-untyped-def]
+    source_label: str,
+    run_active_probes: bool,
+) -> dict[str, Any]:
+    """Shared invoke + serialize body used by both playintel endpoints."""
+    from mnexus.engines.play_intel_engine import PlayIntelEngine
+
+    engine = PlayIntelEngine(nexus.config)
+    outcome, findings = await engine.analyze_package(
+        package,
+        source=source,
+        workspace=nexus.config.workspace,
+        run_active_probes=run_active_probes,
+    )
     configs = sorted(
         {c.project_id for c in outcome.report.firebase_configs if c.project_id}
     )
