@@ -728,7 +728,13 @@ async def _run_playintel_scan(
     }
 
     # Persist the history row — best-effort, never let a save failure
-    # poison the response the caller is waiting for.
+    # poison the response the caller is waiting for. The record ID +
+    # timestamp are stamped into BOTH the response payload (which the
+    # caller is waiting for) and the record's own payload (which gets
+    # serialized to disk) so historical re-renders show "this is scan
+    # PSC-…" without a side-join. Pydantic copies dict fields at
+    # construction, so we mutate `record.payload` explicitly rather
+    # than relying on the shared-reference trick.
     try:
         from mnexus.models.play_scan import PlayScanRecord
         record = PlayScanRecord(
@@ -746,9 +752,12 @@ async def _run_playintel_scan(
             saved_files_count=len(saved_files),
             payload=payload,
         )
-        nexus.db.save_play_scan(record)
+        scanned_at_iso = record.scanned_at.isoformat()
         payload["scan_id"] = record.id
-        payload["scanned_at"] = record.scanned_at.isoformat()
+        payload["scanned_at"] = scanned_at_iso
+        record.payload["scan_id"] = record.id
+        record.payload["scanned_at"] = scanned_at_iso
+        nexus.db.save_play_scan(record)
     except Exception as exc:  # noqa: BLE001
         payload["history_save_error"] = f"{exc.__class__.__name__}: {exc}"
 
