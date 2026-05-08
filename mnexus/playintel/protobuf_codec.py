@@ -267,12 +267,20 @@ def find_path(data: bytes, *field_path: int) -> Any:
     payload, or ``None`` if any link is missing.
 
     ``find_path(buf, 1, 21, 2)`` reads ``buf.payload(1).deliveryResponse(21).appDeliveryData(2)``.
+
+    Tolerates partial malformations: if an intermediate payload is a
+    bare string / varint that the caller thought was a sub-message,
+    or a sub-message that happens to be truncated at the boundary,
+    we return ``None`` rather than raising.
     """
     cur: Any = data
     for fn in field_path:
         if not isinstance(cur, (bytes, bytearray)):
             return None
-        cur = find_field(cur, fn)
+        try:
+            cur = find_field(cur, fn)
+        except ValueError:
+            return None
         if cur is None:
             return None
     return cur
