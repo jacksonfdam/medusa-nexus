@@ -462,6 +462,15 @@ function view_play_scan() {
         <div class="panel-head"><span id="ps-result-title">// RESULTS</span></div>
         <div class="panel-body col" id="ps-results" style="gap:18px"></div>
       </section>
+      <section class="panel">
+        <div class="panel-head row" style="align-items:center;gap:8px">
+          <span>// HISTORY</span>
+          <span class="grow"></span>
+          <input id="ps-history-filter" class="input t-mono" placeholder="filter by package…" style="width:240px;padding:2px 8px" />
+          <button id="ps-history-refresh" class="btn" style="padding:2px 10px">[ REFRESH ]</button>
+        </div>
+        <div class="panel-body col" id="ps-history" style="gap:6px">loading…</div>
+      </section>
     </div>`;
 }
 
@@ -533,12 +542,112 @@ async function mount_play_scan() {
             renderPlayScanResults(out, title, data);
             wrap.style.display = "";
             status.textContent = `done · source: ${data.source} · package: ${data.package}`;
+            // Refresh the history panel so the run that just finished
+            // appears at the top without a manual reload.
+            await renderPlayScanHistory();
         } catch (e) {
             status.textContent = `request failed: ${e.message || e}`;
         } finally {
             btn.disabled = false;
         }
     });
+
+    // ── history panel wiring ─────────────────────────────────────────
+    const refreshBtn = $("#ps-history-refresh");
+    if (refreshBtn) refreshBtn.addEventListener("click", () => renderPlayScanHistory());
+    const filterEl = $("#ps-history-filter");
+    if (filterEl) {
+        let t;
+        filterEl.addEventListener("input", () => {
+            clearTimeout(t);
+            t = setTimeout(() => renderPlayScanHistory(filterEl.value.trim()), 200);
+        });
+    }
+    await renderPlayScanHistory();
+}
+
+async function renderPlayScanHistory(packageFilter) {
+    const root = $("#ps-history");
+    if (!root) return;
+    const url = packageFilter
+        ? `/v1/playintel/scans?package=${encodeURIComponent(packageFilter)}&limit=200`
+        : `/v1/playintel/scans?limit=200`;
+    try {
+        const r = await fetch(url);
+        if (!r.ok) {
+            root.innerHTML = `<div class="muted small">[${r.status}] failed to list history</div>`;
+            return;
+        }
+        const body = await r.json();
+        const scans = body.scans || [];
+        if (!scans.length) {
+            root.innerHTML = `<div class="empty-state"><div class="muted small">no scans yet — run one above</div></div>`;
+            return;
+        }
+        root.innerHTML = `
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="text-align:left">
+              <th class="muted small uppercase" style="padding:4px 8px">when</th>
+              <th class="muted small uppercase" style="padding:4px 8px">package</th>
+              <th class="muted small uppercase" style="padding:4px 8px">version</th>
+              <th class="muted small uppercase" style="padding:4px 8px">source</th>
+              <th class="muted small uppercase" style="padding:4px 8px;text-align:right">FB</th>
+              <th class="muted small uppercase" style="padding:4px 8px;text-align:right">creds</th>
+              <th class="muted small uppercase" style="padding:4px 8px;text-align:right">vulns</th>
+              <th class="muted small uppercase" style="padding:4px 8px;text-align:right">findings</th>
+              <th class="muted small uppercase" style="padding:4px 8px"></th>
+            </tr></thead>
+            <tbody>
+              ${scans.map((s) => `
+                <tr style="border-top:1px solid var(--border)">
+                  <td class="t-mono" style="padding:4px 8px;white-space:nowrap">${escapeHtml((s.scanned_at || "").replace("T", " ").slice(0, 19))}</td>
+                  <td class="t-mono" style="padding:4px 8px">${escapeHtml(s.package)}</td>
+                  <td class="t-mono" style="padding:4px 8px">${escapeHtml(s.version_name || (s.version_code ? String(s.version_code) : "—"))}</td>
+                  <td class="muted small" style="padding:4px 8px">${escapeHtml(s.source_label || s.source)}</td>
+                  <td class="t-mono" style="padding:4px 8px;text-align:right">${s.firebase_project_count || 0}</td>
+                  <td class="t-mono" style="padding:4px 8px;text-align:right">${s.confirmed_secrets_count || 0}</td>
+                  <td class="t-mono" style="padding:4px 8px;text-align:right;color:${s.vulnerability_count ? "var(--sev-critical)" : "inherit"}">${s.vulnerability_count || 0}</td>
+                  <td class="t-mono" style="padding:4px 8px;text-align:right">${s.findings_count || 0}</td>
+                  <td style="padding:4px 8px;white-space:nowrap">
+                    <button class="btn ps-history-view" data-id="${escapeHtml(s.id)}" style="padding:2px 8px">view</button>
+                    <button class="btn ps-history-delete" data-id="${escapeHtml(s.id)}" style="padding:2px 8px">delete</button>
+                  </td>
+                </tr>`).join("")}
+            </tbody>
+          </table>`;
+        $$(".ps-history-view").forEach((b) => b.addEventListener("click", () => loadHistoricalScan(b.dataset.id)));
+        $$(".ps-history-delete").forEach((b) => b.addEventListener("click", async () => {
+            if (!confirm("Delete this scan from history?")) return;
+            await fetch(`/v1/playintel/scans/${encodeURIComponent(b.dataset.id)}`, { method: "DELETE" });
+            await renderPlayScanHistory(packageFilter);
+        }));
+    } catch (e) {
+        root.innerHTML = `<div class="muted small">request failed: ${e.message || e}</div>`;
+    }
+}
+
+async function loadHistoricalScan(scanId) {
+    const status = $("#ps-status");
+    const wrap = $("#ps-results-wrap");
+    const out = $("#ps-results");
+    const title = $("#ps-result-title");
+    if (!out) return;
+    if (status) status.textContent = `loading historical scan ${scanId}…`;
+    try {
+        const r = await fetch(`/v1/playintel/scans/${encodeURIComponent(scanId)}`);
+        if (!r.ok) {
+            if (status) status.textContent = `[${r.status}] ${(await r.text()).slice(0, 200)}`;
+            return;
+        }
+        const body = await r.json();
+        const data = body.payload || {};
+        renderPlayScanResults(out, title, data);
+        wrap.style.display = "";
+        if (status) status.textContent = `historical · ${body.scanned_at} · ${body.source_label}`;
+        wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (e) {
+        if (status) status.textContent = `request failed: ${e.message || e}`;
+    }
 }
 
 async function runPlayScan(mode, pkgName, runProbes, accountName, status) {
