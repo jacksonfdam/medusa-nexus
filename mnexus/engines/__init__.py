@@ -9,6 +9,7 @@ from mnexus.engines.ghidra_engine import GhidraEngine
 from mnexus.engines.ipatool_engine import IPAToolEngine
 from mnexus.engines.jadx_engine import JADXEngine
 from mnexus.engines.mobsf_engine import MobSFEngine
+from mnexus.engines.play_intel_engine import PlayIntelEngine
 from mnexus.engines.vphone_engine import VPhoneEngine
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "IPAToolEngine",
     "JADXEngine",
     "MobSFEngine",
+    "PlayIntelEngine",
     "VPhoneEngine",
 ]

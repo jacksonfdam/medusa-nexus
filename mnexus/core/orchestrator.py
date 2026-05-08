@@ -26,6 +26,7 @@ from mnexus.engines import (
     IPAToolEngine,
     JADXEngine,
     MobSFEngine,
+    PlayIntelEngine,
     VPhoneEngine,
 )
 from mnexus.engines.apktool_engine import attack_surface_from_meta
@@ -57,6 +58,7 @@ class MedusaNexus:
             "mobsf": MobSFEngine(self.config),
             "burp": BurpEngine(self.config),
             "frida": FridaEngine(self.config),
+            "playintel": PlayIntelEngine(self.config),
             "vphone": VPhoneEngine(self.config),
         }
 
@@ -136,6 +138,7 @@ class MedusaNexus:
             self.engines["jadx"].execute(context),
             self.engines["mobsf"].execute(context),
             self.engines["ghidra"].execute(context),
+            self.engines["playintel"].execute(context),
         ]
         static_results = await asyncio.gather(*static_tasks, return_exceptions=True)
 
