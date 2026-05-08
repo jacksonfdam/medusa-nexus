@@ -407,7 +407,6 @@ function view_play_scan() {
       <section class="panel">
         <div class="panel-head"><span>// PACKAGE TARGET</span></div>
         <div class="panel-body col" style="gap:10px">
-          <input id="ps-pkg" class="input t-mono" placeholder="com.example.app" />
           <div class="row" style="gap:6px;flex-wrap:wrap">
             <button class="btn ps-mode" data-mode="play"   data-active="1">[ PLAY STREAM ]</button>
             <button class="btn ps-mode" data-mode="path">[ LOCAL PATH ]</button>
@@ -418,6 +417,9 @@ function view_play_scan() {
               <span class="muted small">run active Firebase probes (RTDB · Firestore · Storage)</span>
             </label>
           </div>
+
+          <input id="ps-pkg" class="input t-mono" placeholder="com.example.app" />
+          <div id="ps-pkg-hint" class="muted small">required for PLAY STREAM and LOCAL PATH</div>
 
           <!-- mode: play (default) -->
           <div id="ps-mode-play" class="col" style="gap:8px">
@@ -444,8 +446,8 @@ function view_play_scan() {
           <div id="ps-mode-upload" class="col" style="gap:8px;display:none">
             <input id="ps-file" type="file" accept=".apk,.xapk" />
             <div class="muted small">
-              File is hashed + deduped under <code>workspace/playintel-uploads/</code>;
-              re-uploading the same .apk reuses the existing copy.
+              Package id is auto-detected from the manifest — leave the field above blank to use the embedded one.
+              File is hashed + deduped under <code>workspace/playintel-uploads/</code>; re-uploading the same .apk reuses the existing copy.
             </div>
           </div>
 
@@ -458,7 +460,7 @@ function view_play_scan() {
       </section>
       <section class="panel" id="ps-results-wrap" style="display:none">
         <div class="panel-head"><span id="ps-result-title">// RESULTS</span></div>
-        <div class="panel-body col" id="ps-results" style="gap:14px"></div>
+        <div class="panel-body col" id="ps-results" style="gap:18px"></div>
       </section>
     </div>`;
 }
@@ -483,6 +485,17 @@ async function mount_play_scan() {
             const el = $(`#ps-mode-${m}`);
             if (el) el.style.display = (m === next ? "" : "none");
         });
+        // Package input: required for play / path; optional for upload
+        // (manifest auto-detect on the server). Update placeholder + hint
+        // text so the user understands the difference at a glance.
+        const hint = $("#ps-pkg-hint");
+        if (next === "upload") {
+            pkg.placeholder = "(optional — auto-detected from the .apk manifest)";
+            if (hint) hint.textContent = "optional in UPLOAD mode — pulled from the manifest if blank";
+        } else {
+            pkg.placeholder = "com.example.app";
+            if (hint) hint.textContent = "required for PLAY STREAM and LOCAL PATH";
+        }
     };
     $$(".ps-mode").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
 
@@ -507,8 +520,8 @@ async function mount_play_scan() {
 
     btn.addEventListener("click", async () => {
         const pkgName = (pkg.value || "").trim();
-        if (!pkgName) {
-            status.textContent = "package name required";
+        if (!pkgName && mode !== "upload") {
+            status.textContent = "package name required (or switch to UPLOAD .APK)";
             return;
         }
         btn.disabled = true;
@@ -519,7 +532,7 @@ async function mount_play_scan() {
             if (!data) return;  // status was already set by the request path
             renderPlayScanResults(out, title, data);
             wrap.style.display = "";
-            status.textContent = `done · source: ${data.source}`;
+            status.textContent = `done · source: ${data.source} · package: ${data.package}`;
         } catch (e) {
             status.textContent = `request failed: ${e.message || e}`;
         } finally {
@@ -534,7 +547,7 @@ async function runPlayScan(mode, pkgName, runProbes, accountName, status) {
         if (!file) { status.textContent = "pick an .apk file first"; return null; }
         const form = new FormData();
         form.append("file", file);
-        form.append("package", pkgName);
+        if (pkgName) form.append("package", pkgName);  // optional — server falls back to manifest detect
         form.append("run_active_probes", runProbes ? "true" : "false");
         status.textContent = `uploading ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)…`;
         const resp = await fetch("/v1/playintel/scan-upload", { method: "POST", body: form });
@@ -697,36 +710,215 @@ async function renderPlayAccountsList() {
 
 function renderPlayScanResults(out, title, data) {
     title.textContent = `// ${data.package}  ·  ${data.source}`;
+    out.innerHTML = [
+        renderFirebaseConfigsBlock(data.firebase_configs || []),
+        renderActiveProbesBlock(data.active_probes || {}, data.vulnerabilities || []),
+        renderConfirmedSecretsBlock(data.confirmed_secrets || []),
+        renderSuspectedSecretsBlock(data.suspected_secrets || []),
+        renderTechnologiesBlock(data.detected_technologies || {}),
+        renderEngineFindingsBlock(data.findings || []),
+        renderSavedFilesBlock(data.saved_files || [], data.saved_files_dir),
+    ].join("");
+}
+
+/* ─── one block per recovered Firebase project — every field the SDK
+ *     embeds in the APK, in the same shape PlayIntelEngine emits.
+ *     This is the single biggest signal the Go reference produces and
+ *     the one the previous renderer was hiding. ─────────────────────── */
+function renderFirebaseConfigsBlock(configs) {
+    if (!configs.length) {
+        return `<div><div class="muted small uppercase" style="margin-bottom:4px">FIREBASE PROJECTS</div>
+                <div class="muted small">no Firebase project recovered</div></div>`;
+    }
+    const blocks = configs.map((c) => {
+        const rows = [
+            ["project_id",         c.project_id],
+            ["google_api_key",     c.api_key],
+            ["google_app_id",      c.app_id],
+            ["firebase_database_url", c.database_url],
+            ["google_storage_bucket", c.storage_bucket],
+            ["gcm_defaultSenderId",   c.sender_id],
+            ["default_web_client_id", c.web_client_id],
+            ["recovered_from",     c.location],
+        ].filter(([_, v]) => v);
+        const tableBody = rows.map(([k, v]) => `
+            <tr>
+              <td class="muted small" style="padding:3px 10px;vertical-align:top;white-space:nowrap">${escapeHtml(k)}</td>
+              <td class="t-mono" style="padding:3px 10px;word-break:break-all">${escapeHtml(v)}</td>
+            </tr>`).join("");
+        const additional = (c.additional_api_keys || []).filter(Boolean);
+        const extraBlock = additional.length
+            ? `<div style="margin-top:6px">
+                 <div class="muted small uppercase" style="margin-bottom:2px">additional AIza* keys (${additional.length})</div>
+                 ${additional.map((k) => `<div class="t-mono" style="word-break:break-all">${escapeHtml(k)}</div>`).join("")}
+               </div>`
+            : "";
+        return `
+          <div style="border:1px solid var(--border);border-radius:2px;padding:10px;margin-bottom:6px">
+            <div class="t-mono" style="font-weight:700;color:var(--accent);margin-bottom:6px">▸ ${escapeHtml(c.project_id)}</div>
+            <table style="border-collapse:collapse;width:100%"><tbody>${tableBody}</tbody></table>
+            ${extraBlock}
+          </div>`;
+    }).join("");
+    return `<div><div class="muted small uppercase" style="margin-bottom:4px">FIREBASE CONFIG · ${configs.length} project${configs.length !== 1 ? "s" : ""}</div>${blocks}</div>`;
+}
+
+/* ─── active probes: table per probe family with explicit pass/fail/
+ *     skipped status so a green run doesn't disappear into "no findings".
+ *     Vulnerabilities are still surfaced separately because they get
+ *     promoted to engine Findings too. ─────────────────────────────── */
+function renderActiveProbesBlock(probes, vulns) {
+    const sections = [];
+    const renderTable = (title, rows, columns) => {
+        if (!rows.length) {
+            sections.push(`<div class="muted small">${title}: <em>not run</em></div>`);
+            return;
+        }
+        const head = columns.map((c) => `<th class="muted small uppercase" style="padding:3px 8px;text-align:left">${c.label}</th>`).join("");
+        const body = rows.map((row) => {
+            const cells = columns.map((c) => {
+                const v = c.cell(row);
+                return `<td class="t-mono" style="padding:3px 8px;word-break:break-all">${v}</td>`;
+            }).join("");
+            return `<tr style="border-top:1px solid var(--border)">${cells}</tr>`;
+        }).join("");
+        sections.push(`
+          <div>
+            <div class="muted small uppercase" style="margin-bottom:2px">${title}</div>
+            <table style="width:100%;border-collapse:collapse"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+          </div>`);
+    };
+
+    const yn = (b) => b ? `<span style="color:var(--sev-critical)">YES</span>` : `<span class="muted">no</span>`;
+    renderTable("realtime database", probes.rtdb || [], [
+        { label: "URL",       cell: (r) => escapeHtml(r.db_url || "") },
+        { label: "read",      cell: (r) => yn(r.public_read) },
+        { label: "write",     cell: (r) => yn(r.public_write) },
+        { label: "note",      cell: (r) => `<span class="muted small">${escapeHtml(r.error || "")}</span>` },
+    ]);
+    renderTable("firestore", probes.firestore || [], [
+        { label: "project",      cell: (r) => escapeHtml(r.project_id || "") },
+        { label: "anon read",    cell: (r) => yn(r.public_read) },
+        { label: "collections",  cell: (r) => String(r.sample_document_count || 0) },
+        { label: "note",         cell: (r) => `<span class="muted small">${escapeHtml(r.error || "")}</span>` },
+    ]);
+    renderTable("cloud storage", probes.storage || [], [
+        { label: "bucket",       cell: (r) => escapeHtml(r.bucket || "") },
+        { label: "anon list",    cell: (r) => yn(r.public_listing) },
+        { label: "objects",      cell: (r) => String(r.object_count || 0) },
+        { label: "note",         cell: (r) => `<span class="muted small">${escapeHtml(r.error || "")}</span>` },
+    ]);
+    const vulnList = vulns.length
+        ? `<div class="col" style="gap:2px;margin-top:6px">
+             <div class="muted small uppercase">vulnerabilities</div>
+             ${vulns.map((v) => `<div class="t-mono" style="color:var(--sev-critical)">▸ ${escapeHtml(v)}</div>`).join("")}
+           </div>`
+        : "";
+    return `<div><div class="muted small uppercase" style="margin-bottom:4px">ACTIVE PROBES</div>
+              <div class="col" style="gap:8px">${sections.join("")}${vulnList}</div></div>`;
+}
+
+function renderConfirmedSecretsBlock(secrets) {
+    if (!secrets.length) {
+        return `<div><div class="muted small uppercase" style="margin-bottom:4px">CONFIRMED CREDENTIALS</div>
+                <div class="muted small">no confirmed credential patterns matched
+                  <span class="muted small" style="font-style:italic"> (AIza Firebase keys live in the FIREBASE CONFIG block above)</span>
+                </div></div>`;
+    }
+    const rows = secrets.map((s) => `
+        <tr style="border-top:1px solid var(--border)">
+          <td class="t-mono" style="padding:4px 8px;color:var(--accent);white-space:nowrap">${escapeHtml(s.type)}</td>
+          <td class="t-mono" style="padding:4px 8px;word-break:break-all">${escapeHtml(s.value || "")}</td>
+          <td class="muted small" style="padding:4px 8px">${escapeHtml(s.location || "")}</td>
+        </tr>`).join("");
+    return `<div><div class="muted small uppercase" style="margin-bottom:4px">CONFIRMED CREDENTIALS · ${secrets.length}</div>
+              <table style="width:100%;border-collapse:collapse">
+                <thead><tr>
+                  <th class="muted small uppercase" style="padding:3px 8px;text-align:left">type</th>
+                  <th class="muted small uppercase" style="padding:3px 8px;text-align:left">value</th>
+                  <th class="muted small uppercase" style="padding:3px 8px;text-align:left">location</th>
+                </tr></thead>
+                <tbody>${rows}</tbody></table></div>`;
+}
+
+function renderSuspectedSecretsBlock(secrets) {
+    if (!secrets.length) return "";
+    const rows = secrets.map((s) => `
+        <tr style="border-top:1px solid var(--border)">
+          <td class="t-mono" style="padding:4px 8px;color:var(--sev-medium);white-space:nowrap">${escapeHtml(s.type)}</td>
+          <td class="t-mono" style="padding:4px 8px;word-break:break-all">${escapeHtml(s.value || "")}</td>
+          <td class="muted small" style="padding:4px 8px">${escapeHtml(s.location || "")}</td>
+        </tr>`).join("");
+    return `<div>
+              <div class="muted small uppercase" style="margin-bottom:4px">SUSPECTED · ${secrets.length}
+                <span style="font-style:italic;font-weight:normal"> · low-precision tier; review manually</span>
+              </div>
+              <table style="width:100%;border-collapse:collapse">
+                <thead><tr>
+                  <th class="muted small uppercase" style="padding:3px 8px;text-align:left">type</th>
+                  <th class="muted small uppercase" style="padding:3px 8px;text-align:left">value</th>
+                  <th class="muted small uppercase" style="padding:3px 8px;text-align:left">location</th>
+                </tr></thead>
+                <tbody>${rows}</tbody></table>
+            </div>`;
+}
+
+function renderTechnologiesBlock(techs) {
+    const entries = Object.entries(techs || {});
+    if (!entries.length) return "";
+    const rows = entries.map(([t, locs]) => `
+        <tr><td class="t-mono" style="padding:3px 10px;color:var(--accent)">${escapeHtml(t)}</td>
+            <td class="muted small" style="padding:3px 10px">${escapeHtml(Array.isArray(locs) ? locs.join(", ") : String(locs))}</td></tr>`).join("");
+    return `<div><div class="muted small uppercase" style="margin-bottom:4px">DETECTED TECHNOLOGIES · ${entries.length}</div>
+              <table style="border-collapse:collapse"><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderEngineFindingsBlock(findings) {
+    if (!findings.length) {
+        return `<div><div class="muted small uppercase" style="margin-bottom:4px">ENGINE FINDINGS</div>
+                <div class="muted small">no findings emitted</div></div>`;
+    }
     const sevColor = (s) => `var(--sev-${s})`;
-    const fbBlock = (data.firebase_projects || []).length
-        ? `<div class="t-mono">${data.firebase_projects.map((p) => `<div>▸ ${p}</div>`).join("")}</div>`
-        : `<div class="muted small">no Firebase project recovered</div>`;
-    const secretsBlock = (data.confirmed_secrets || []).length
-        ? `<table style="width:100%;border-collapse:collapse"><tbody>${
-            data.confirmed_secrets.map((s) => `
-              <tr><td class="t-mono" style="padding:4px 8px;color:var(--accent)">${s.type}</td>
-                  <td class="muted small" style="padding:4px 8px">${s.location}</td></tr>`).join("")
-        }</tbody></table>`
-        : `<div class="muted small">no confirmed credential patterns matched</div>`;
-    const vulnBlock = (data.vulnerabilities || []).length
-        ? `<div class="col" style="gap:4px">${data.vulnerabilities.map((v) => `<div class="t-mono" style="color:var(--sev-critical)">▸ ${v}</div>`).join("")}</div>`
-        : `<div class="muted small">no active-probe findings</div>`;
-    const findingsBlock = (data.findings || []).length
-        ? `<table style="width:100%;border-collapse:collapse"><tbody>${
-            data.findings.map((f) => `
-              <tr><td class="t-mono" style="padding:4px 8px;color:${sevColor(f.severity)};text-transform:uppercase">${f.severity}</td>
-                  <td style="padding:4px 8px">${f.title}</td>
-                  <td class="muted small" style="padding:4px 8px">${f.location || "—"}</td></tr>`).join("")
-        }</tbody></table>`
-        : `<div class="muted small">no findings emitted</div>`;
-    out.innerHTML = `
-        <div><div class="muted small uppercase" style="margin-bottom:4px">FIREBASE PROJECTS</div>${fbBlock}</div>
-        <div><div class="muted small uppercase" style="margin-bottom:4px">CONFIRMED SECRETS</div>${secretsBlock}</div>
-        <div><div class="muted small uppercase" style="margin-bottom:4px">ACTIVE PROBE FINDINGS</div>${vulnBlock}</div>
-        <div><div class="muted small uppercase" style="margin-bottom:4px">ENGINE FINDINGS · ${data.findings.length}</div>${findingsBlock}</div>
-        ${data.saved_files_dir ? `<div class="muted small">saved bearing files → <code>${data.saved_files_dir}</code></div>` : ""}
-        ${data.suspected_secrets_count ? `<div class="muted small">${data.suspected_secrets_count} suspected pattern hits — review manually (low precision tier)</div>` : ""}
-    `;
+    const rows = findings.map((f) => `
+        <tr style="border-top:1px solid var(--border)">
+          <td class="t-mono" style="padding:6px 8px;color:${sevColor(f.severity)};text-transform:uppercase;white-space:nowrap">${escapeHtml(f.severity)}</td>
+          <td style="padding:6px 8px">
+            <div>${escapeHtml(f.title)}</div>
+            ${f.evidence ? `<div class="muted small" style="margin-top:2px;white-space:pre-wrap;font-family:monospace">${escapeHtml(f.evidence).slice(0, 600)}</div>` : ""}
+          </td>
+          <td class="muted small" style="padding:6px 8px;vertical-align:top;max-width:280px;word-break:break-all">${escapeHtml(f.location || "—")}</td>
+        </tr>`).join("");
+    return `<div><div class="muted small uppercase" style="margin-bottom:4px">ENGINE FINDINGS · ${findings.length}</div>
+              <table style="width:100%;border-collapse:collapse"><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderSavedFilesBlock(saved, savedDir) {
+    if (!saved.length && !savedDir) return "";
+    const fmtSize = (n) => {
+        if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+        if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+        return `${n} B`;
+    };
+    const rows = saved.map((f) => `
+        <tr style="border-top:1px solid var(--border)">
+          <td class="t-mono" style="padding:3px 10px;word-break:break-all">${escapeHtml(f.name)}</td>
+          <td class="muted small" style="padding:3px 10px;text-align:right">${fmtSize(f.size || 0)}</td>
+        </tr>`).join("");
+    return `<div>
+              <div class="muted small uppercase" style="margin-bottom:4px">SAVED BEARING FILES · ${saved.length}</div>
+              ${saved.length ? `<table style="width:100%;border-collapse:collapse">
+                <thead><tr>
+                  <th class="muted small uppercase" style="padding:3px 10px;text-align:left">file</th>
+                  <th class="muted small uppercase" style="padding:3px 10px;text-align:right">size</th>
+                </tr></thead><tbody>${rows}</tbody></table>` : ""}
+              ${savedDir ? `<div class="muted small" style="margin-top:4px">→ <code>${escapeHtml(savedDir)}</code></div>` : ""}
+            </div>`;
+}
+
+function escapeHtml(s) {
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
 
