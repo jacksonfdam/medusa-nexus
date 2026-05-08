@@ -138,6 +138,74 @@ class LocalAPKSource:
 _BASE_APK_CANDIDATES = ("base.apk", "base/base.apk")
 
 
+def _pick_base_entry(zf: zipfile.ZipFile, apk_entries: list[str]) -> str:
+    """Decide which entry in a bundle is the "base" APK.
+
+    Tries the documented filenames first (top-level ``base.apk``,
+    Bundletool-style ``base/base.apk``, then any ``*/base.apk``
+    nested under any prefix). Falls back to the largest ``.apk``
+    inside, which Bundletool guarantees is the base.
+
+    Shared by :class:`BundledAPKSource` (which extracts every entry)
+    and :func:`extract_base_from_bundle` (which only pulls the base
+    out — used by the orchestrator path).
+    """
+    lower_to_orig = {n.lower(): n for n in apk_entries}
+    for candidate in _BASE_APK_CANDIDATES:
+        if candidate in lower_to_orig:
+            return lower_to_orig[candidate]
+        leaf = candidate.split("/")[-1]
+        for lower_n, orig in lower_to_orig.items():
+            if lower_n.endswith("/" + leaf):
+                return orig
+    # No documented filename matched — pick the largest .apk.
+    return max(apk_entries, key=lambda n: zf.getinfo(n).file_size)
+
+
+def extract_base_from_bundle(
+    bundle_path: Path, workspace: Path | None = None
+) -> tuple[Path, Path]:
+    """Pull just the base APK out of a bundle to a fresh temp dir.
+
+    Returns ``(base_path, temp_dir)``. The caller owns ``temp_dir`` and
+    must ``shutil.rmtree`` it when done — there's no context-manager
+    convenience here because the orchestrator already owns lifecycle.
+
+    Splits inside the bundle are deliberately ignored. Use
+    :class:`BundledAPKSource` instead when you also want them
+    (playintel does; the orchestrator's project-ingest pipeline
+    runs only against the base).
+    """
+    bundle_path = Path(bundle_path).expanduser().resolve()
+    if not zipfile.is_zipfile(bundle_path):
+        raise ValueError(f"not a zip: {bundle_path}")
+    parent = (workspace / "playintel-uploads") if workspace is not None else None
+    if parent is not None:
+        parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f"bundle-base-{bundle_path.stem}-",
+            dir=str(parent) if parent else None,
+        )
+    )
+    try:
+        with zipfile.ZipFile(bundle_path) as zf:
+            apk_entries = [n for n in zf.namelist() if n.lower().endswith(".apk")]
+            if not apk_entries:
+                raise RuntimeError(
+                    f"{bundle_path.name}: no .apk entries inside — not a recognised bundle"
+                )
+            base_entry = _pick_base_entry(zf, apk_entries)
+            base_out = tmp_dir / "base.apk"
+            with zf.open(base_entry) as src, base_out.open("wb") as dst:
+                while chunk := src.read(1024 * 1024):
+                    dst.write(chunk)
+        return base_out, tmp_dir
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+
 def _looks_like_bundle(path: Path) -> bool:
     """Return True if ``path`` is a zip whose contents are nested APKs.
 
@@ -210,24 +278,7 @@ class BundledAPKSource:
                     f"{self.bundle_path.name} contained no .apk entries — "
                     "not a recognised .apkm / .apks / .xapk bundle"
                 )
-
-            # Identify the base. Try the documented filenames first;
-            # otherwise fall back to the largest .apk inside.
-            lower_to_orig = {n.lower(): n for n in apk_entries}
-            base_entry: str | None = None
-            for candidate in _BASE_APK_CANDIDATES:
-                if candidate in lower_to_orig:
-                    base_entry = lower_to_orig[candidate]
-                    break
-                # Also accept "anything ending in /base.apk" for nested layouts.
-                for lower_n, orig in lower_to_orig.items():
-                    if lower_n.endswith("/" + candidate.split("/")[-1]):
-                        base_entry = orig
-                        break
-                if base_entry is not None:
-                    break
-            if base_entry is None:
-                base_entry = max(apk_entries, key=lambda n: zf.getinfo(n).file_size)
+            base_entry = _pick_base_entry(zf, apk_entries)
 
             # Extract every inner .apk to disk; tag base + splits.
             for entry in apk_entries:

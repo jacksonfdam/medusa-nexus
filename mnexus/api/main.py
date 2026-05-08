@@ -889,15 +889,41 @@ def _platform_from_suffix(path: Path) -> str:
 
 
 async def _detect_metadata(nexus: MedusaNexus, path: Path, platform: str) -> dict[str, str]:
-    """Pull bundle id / package + version from the right engine. Empty on failure."""
+    """Pull bundle id / package + version from the right engine.
+
+    For Android, transparently looks inside .apkm / .apks / .xapk
+    bundles when the outer-zip detection fails: the base APK gets
+    extracted to a temp dir, the engine's manifest parser runs against
+    it, and the temp gets cleaned up. Returns ``{}`` on any failure.
+    """
     engine_name = "ipatool" if platform == "ios" else "apktool"
     engine = nexus.engines.get(engine_name)
     if engine is None:
         return {}
     try:
-        return await engine.extract_manifest(path)  # type: ignore[attr-defined]
+        meta = await engine.extract_manifest(path)  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
-        return {}
+        meta = {}
+    if meta.get("package") or platform == "ios":
+        return meta
+    # Android-only: if the file is a bundle, try the inner base APK.
+    # Most uploads from APKMirror / Bundletool land here.
+    from mnexus.playintel.apk_source import _looks_like_bundle, extract_base_from_bundle
+
+    if not _looks_like_bundle(path):
+        return meta
+    try:
+        base_path, tmp_dir = extract_base_from_bundle(
+            path, workspace=nexus.config.workspace
+        )
+    except Exception:  # noqa: BLE001
+        return meta
+    try:
+        return await engine.extract_manifest(base_path)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return meta
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _safe_package_from_filename(name: str | None) -> str:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 
 from mnexus.config import NexusConfig
@@ -106,6 +107,13 @@ class MedusaNexus:
     ) -> Project:
         """Main entry point. APK in, Project out. Pipeline runs in phases.
 
+        Phase 0 — bundle unpack (.apkm / .apks / .xapk): the orchestrator
+                  detects bundles by content (zip with nested ``*.apk``)
+                  and pulls just the base APK out to a temp dir for the
+                  engines to scan. The original bundle file remains the
+                  artefact-of-record on the Project (analyst-facing path
+                  + sha) so re-scans roll through the same logic next
+                  time.
         Phase 1 — static (parallel): apktool + jadx + mobsf + ghidra.
         Phase 2 — correlate: build AttackSurface from all outputs (manifest +
                   per-engine extras + their findings).
@@ -114,16 +122,53 @@ class MedusaNexus:
         When `existing_id` is provided the new project payload reuses that id,
         which lets the rescan endpoint refresh data in place.
         """
-        project = Project.from_apk(apk_path, package_name=package_name, version=version, platform="android")
+        scan_path, bundle_cleanup_dir = _prepare_scan_path(apk_path, self.config.workspace)
+        try:
+            return await self._ingest_apk_inner(
+                apk_path,
+                scan_path,
+                package_name,
+                version,
+                existing_id=existing_id,
+            )
+        finally:
+            if bundle_cleanup_dir is not None:
+                shutil.rmtree(bundle_cleanup_dir, ignore_errors=True)
+
+    async def _ingest_apk_inner(
+        self,
+        artefact_path: Path,
+        scan_path: Path,
+        package_name: str,
+        version: str,
+        *,
+        existing_id: str | None = None,
+    ) -> Project:
+        """Pipeline body — runs the engines against ``scan_path`` while the
+        Project's ``apk_path`` + sha are pinned to ``artefact_path`` so the
+        analyst sees the file they originally uploaded."""
+        # Hash + name from the bundle / artefact (what the user uploaded);
+        # engines see the inner base APK via context.apk_path.
+        project = Project.from_apk(
+            artefact_path,
+            package_name=package_name,
+            version=version,
+            platform="android",
+        )
         if existing_id:
             project.id = existing_id
+        if scan_path != artefact_path:
+            log.info(
+                "ingest: bundle detected (%s) → scanning inner base from %s",
+                artefact_path.name, scan_path.name,
+            )
         log.info("ingest started: %s (%s)", project.name, project.apk_sha256[:12])
 
         context = AnalysisContext(
-            apk_path=apk_path,
+            apk_path=scan_path,
             workspace=self.config.workspace / project.id,
             package_name=package_name,
-            extras={},
+            extras={"is_bundle": scan_path != artefact_path, "artefact_path": str(artefact_path)},
         )
 
         # Run apktool first so the others can read context.extras["apk_meta"].
@@ -174,7 +219,20 @@ class MedusaNexus:
             # leave unchanged — surfaces in findings already
             pass
 
-        # Project metadata that the manifest gave us.
+        # Project metadata that the manifest gave us. The package_name
+        # backfill specifically catches the bundle path: when the API
+        # layer couldn't pre-detect the package id (outer zip had no
+        # manifest) it passes "" or a filename-stem fallback. Once
+        # apktool runs on the inner base it knows the real id, so we
+        # respect that — but never overwrite a non-empty caller-
+        # provided package.
+        if not project.package_name and meta.get("package"):
+            project.package_name = meta["package"]
+            project.name = f"{meta['package']} v{project.version_name}"
+        if meta.get("version_name") and project.version_name in ("", "unknown"):
+            project.version_name = meta["version_name"]
+            if project.package_name:
+                project.name = f"{project.package_name} v{project.version_name}"
         if meta.get("min_sdk"):
             try: project.min_sdk = int(meta["min_sdk"])
             except ValueError: pass
@@ -331,3 +389,29 @@ class MedusaNexus:
             project.attack_surface.risk_score(),
         )
         return project
+
+
+def _prepare_scan_path(apk_path: Path, workspace: Path) -> tuple[Path, Path | None]:
+    """If ``apk_path`` is a bundle (.apkm / .apks / .xapk), extract the
+    inner base APK to a temp dir and return ``(base_path, temp_dir)``;
+    otherwise return ``(apk_path, None)``.
+
+    The orchestrator owns ``temp_dir`` cleanup. Splits inside the bundle
+    are intentionally not extracted on this path — the project ingest
+    pipeline only consumes the base APK; per-split scanning lives in
+    PlayIntelEngine via :class:`BundledAPKSource`.
+    """
+    # Local import to avoid a hard cycle through engines on module load.
+    from mnexus.playintel.apk_source import _looks_like_bundle, extract_base_from_bundle
+
+    apk_path = Path(apk_path)
+    if not apk_path.exists():
+        return apk_path, None
+    if not _looks_like_bundle(apk_path):
+        return apk_path, None
+    try:
+        base_path, tmp_dir = extract_base_from_bundle(apk_path, workspace=workspace)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        log.warning("ingest: bundle unpack failed for %s: %s", apk_path.name, exc)
+        return apk_path, None
+    return base_path, tmp_dir
