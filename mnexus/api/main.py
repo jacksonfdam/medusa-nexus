@@ -324,15 +324,17 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
 @app.post("/v1/playintel/scan-upload")
 async def playintel_scan_upload(
     file: UploadFile = File(...),
-    package: str = Form(...),
+    package: str = Form(default=""),
     run_active_probes: bool = Form(default=False),
 ) -> dict[str, Any]:
     """Upload an APK and scan it locally via the playintel engine.
 
     Multipart fields:
 
-    * ``file`` — the .apk / .xapk to scan.
-    * ``package`` — the Android package id to attribute results to.
+    * ``file`` — the .apk / .xapk to scan (required).
+    * ``package`` — optional. If omitted, the package id is parsed out
+      of ``AndroidManifest.xml`` inside the upload itself (and falls
+      back to the filename stem on parse failure).
     * ``run_active_probes`` — flip on to hit Firebase / Firestore /
       Storage with anonymous probes once configs are recovered.
 
@@ -341,9 +343,6 @@ async def playintel_scan_upload(
     subsequent uploads of the same APK so we don't bloat disk.
     """
     nexus: MedusaNexus = app.state.nexus
-    pkg = (package or "").strip()
-    if not pkg:
-        raise HTTPException(400, "package required")
     if not file.filename:
         raise HTTPException(400, "no filename on upload")
 
@@ -369,6 +368,8 @@ async def playintel_scan_upload(
         tmp_path.unlink(missing_ok=True)
         raise
 
+    pkg = (package or "").strip() or _detect_package(final_path, file.filename)
+
     from mnexus.playintel.apk_source import LocalAPKSource
 
     source = LocalAPKSource(final_path)
@@ -379,6 +380,26 @@ async def playintel_scan_upload(
         f"upload:{file.filename}",
         bool(run_active_probes),
     )
+
+
+def _detect_package(apk_path: Path, original_filename: str) -> str:
+    """Pull the package id out of the APK's manifest, with a filename
+    fallback. Errors are swallowed — the analyzer accepts any non-empty
+    string as the package label, so worst case we tag the run with the
+    .apk basename.
+    """
+    try:
+        from mnexus.engines.apktool_engine import APKToolEngine
+
+        engine = APKToolEngine(NexusConfig.from_env())
+        meta = engine.parse_apk(apk_path)
+        package = (meta.get("package") or "").strip()
+        if package:
+            return package
+    except Exception:  # noqa: BLE001 — best-effort detection
+        pass
+    stem = Path(original_filename).stem
+    return stem or "unknown.package"
 
 
 # ─── Play account manager ────────────────────────────────────────────────
@@ -488,8 +509,16 @@ async def _run_playintel_scan(
     source_label: str,
     run_active_probes: bool,
 ) -> dict[str, Any]:
-    """Shared invoke + serialize body used by both playintel endpoints."""
+    """Shared invoke + serialize body used by both playintel endpoints.
+
+    Returns the full report — every Firebase config field, every
+    confirmed and suspected secret with its value and location, every
+    detected technology, the saved-files manifest, and the per-probe
+    outcome — so the UI can render the same level of detail the CLI
+    produces with `mnexus play-scan`.
+    """
     from mnexus.engines.play_intel_engine import PlayIntelEngine
+    from mnexus.playintel.analyzer import unique_firebase_configs
 
     engine = PlayIntelEngine(nexus.config)
     outcome, findings = await engine.analyze_package(
@@ -498,19 +527,88 @@ async def _run_playintel_scan(
         workspace=nexus.config.workspace,
         run_active_probes=run_active_probes,
     )
-    configs = sorted(
-        {c.project_id for c in outcome.report.firebase_configs if c.project_id}
-    )
+
+    # Every Firebase config we recovered, deduped by project_id but
+    # carrying every field the SDK expects (project_id, api_key, app_id,
+    # database_url, storage_bucket, sender_id, web_client_id, plus any
+    # additional AIza* keys spotted in the same APK).
+    fb_configs = [
+        {
+            "project_id": c.project_id,
+            "api_key": c.api_key,
+            "app_id": c.app_id,
+            "database_url": c.database_url,
+            "storage_bucket": c.storage_bucket,
+            "sender_id": c.sender_id,
+            "web_client_id": c.web_client_id,
+            "additional_api_keys": list(c.additional_api_keys),
+            "location": c.location,
+        }
+        for c in unique_firebase_configs(outcome.report)
+    ]
+
+    saved = outcome.saved_files_dir
+    saved_files = []
+    if saved is not None and saved.exists():
+        for child in sorted(saved.iterdir()):
+            if child.is_file():
+                try:
+                    size = child.stat().st_size
+                except OSError:
+                    size = 0
+                saved_files.append({
+                    "name": child.name,
+                    "path": str(child),
+                    "size": size,
+                })
+
     return {
         "package": package,
         "source": source_label,
-        "firebase_projects": configs,
+        "firebase_projects": [c["project_id"] for c in fb_configs],
+        "firebase_configs": fb_configs,
         "confirmed_secrets": [
-            {"type": s.type, "location": s.location}
+            {"type": s.type, "value": s.value, "location": s.location}
             for s in outcome.report.confirmed_secrets()
         ],
+        "suspected_secrets": [
+            {"type": s.type, "value": s.value, "location": s.location}
+            for s in outcome.report.suspected_secrets()
+        ],
         "suspected_secrets_count": len(outcome.report.suspected_secrets()),
+        "detected_technologies": {
+            tech: locs for tech, locs in outcome.report.techs.items()
+        },
         "vulnerabilities": list(outcome.report.vulnerabilities),
+        "active_probes": {
+            "rtdb": [
+                {
+                    "db_url": r.db_url,
+                    "public_read": r.public_read,
+                    "public_write": r.public_write,
+                    "error": r.error,
+                }
+                for r in outcome.rtdb_results
+            ],
+            "firestore": [
+                {
+                    "project_id": f.project_id,
+                    "public_read": f.public_read,
+                    "sample_document_count": f.sample_document_count,
+                    "error": f.error,
+                }
+                for f in outcome.firestore_results
+            ],
+            "storage": [
+                {
+                    "bucket": s.bucket,
+                    "public_listing": s.public_listing,
+                    "object_count": s.object_count,
+                    "error": s.error,
+                }
+                for s in outcome.storage_results
+            ],
+        },
         "findings": [
             {
                 "id": f.id,
@@ -518,10 +616,13 @@ async def _run_playintel_scan(
                 "severity": f.severity.value,
                 "category": f.category.value,
                 "location": f.location,
+                "evidence": f.evidence,
+                "remediation": f.remediation,
             }
             for f in findings
         ],
-        "saved_files_dir": str(outcome.saved_files_dir) if outcome.saved_files_dir else None,
+        "saved_files": saved_files,
+        "saved_files_dir": str(saved) if saved else None,
     }
 
 
