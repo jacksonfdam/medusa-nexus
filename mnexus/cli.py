@@ -118,8 +118,8 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/help",            "Show this table."),
         ("/doctor",          "Run engine health checks (live spinner)."),
         ("/scan <apk>",      "Static scan an APK file. Auto-detects package + version."),
-        ("/play-login",       "Write Play credentials (gmail + AAS token) to ~/.config/mnexus/playintel.ini."),
-        ("/play-scan <pkg>",  "Stream an APK from Google Play and scan for Firebase / credential leaks."),
+        ("/play-account <verb>", "Manage stored Play identities · list · add · use · delete · show."),
+        ("/play-scan <pkg>",     "Stream an APK from Google Play and scan for Firebase / credential leaks."),
         ("/projects",        "List stored projects with risk score + finding counts."),
         ("/use <id>",        "Set the active project for subsequent commands."),
         ("/findings [sev]",  "List findings on the active project (optional severity filter)."),
@@ -463,38 +463,94 @@ def _adb(state: ReplState, args: list[str]) -> None:
     console.print(Panel(out, title=f"[bold {style}]$ adb {' '.join(args)}[/bold {style}]", border_style=style, box=ROUNDED))
 
 
-def _play_login(state: ReplState, args: list[str]) -> None:
-    """`/play-login` — write playintel credentials.
+def _play_account(state: ReplState, args: list[str]) -> None:
+    """`/play-account <verb> [...]` — manage stored Play identities.
 
-    Two modes:
-        /play-login --email <gmail> --aas <existing-token>
-        /play-login --email <gmail> --password <password>   ← mints AAS via /auth
+    Verbs: add · list (ls) · use · delete (rm) · show.
 
-    Bare `/play-login` prompts interactively (password mode by default,
-    falling back to AAS if the user pastes a token starting with aas_).
+    Bare `/play-account` is treated as `list`. Names are
+    alphanumeric/-/_ only and unique; one account can be flagged
+    default and that's the one `/play-scan` uses when no `--account`
+    is given.
     """
+    verb = (args[0] if args else "list").lower()
+    rest = args[1:]
+
+    if verb in ("list", "ls"):
+        _play_account_list(state)
+    elif verb == "add":
+        _play_account_add(state, rest)
+    elif verb == "use":
+        _play_account_use(state, rest)
+    elif verb in ("delete", "rm"):
+        _play_account_delete(state, rest)
+    elif verb == "show":
+        _play_account_show(state, rest)
+    else:
+        console.print(
+            f"[red]unknown verb:[/red] {verb}  (try: list · add · use · delete · show)"
+        )
+
+
+def _play_account_list(state: ReplState) -> None:
+    accounts = state.nexus.db.list_play_accounts()
+    if not accounts:
+        console.print(
+            "[dim]no Play accounts stored. add one with [/dim]"
+            "[bold green]/play-account add --name <handle> --email <gmail> "
+            "--password <pw>[/bold green]"
+        )
+        return
+    table = Table(box=ROUNDED, border_style="dim cyan", show_header=True, header_style="bold magenta")
+    table.add_column("name", style="bold cyan", no_wrap=True)
+    table.add_column("email")
+    table.add_column("gsfid", style="dim")
+    table.add_column("notes", style="dim")
+    table.add_column("default", justify="center")
+    for a in accounts:
+        local, _, domain = a.email.partition("@")
+        masked_email = f"{local}@{domain}" if domain else a.email
+        table.add_row(
+            a.name,
+            masked_email,
+            "✓" if a.gsfid else "—",
+            (a.notes or "")[:40],
+            "★" if a.is_default else "",
+        )
+    console.print(table)
+
+
+def _play_account_add(state: ReplState, args: list[str]) -> None:
+    name = ""
     email = ""
     aas = ""
     password = ""
-    gsfid = ""
+    notes = ""
+    set_default = False
     it = iter(args)
     for tok in it:
-        if tok in ("--email", "-e"):
+        if tok in ("--name", "-n"):
+            name = next(it, "")
+        elif tok in ("--email", "-e"):
             email = next(it, "")
         elif tok in ("--aas", "-a"):
             aas = next(it, "")
         elif tok in ("--password", "-p"):
             password = next(it, "")
-        elif tok in ("--gsfid",):
-            gsfid = next(it, "")
+        elif tok in ("--notes",):
+            notes = next(it, "")
+        elif tok in ("--default", "-d"):
+            set_default = True
         else:
             console.print(f"[yellow]ignored arg:[/yellow] {tok}")
 
+    if not name:
+        name = Prompt.ask("[cyan]name[/cyan] (handle, e.g. research-1)").strip()
     if not email:
         email = Prompt.ask("[cyan]gmail[/cyan]").strip()
     if not aas and not password:
         secret = Prompt.ask(
-            "[cyan]aas_token[/cyan] (paste existing token, or leave empty to enter password)",
+            "[cyan]aas_token[/cyan] (paste existing, or leave empty to enter password)",
             password=True,
         ).strip()
         if secret.startswith("aas_") or len(secret) > 60:
@@ -504,14 +560,15 @@ def _play_login(state: ReplState, args: list[str]) -> None:
                 "[cyan]google password[/cyan] (or app password if 2FA is on)",
                 password=True,
             ).strip()
-    if not email or not (aas or password):
-        console.print("[red]email and one of (aas, password) are required[/red]")
+    if not name or not email or not (aas or password):
+        console.print("[red]name, email, and one of (aas, password) are required[/red]")
         return
 
+    from mnexus.models.play_account import PlayAccount
     from mnexus.playintel.play_client import PlayAuthError, PlayCredentials
 
     if aas:
-        creds = PlayCredentials(email=email, aas_token=aas, gsfid=gsfid)
+        token = aas
     else:
         spinner = Spinner("dots", text=Text("minting AAS token via /auth…", style="cyan"))
         try:
@@ -520,18 +577,80 @@ def _play_login(state: ReplState, args: list[str]) -> None:
         except PlayAuthError as e:
             console.print(f"[red]login failed:[/red] {e}")
             return
-        if gsfid:
-            creds.gsfid = gsfid
+        token = creds.aas_token
 
-    out = creds.save()
-    console.print(f"[green]✓ wrote credentials → [/green]{out}")
+    # If this is the first stored account, promote it to default
+    # automatically — saves a second `use` step on the happy path.
+    existing = state.nexus.db.list_play_accounts()
+    if not existing:
+        set_default = True
+
+    try:
+        account = PlayAccount(
+            name=name,
+            email=email,
+            aas_token=token,
+            notes=notes,
+            is_default=set_default,
+        )
+    except ValueError as e:
+        console.print(f"[red]invalid input:[/red] {e}")
+        return
+
+    state.nexus.db.save_play_account(account)
+    console.print(
+        f"[green]✓ stored[/green] [bold cyan]{name}[/bold cyan]"
+        + (" [magenta]·  default[/magenta]" if set_default else "")
+    )
     if not aas:
         console.print(
             "[dim]Minted AAS token from password; the password itself was not stored.[/dim]"
         )
     console.print(
-        "[dim]Run [bold]/play-scan <package>[/bold] to verify. "
-        "First call mints a GSFID via /checkin if you didn't provide one.[/dim]"
+        "[dim]Run [bold]/play-scan <package>[/bold] to verify (first call "
+        "mints a GSFID via /checkin and persists it back to the row).[/dim]"
+    )
+
+
+def _play_account_use(state: ReplState, args: list[str]) -> None:
+    if not args:
+        console.print("[red]usage:[/red] /play-account use <name>")
+        return
+    name = args[0]
+    if state.nexus.db.set_default_play_account(name):
+        console.print(f"[green]✓ default →[/green] [bold cyan]{name}[/bold cyan]")
+    else:
+        console.print(f"[red]no Play account named:[/red] {name}")
+
+
+def _play_account_delete(state: ReplState, args: list[str]) -> None:
+    if not args:
+        console.print("[red]usage:[/red] /play-account delete <name>")
+        return
+    name = args[0]
+    if state.nexus.db.delete_play_account(name):
+        console.print(f"[green]✓ deleted[/green] [bold cyan]{name}[/bold cyan]")
+    else:
+        console.print(f"[yellow]nothing to delete:[/yellow] {name}")
+
+
+def _play_account_show(state: ReplState, args: list[str]) -> None:
+    if not args:
+        console.print("[red]usage:[/red] /play-account show <name>")
+        return
+    account = state.nexus.db.get_play_account(args[0])
+    if account is None:
+        console.print(f"[red]no Play account named:[/red] {args[0]}")
+        return
+    redacted = account.redact()
+    body = "\n".join(f"[cyan]{k}:[/cyan] {v}" for k, v in redacted.items())
+    console.print(
+        Panel(
+            body,
+            title=f"[bold cyan]🔑 {account.name}[/bold cyan]",
+            border_style="cyan",
+            box=ROUNDED,
+        )
     )
 
 
@@ -546,12 +665,17 @@ def _play_scan(state: ReplState, args: list[str]) -> None:
     package = args[0]
     apk_override: Path | None = None
     run_probes = True
+    account_name: str | None = None
     it = iter(args[1:])
     for tok in it:
         if tok in ("--apk", "-a"):
             val = next(it, "")
             if val:
                 apk_override = Path(val).expanduser()
+        elif tok in ("--account", "-A"):
+            val = next(it, "")
+            if val:
+                account_name = val
         elif tok in ("--no-probes",):
             run_probes = False
         else:
@@ -567,14 +691,20 @@ def _play_scan(state: ReplState, args: list[str]) -> None:
         source_label = f"local:{apk_override.name}"
     else:
         try:
-            play_source = PlayProtocolSource()
+            play_source = PlayProtocolSource(
+                account_name=account_name, store=state.nexus.db
+            )
             source = play_source
-            source_label = "play"
+            source_label = (
+                f"play:{play_source._client.credentials.account_name}"  # noqa: SLF001
+                if play_source._client.credentials.account_name  # noqa: SLF001
+                else "play"
+            )
         except PlayAuthError as e:
             console.print(f"[red]Play auth failed:[/red] {e}")
             console.print(
-                "[dim]Configure ~/.config/apkeep/apkeep.ini with your Gmail + AAS token, "
-                "or pass --apk <local-file>.[/dim]"
+                "[dim]Add an account with [bold]/play-account add[/bold] "
+                "or pass [bold]--apk <local-file>[/bold].[/dim]"
             )
             return
 
@@ -778,8 +908,9 @@ SLASH_COMMANDS = {
     "help":      _help,
     "doctor":    _doctor,
     "scan":      _scan,
-    "play-login": _play_login,
-    "play-scan": _play_scan,
+    "play-account":  _play_account,
+    "play-accounts": _play_account,  # alias matches the noun-phrase reflex
+    "play-scan":     _play_scan,
     "projects":  _projects,
     "use":       _use,
     "findings":  _findings,
@@ -966,39 +1097,97 @@ def scan(ctx: click.Context, apk_path: Path, package_name: str, version_name: st
     _scan(state, args)
 
 
-@cli.command(name="play-login", help="Write Play credentials to ~/.config/mnexus/playintel.ini. Pass --password to mint an AAS token from email + password.")
-@click.option("--email", "-e", required=True, help="Gmail address tied to the Play account.")
-@click.option("--aas", "-a", "aas_token", default="", help="AAS master token (long-lived). Omit to use --password mode.")
-@click.option("--password", "-p", default="", help="Google password / app password — exchanged for an AAS token via /auth (the password itself is not stored).")
-@click.option("--gsfid", default="", help="Optional Google Services Framework ID; minted by /checkin if omitted.")
+@cli.group(name="play-account", help="Manage stored Play identities (the account manager that backs `play-scan`).")
+def play_account_group() -> None:
+    """Subcommand group: add / list / use / delete / show."""
+
+
+@play_account_group.command("add", help="Register a Play identity. Pass --password to mint the AAS token from email+password.")
+@click.option("--name", "-n", required=True, help="Short handle for this identity (alphanumeric / - / _ only).")
+@click.option("--email", "-e", required=True, help="Gmail address tied to the account.")
+@click.option("--aas", "-a", "aas_token", default="", help="AAS master token. Omit to use --password mode.")
+@click.option("--password", "-p", default="", help="Password / app password; minted to AAS via /auth and not stored.")
+@click.option("--notes", default="", help="Free-form note (e.g. 'qa rig', 'research-2026-q2').")
+@click.option("--default/--no-default", default=False, help="Mark this account as the default for /play-scan.")
 @click.pass_context
-def play_login(ctx: click.Context, email: str, aas_token: str, password: str, gsfid: str) -> None:
+def play_account_add(
+    ctx: click.Context,
+    name: str,
+    email: str,
+    aas_token: str,
+    password: str,
+    notes: str,
+    default: bool,
+) -> None:
     if not aas_token and not password:
         click.echo("error: pass either --aas <token> or --password <pwd>", err=True)
         ctx.exit(2)
     state = ReplState(ctx.obj["config"])
-    args = ["--email", email]
+    args = ["--name", name, "--email", email]
     if aas_token:
         args += ["--aas", aas_token]
     if password:
         args += ["--password", password]
-    if gsfid:
-        args += ["--gsfid", gsfid]
-    _play_login(state, args)
+    if notes:
+        args += ["--notes", notes]
+    if default:
+        args.append("--default")
+    _play_account_add(state, args)
+
+
+@play_account_group.command("list", help="Show stored Play identities (no token values are echoed).")
+@click.pass_context
+def play_account_list(ctx: click.Context) -> None:
+    state = ReplState(ctx.obj["config"])
+    _play_account_list(state)
+
+
+@play_account_group.command("use", help="Mark <name> as the default account for /play-scan.")
+@click.argument("name")
+@click.pass_context
+def play_account_use(ctx: click.Context, name: str) -> None:
+    state = ReplState(ctx.obj["config"])
+    _play_account_use(state, [name])
+
+
+@play_account_group.command("delete", help="Remove a stored account by name.")
+@click.argument("name")
+@click.pass_context
+def play_account_delete(ctx: click.Context, name: str) -> None:
+    state = ReplState(ctx.obj["config"])
+    _play_account_delete(state, [name])
+
+
+@play_account_group.command("show", help="Show one account's metadata (token is redacted).")
+@click.argument("name")
+@click.pass_context
+def play_account_show(ctx: click.Context, name: str) -> None:
+    state = ReplState(ctx.obj["config"])
+    _play_account_show(state, [name])
 
 
 @cli.command(name="play-scan", help="Stream an APK from Google Play and scan for Firebase / credential leaks.")
 @click.argument("package", type=str)
 @click.option("--apk", "apk_path", type=click.Path(path_type=Path), default=None,
               help="Local APK file to scan instead of fetching from Play.")
+@click.option("--account", "-A", "account_name", default="",
+              help="Stored Play identity to scan as (default: the one flagged default).")
 @click.option("--no-probes", is_flag=True, default=False,
               help="Skip the active Firebase / Firestore / Storage probes (offline mode).")
 @click.pass_context
-def play_scan(ctx: click.Context, package: str, apk_path: Path | None, no_probes: bool) -> None:
+def play_scan(
+    ctx: click.Context,
+    package: str,
+    apk_path: Path | None,
+    account_name: str,
+    no_probes: bool,
+) -> None:
     state = ReplState(ctx.obj["config"])
     args = [package]
     if apk_path:
         args += ["--apk", str(apk_path)]
+    if account_name:
+        args += ["--account", account_name]
     if no_probes:
         args.append("--no-probes")
     _play_scan(state, args)
