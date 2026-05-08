@@ -273,11 +273,13 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
 
         {"package": "com.example",
          "apk_path": "/optional/local.apk",   # bypass Play streaming
+         "account_name": "research-1",        # stored identity to use
          "run_active_probes": true}
 
     When ``apk_path`` is provided and exists, the local file is the
-    bytes source. Otherwise the native Play protocol client is used;
-    503 if no credentials are configured.
+    bytes source. Otherwise the native Play protocol client is used
+    against the named account (or the default if none given); 503 if
+    no accounts are stored.
     """
     nexus: MedusaNexus = app.state.nexus
     package = (payload.get("package") or "").strip()
@@ -285,6 +287,7 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(400, "package required")
     run_probes = bool(payload.get("run_active_probes", False))
     apk_override = payload.get("apk_path")
+    account_name = (payload.get("account_name") or "").strip() or None
 
     from mnexus.playintel.apk_source import LocalAPKSource, PlayProtocolSource
     from mnexus.playintel.play_client import PlayAuthError
@@ -298,15 +301,18 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
         source_label = f"local:{p.name}"
     else:
         try:
-            play_source = PlayProtocolSource()
+            play_source = PlayProtocolSource(
+                account_name=account_name, store=nexus.db
+            )
         except PlayAuthError as e:
             raise HTTPException(
                 503,
-                f"Play auth failed: {e}. Provide `apk_path` or run "
-                "`mnexus play-login`.",
+                f"Play auth failed: {e}. Provide `apk_path` or register an "
+                "account via POST /v1/playintel/accounts.",
             ) from e
         source = play_source
-        source_label = "play"
+        bound_name = play_source._client.credentials.account_name  # noqa: SLF001
+        source_label = f"play:{bound_name}" if bound_name else "play"
 
     try:
         return await _run_playintel_scan(nexus, package, source, source_label, run_probes)
@@ -373,6 +379,106 @@ async def playintel_scan_upload(
         f"upload:{file.filename}",
         bool(run_active_probes),
     )
+
+
+# ─── Play account manager ────────────────────────────────────────────────
+
+
+@app.get("/v1/playintel/accounts")
+async def playintel_accounts_list() -> dict[str, Any]:
+    """Return every stored Play account in redacted form (no AAS tokens).
+
+    Shape::
+
+        {"accounts": [{name, email_local, email_domain, gsfid_present,
+                       locale, notes, is_default, created_at, updated_at}, …],
+         "default": "research-1"}
+    """
+    nexus: MedusaNexus = app.state.nexus
+    rows = nexus.db.list_play_accounts()
+    return {
+        "accounts": [a.redact() for a in rows],
+        "default": next((a.name for a in rows if a.is_default), None),
+    }
+
+
+@app.post("/v1/playintel/accounts")
+async def playintel_accounts_create(payload: dict[str, Any]) -> dict[str, Any]:
+    """Register a new Play identity.
+
+    Body::
+
+        {"name": "research-1",
+         "email": "me@gmail.com",
+         "aas_token": "aas_et/...",     # optional
+         "password":  "...",            # optional, exchanged for AAS via /auth
+         "notes":     "...",            # optional
+         "is_default": true}            # optional
+
+    Exactly one of ``aas_token`` / ``password`` must be present. The
+    password (if given) is exchanged for an AAS token via /auth and
+    discarded — never stored. Returns the redacted account on success.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    name = (payload.get("name") or "").strip()
+    email = (payload.get("email") or "").strip()
+    aas_token = (payload.get("aas_token") or "").strip()
+    password = payload.get("password") or ""
+    notes = payload.get("notes") or ""
+    is_default = bool(payload.get("is_default", False))
+
+    if not name or not email:
+        raise HTTPException(400, "name and email are required")
+    if bool(aas_token) == bool(password):
+        raise HTTPException(400, "exactly one of aas_token or password is required")
+
+    from mnexus.models.play_account import PlayAccount
+    from mnexus.playintel.play_client import PlayAuthError, PlayCredentials
+
+    if password:
+        try:
+            creds = PlayCredentials.from_password(email, password)
+        except PlayAuthError as e:
+            raise HTTPException(401, f"Google rejected credentials: {e}") from e
+        token = creds.aas_token
+    else:
+        token = aas_token
+
+    if not nexus.db.list_play_accounts():
+        # First account auto-promotes to default — saves a follow-up
+        # call from the UI.
+        is_default = True
+
+    try:
+        account = PlayAccount(
+            name=name,
+            email=email,
+            aas_token=token,
+            notes=notes,
+            is_default=is_default,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    nexus.db.save_play_account(account)
+    return {"account": account.redact()}
+
+
+@app.delete("/v1/playintel/accounts/{name}")
+async def playintel_accounts_delete(name: str) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    if nexus.db.delete_play_account(name):
+        return {"deleted": name}
+    raise HTTPException(404, f"no Play account named '{name}'")
+
+
+@app.post("/v1/playintel/accounts/{name}/default")
+async def playintel_accounts_set_default(name: str) -> dict[str, Any]:
+    """Promote ``{name}`` to the default account used by /v1/playintel/scan."""
+    nexus: MedusaNexus = app.state.nexus
+    if not nexus.db.set_default_play_account(name):
+        raise HTTPException(404, f"no Play account named '{name}'")
+    return {"default": name}
 
 
 async def _run_playintel_scan(
