@@ -293,12 +293,16 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
     from mnexus.playintel.play_client import PlayAuthError
 
     play_source: PlayProtocolSource | None = None
+    local_apk_path: Path | None = None
+    apk_sha256_value = ""
     if apk_override:
         p = Path(str(apk_override)).expanduser()
         if not p.exists():
             raise HTTPException(400, f"apk_path not found: {p}")
         source = LocalAPKSource(p)
         source_label = f"local:{p.name}"
+        local_apk_path = p
+        apk_sha256_value = _hash_apk_file(p)
     else:
         try:
             play_source = PlayProtocolSource(
@@ -315,7 +319,15 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
         source_label = f"play:{bound_name}" if bound_name else "play"
 
     try:
-        return await _run_playintel_scan(nexus, package, source, source_label, run_probes)
+        return await _run_playintel_scan(
+            nexus,
+            package,
+            source,
+            source_label,
+            run_probes,
+            apk_sha256=apk_sha256_value,
+            local_apk_path=local_apk_path,
+        )
     finally:
         if play_source is not None:
             play_source.close()
@@ -379,7 +391,26 @@ async def playintel_scan_upload(
         source,
         f"upload:{file.filename}",
         bool(run_active_probes),
+        apk_sha256=sha,                 # already computed during the streaming upload
+        local_apk_path=final_path,
     )
+
+
+def _hash_apk_file(path: Path) -> str:
+    """Stream-hash a local APK so the history record can carry sha256.
+
+    Avoids buffering the whole file in memory — APKs over 100 MB are
+    common. Returns "" on any IO error so the caller can still proceed
+    without the hash.
+    """
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
 
 
 def _detect_package(apk_path: Path, original_filename: str) -> str:
@@ -400,6 +431,46 @@ def _detect_package(apk_path: Path, original_filename: str) -> str:
         pass
     stem = Path(original_filename).stem
     return stem or "unknown.package"
+
+
+# ─── Play scan history ───────────────────────────────────────────────────
+
+
+@app.get("/v1/playintel/scans")
+async def playintel_scans_list(
+    package: str | None = None, limit: int = 100
+) -> dict[str, Any]:
+    """List previous PlayIntel scans, recent-first.
+
+    Optional ``package`` query filter narrows to one app's history;
+    ``limit`` is server-clamped to [1, 1000]. Returned rows carry the
+    denormalised counts only — fetch ``/scans/{id}`` for the full
+    payload.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    rows = nexus.db.list_play_scans(package=package, limit=limit)
+    return {
+        "scans": [r.summary() for r in rows],
+        "count": len(rows),
+    }
+
+
+@app.get("/v1/playintel/scans/{scan_id}")
+async def playintel_scans_get(scan_id: str) -> dict[str, Any]:
+    """Full payload + summary for one historical scan."""
+    nexus: MedusaNexus = app.state.nexus
+    record = nexus.db.get_play_scan(scan_id)
+    if record is None:
+        raise HTTPException(404, f"no scan with id '{scan_id}'")
+    return {**record.summary(), "payload": record.payload}
+
+
+@app.delete("/v1/playintel/scans/{scan_id}")
+async def playintel_scans_delete(scan_id: str) -> dict[str, Any]:
+    nexus: MedusaNexus = app.state.nexus
+    if nexus.db.delete_play_scan(scan_id):
+        return {"deleted": scan_id}
+    raise HTTPException(404, f"no scan with id '{scan_id}'")
 
 
 # ─── Play account manager ────────────────────────────────────────────────
@@ -508,6 +579,9 @@ async def _run_playintel_scan(
     source,  # type: ignore[no-untyped-def]
     source_label: str,
     run_active_probes: bool,
+    *,
+    apk_sha256: str = "",
+    local_apk_path: Path | None = None,
 ) -> dict[str, Any]:
     """Shared invoke + serialize body used by both playintel endpoints.
 
@@ -516,6 +590,12 @@ async def _run_playintel_scan(
     detected technology, the saved-files manifest, and the per-probe
     outcome — so the UI can render the same level of detail the CLI
     produces with `mnexus play-scan`.
+
+    Persists a PlayScanRecord row to the history table on success.
+    ``local_apk_path``, when provided, is used to extract the APK's
+    versionName / versionCode for the history entry; for Play
+    streaming runs this is None and the record is saved without
+    version metadata.
     """
     from mnexus.engines.play_intel_engine import PlayIntelEngine
     from mnexus.playintel.analyzer import unique_firebase_configs
@@ -562,9 +642,31 @@ async def _run_playintel_scan(
                     "size": size,
                 })
 
-    return {
+    # Try to pull versionName / versionCode out of the manifest when we
+    # have a local file on disk. For Play streaming runs we don't, and
+    # the history record stays version-less — still has package +
+    # timestamp + counts which is the bulk of the value.
+    version_name = ""
+    version_code = 0
+    if local_apk_path is not None and local_apk_path.exists():
+        try:
+            from mnexus.engines.apktool_engine import APKToolEngine
+            ak = APKToolEngine(nexus.config)
+            meta = ak.parse_apk(local_apk_path)
+            version_name = (meta.get("version_name") or "").strip()
+            try:
+                version_code = int(meta.get("version_code") or 0)
+            except (TypeError, ValueError):
+                version_code = 0
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
+
+    payload = {
         "package": package,
         "source": source_label,
+        "version_name": version_name,
+        "version_code": version_code,
+        "apk_sha256": apk_sha256,
         "firebase_projects": [c["project_id"] for c in fb_configs],
         "firebase_configs": fb_configs,
         "confirmed_secrets": [
@@ -624,6 +726,33 @@ async def _run_playintel_scan(
         "saved_files": saved_files,
         "saved_files_dir": str(saved) if saved else None,
     }
+
+    # Persist the history row — best-effort, never let a save failure
+    # poison the response the caller is waiting for.
+    try:
+        from mnexus.models.play_scan import PlayScanRecord
+        record = PlayScanRecord(
+            package=package,
+            version_name=version_name,
+            version_code=version_code,
+            source=source_label.split(":", 1)[0],
+            source_label=source_label,
+            apk_sha256=apk_sha256,
+            firebase_project_count=len(fb_configs),
+            confirmed_secrets_count=len(outcome.report.confirmed_secrets()),
+            suspected_secrets_count=len(outcome.report.suspected_secrets()),
+            vulnerability_count=len(outcome.report.vulnerabilities),
+            findings_count=len(findings),
+            saved_files_count=len(saved_files),
+            payload=payload,
+        )
+        nexus.db.save_play_scan(record)
+        payload["scan_id"] = record.id
+        payload["scanned_at"] = record.scanned_at.isoformat()
+    except Exception as exc:  # noqa: BLE001
+        payload["history_save_error"] = f"{exc.__class__.__name__}: {exc}"
+
+    return payload
 
 
 @app.post("/v1/ipas/upload")
