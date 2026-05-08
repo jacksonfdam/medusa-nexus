@@ -8,10 +8,13 @@ assessment with you.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from mnexus.models.play_account import PlayAccount
 from mnexus.models.project import Project
 
 
@@ -24,6 +27,11 @@ class ArtifactStore:
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
+        # Sensitive credentials live in this file; restrict perms.
+        try:
+            os.chmod(db_path, 0o600)
+        except OSError:
+            pass
 
     def _init_schema(self) -> None:
         self._conn.executescript(
@@ -61,6 +69,23 @@ class ArtifactStore:
 
             CREATE INDEX IF NOT EXISTS idx_findings_project ON findings(project_id);
             CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
+
+            CREATE TABLE IF NOT EXISTS play_accounts (
+                name TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                aas_token TEXT NOT NULL,
+                gsfid TEXT NOT NULL DEFAULT '',
+                locale TEXT NOT NULL DEFAULT 'en-US',
+                notes TEXT NOT NULL DEFAULT '',
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            -- Enforce at most one default — the application layer also
+            -- normalises this (clear-then-set) but the constraint is the
+            -- belt that keeps the DB honest under concurrent writes.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_play_accounts_one_default
+                ON play_accounts(is_default) WHERE is_default = 1;
             """
         )
         # Migration: add `platform` column to legacy projects tables that
@@ -135,5 +160,120 @@ class ArtifactStore:
         )
         self._conn.commit()
 
+    # ─── play accounts ───
+
+    def save_play_account(self, account: PlayAccount) -> None:
+        """Insert or update a stored Play identity.
+
+        If ``account.is_default`` is true, every other account is
+        demoted first so the partial unique index above never gets
+        violated. The ``updated_at`` is bumped to now on every write.
+        """
+        account.updated_at = datetime.now(UTC)
+        with self._conn:
+            if account.is_default:
+                self._conn.execute(
+                    "UPDATE play_accounts SET is_default = 0 WHERE name != ?",
+                    (account.name,),
+                )
+            self._conn.execute(
+                """
+                INSERT INTO play_accounts
+                    (name, email, aas_token, gsfid, locale, notes,
+                     is_default, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    email = excluded.email,
+                    aas_token = excluded.aas_token,
+                    gsfid = excluded.gsfid,
+                    locale = excluded.locale,
+                    notes = excluded.notes,
+                    is_default = excluded.is_default,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    account.name,
+                    account.email,
+                    account.aas_token,
+                    account.gsfid,
+                    account.locale,
+                    account.notes,
+                    int(account.is_default),
+                    account.created_at.isoformat(),
+                    account.updated_at.isoformat(),
+                ),
+            )
+
+    def get_play_account(self, name: str) -> PlayAccount | None:
+        row = self._conn.execute(
+            "SELECT * FROM play_accounts WHERE name = ?", (name,)
+        ).fetchone()
+        return _row_to_account(row) if row else None
+
+    def get_default_play_account(self) -> PlayAccount | None:
+        row = self._conn.execute(
+            "SELECT * FROM play_accounts WHERE is_default = 1 LIMIT 1"
+        ).fetchone()
+        return _row_to_account(row) if row else None
+
+    def list_play_accounts(self) -> list[PlayAccount]:
+        rows = self._conn.execute(
+            "SELECT * FROM play_accounts ORDER BY is_default DESC, name ASC"
+        ).fetchall()
+        return [_row_to_account(r) for r in rows]
+
+    def set_default_play_account(self, name: str) -> bool:
+        """Promote ``name`` to default. Returns ``False`` if it doesn't exist."""
+        with self._conn:
+            cur = self._conn.execute(
+                "SELECT 1 FROM play_accounts WHERE name = ?", (name,)
+            )
+            if not cur.fetchone():
+                return False
+            self._conn.execute("UPDATE play_accounts SET is_default = 0")
+            self._conn.execute(
+                "UPDATE play_accounts SET is_default = 1, updated_at = ? WHERE name = ?",
+                (datetime.now(UTC).isoformat(), name),
+            )
+        return True
+
+    def delete_play_account(self, name: str) -> bool:
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM play_accounts WHERE name = ?", (name,)
+            )
+        return cur.rowcount > 0
+
+    def update_play_account_runtime_state(
+        self, name: str, *, gsfid: str | None = None
+    ) -> None:
+        """Persist runtime-discovered state (currently just a freshly minted
+        GSFID after /checkin). Touches updated_at so list views surface the
+        change.
+        """
+        if gsfid is None:
+            return
+        with self._conn:
+            self._conn.execute(
+                "UPDATE play_accounts SET gsfid = ?, updated_at = ? WHERE name = ?",
+                (gsfid, datetime.now(UTC).isoformat(), name),
+            )
+
     def close(self) -> None:
         self._conn.close()
+
+
+def _row_to_account(row: sqlite3.Row) -> PlayAccount:
+    """Adapt a sqlite Row into a PlayAccount; tolerates missing columns
+    only insofar as the schema migration ran first."""
+    return PlayAccount(
+        name=row["name"],
+        email=row["email"],
+        aas_token=row["aas_token"],
+        gsfid=row["gsfid"] or "",
+        locale=row["locale"] or "en-US",
+        notes=row["notes"] or "",
+        is_default=bool(row["is_default"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
