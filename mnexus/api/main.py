@@ -265,6 +265,80 @@ async def upload_apk(
     return await _ingest_upload(file, package, version)
 
 
+@app.post("/v1/playintel/scan")
+async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
+    """Stream-scan an Android package via the playintel engine.
+
+    Body: ``{"package": "com.example", "apk_path": "/optional/local.apk",
+    "run_active_probes": true}``.
+
+    When ``apk_path`` is provided and exists, the local file is the source
+    of bytes (no Play traffic). Otherwise the engine attempts the Play
+    bridge (``poc-firebase-google``); if that's unavailable the call
+    returns a 503.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    package = (payload.get("package") or "").strip()
+    if not package:
+        raise HTTPException(400, "package required")
+    run_probes = bool(payload.get("run_active_probes", False))
+    apk_override = payload.get("apk_path")
+
+    from mnexus.engines.play_intel_engine import PlayIntelEngine
+    from mnexus.playintel.apk_source import LocalAPKSource, PlayBinarySource
+
+    if apk_override:
+        p = Path(str(apk_override)).expanduser()
+        if not p.exists():
+            raise HTTPException(400, f"apk_path not found: {p}")
+        source = LocalAPKSource(p)
+        source_label = f"local:{p.name}"
+    else:
+        try:
+            source = PlayBinarySource(binary_path=nexus.config.playbin_path)
+        except FileNotFoundError as e:
+            raise HTTPException(
+                503,
+                f"no APK source available: {e}. Provide `apk_path` or install "
+                "the Play bridge binary (`poc-firebase-google`).",
+            ) from e
+        source_label = "play-bridge"
+
+    engine = PlayIntelEngine(nexus.config)
+    outcome, findings = await engine.analyze_package(
+        package,
+        source=source,
+        workspace=nexus.config.workspace,
+        run_active_probes=run_probes,
+    )
+
+    configs = sorted(
+        {c.project_id for c in outcome.report.firebase_configs if c.project_id}
+    )
+    return {
+        "package": package,
+        "source": source_label,
+        "firebase_projects": configs,
+        "confirmed_secrets": [
+            {"type": s.type, "location": s.location}
+            for s in outcome.report.confirmed_secrets()
+        ],
+        "suspected_secrets_count": len(outcome.report.suspected_secrets()),
+        "vulnerabilities": list(outcome.report.vulnerabilities),
+        "findings": [
+            {
+                "id": f.id,
+                "title": f.title,
+                "severity": f.severity.value,
+                "category": f.category.value,
+                "location": f.location,
+            }
+            for f in findings
+        ],
+        "saved_files_dir": str(outcome.saved_files_dir) if outcome.saved_files_dir else None,
+    }
+
+
 @app.post("/v1/ipas/upload")
 async def upload_ipa(
     file: UploadFile = File(...),

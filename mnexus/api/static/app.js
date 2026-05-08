@@ -398,6 +398,121 @@ function fmtBytes(n) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ *  SCREEN 04b — Play Scan (stream APK from CDN, scan Firebase config + secrets)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+function view_play_scan() {
+    return h`
+    <div class="main">
+      ${sectionHeader("P", "04b // PLAY SCAN", "STREAM + RECON · NO LOCAL APK NEEDED")}
+      <section class="panel">
+        <div class="panel-head"><span>// PACKAGE TARGET</span></div>
+        <div class="panel-body col" style="gap:10px">
+          <div class="row" style="gap:10px;flex-wrap:wrap">
+            <input id="ps-pkg" class="input t-mono" placeholder="com.example.app" style="flex:1;min-width:260px" />
+            <label class="row" style="gap:6px;align-items:center">
+              <input type="checkbox" id="ps-probes" />
+              <span class="muted small">run active Firebase probes (RTDB · Firestore · Storage)</span>
+            </label>
+            <button id="ps-go" class="btn primary">[ STREAM + SCAN ]</button>
+          </div>
+          <div class="muted small">
+            Streams only the central directory + the high-value zip entries (resources.arsc,
+            google-services.json, JS bundles) over HTTP Range. Recovers Firebase project IDs,
+            API keys, and credential patterns. Active probes test whether the discovered
+            project actually accepts anonymous reads/writes.
+          </div>
+          <div id="ps-status" class="muted small" style="min-height:18px"></div>
+        </div>
+      </section>
+      <section class="panel" id="ps-results-wrap" style="display:none">
+        <div class="panel-head"><span id="ps-result-title">// RESULTS</span></div>
+        <div class="panel-body col" id="ps-results" style="gap:14px"></div>
+      </section>
+    </div>`;
+}
+
+function mount_play_scan() {
+    const btn = $("#ps-go");
+    const pkg = $("#ps-pkg");
+    const probes = $("#ps-probes");
+    const status = $("#ps-status");
+    const wrap = $("#ps-results-wrap");
+    const out = $("#ps-results");
+    const title = $("#ps-result-title");
+    if (!btn) return;
+
+    pkg.addEventListener("keydown", (e) => { if (e.key === "Enter") btn.click(); });
+
+    btn.addEventListener("click", async () => {
+        const pkgName = (pkg.value || "").trim();
+        if (!pkgName) {
+            status.textContent = "package name required";
+            return;
+        }
+        btn.disabled = true;
+        status.textContent = `streaming + scanning ${pkgName}…`;
+        wrap.style.display = "none";
+        out.innerHTML = "";
+        try {
+            const resp = await fetch("/v1/playintel/scan", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ package: pkgName, run_active_probes: probes.checked }),
+            });
+            if (!resp.ok) {
+                const text = await resp.text();
+                status.textContent = `[${resp.status}] ${text.slice(0, 200)}`;
+                btn.disabled = false;
+                return;
+            }
+            const data = await resp.json();
+            renderPlayScanResults(out, title, data);
+            wrap.style.display = "";
+            status.textContent = `done · source: ${data.source}`;
+        } catch (e) {
+            status.textContent = `request failed: ${e.message || e}`;
+        } finally {
+            btn.disabled = false;
+        }
+    });
+}
+
+function renderPlayScanResults(out, title, data) {
+    title.textContent = `// ${data.package}  ·  ${data.source}`;
+    const sevColor = (s) => `var(--sev-${s})`;
+    const fbBlock = (data.firebase_projects || []).length
+        ? `<div class="t-mono">${data.firebase_projects.map((p) => `<div>▸ ${p}</div>`).join("")}</div>`
+        : `<div class="muted small">no Firebase project recovered</div>`;
+    const secretsBlock = (data.confirmed_secrets || []).length
+        ? `<table style="width:100%;border-collapse:collapse"><tbody>${
+            data.confirmed_secrets.map((s) => `
+              <tr><td class="t-mono" style="padding:4px 8px;color:var(--accent)">${s.type}</td>
+                  <td class="muted small" style="padding:4px 8px">${s.location}</td></tr>`).join("")
+        }</tbody></table>`
+        : `<div class="muted small">no confirmed credential patterns matched</div>`;
+    const vulnBlock = (data.vulnerabilities || []).length
+        ? `<div class="col" style="gap:4px">${data.vulnerabilities.map((v) => `<div class="t-mono" style="color:var(--sev-critical)">▸ ${v}</div>`).join("")}</div>`
+        : `<div class="muted small">no active-probe findings</div>`;
+    const findingsBlock = (data.findings || []).length
+        ? `<table style="width:100%;border-collapse:collapse"><tbody>${
+            data.findings.map((f) => `
+              <tr><td class="t-mono" style="padding:4px 8px;color:${sevColor(f.severity)};text-transform:uppercase">${f.severity}</td>
+                  <td style="padding:4px 8px">${f.title}</td>
+                  <td class="muted small" style="padding:4px 8px">${f.location || "—"}</td></tr>`).join("")
+        }</tbody></table>`
+        : `<div class="muted small">no findings emitted</div>`;
+    out.innerHTML = `
+        <div><div class="muted small uppercase" style="margin-bottom:4px">FIREBASE PROJECTS</div>${fbBlock}</div>
+        <div><div class="muted small uppercase" style="margin-bottom:4px">CONFIRMED SECRETS</div>${secretsBlock}</div>
+        <div><div class="muted small uppercase" style="margin-bottom:4px">ACTIVE PROBE FINDINGS</div>${vulnBlock}</div>
+        <div><div class="muted small uppercase" style="margin-bottom:4px">ENGINE FINDINGS · ${data.findings.length}</div>${findingsBlock}</div>
+        ${data.saved_files_dir ? `<div class="muted small">saved bearing files → <code>${data.saved_files_dir}</code></div>` : ""}
+        ${data.suspected_secrets_count ? `<div class="muted small">${data.suspected_secrets_count} suspected pattern hits — review manually (low precision tier)</div>` : ""}
+    `;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
  *  SCREEN 05 — Pull from Device
  * ═══════════════════════════════════════════════════════════════════════════ */
 function view_device_pull() {
@@ -4293,6 +4408,7 @@ const ROUTES = [
     { path: "dashboard",                        view: view_dashboard,         mount: mount_dashboard },
     { path: "projects",                         view: view_projects,          mount: mount_projects },
     { path: "scan",                             view: view_scan,              mount: async (ctx) => { mount_scan(); await mount_scan_after_upload_wiring(); } },
+    { path: "play-scan",                        view: view_play_scan,         mount: async () => { mount_play_scan(); } },
     { path: "devices",                          view: view_devices,           mount: mount_devices },
     { path: "adb",                              view: view_devices,           mount: mount_devices },  // alias of /devices
     { path: "device/pull",                      view: view_device_pull,       mount: mount_device_pull },
