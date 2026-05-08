@@ -7,6 +7,12 @@ a Python port of the internal Go scanner ``go-google-login``, integrated
 as a first-class head of the hydra alongside `apktool`, `jadx`, `mobsf`,
 `ghidra`, etc.
 
+**Pure Python, zero new runtime dependencies.** Everything — the Google
+Play protocol client, the protobuf wire-format codec, the resources.arsc
+parser, the secret-pattern engine, the active probes, and the
+email + password → AAS token crypto path — runs against the existing
+MedusaNexus dependency set (httpx + stdlib).
+
 ## What it does
 
 Given **either** a local APK file or a Google Play package name, the
@@ -57,7 +63,11 @@ mnexus/playintel/
 ├── zip_entry_scanner.py   # per-entry routing → ScanZipResult
 ├── scan_report.py         # thread-safe aggregator
 ├── firebase_probes.py     # RTDB / Firestore / Storage active probes
-├── apk_source.py          # pluggable: LocalAPKSource | DirectURLSource | PlayBinarySource
+├── protobuf_codec.py      # pure-Python protobuf wire-format encode/decode
+├── device_props.py        # Pixel 7a device fingerprint + checkin builder
+├── google_auth.py         # email + password → AAS token (RSA-OAEP-SHA1)
+├── play_client.py         # /auth + /checkin + /details + /purchase + /delivery
+├── apk_source.py          # pluggable: LocalAPKSource | DirectURLSource | PlayProtocolSource
 └── analyzer.py            # high-level orchestration → AnalysisOutcome
 
 mnexus/engines/play_intel_engine.py     # MedusaNexus engine wrapper
@@ -68,14 +78,66 @@ mnexus/engines/play_intel_engine.py     # MedusaNexus engine wrapper
 The analyzer never branches on where bytes come from. Three sources
 implement the same protocol:
 
-| Source              | Used for                                      | Notes |
-|---------------------|-----------------------------------------------|-------|
-| `LocalAPKSource`    | Any local `.apk` or `.xapk` file              | No network. Default for `ingest_apk` flow. |
-| `DirectURLSource`   | Pre-resolved CDN URL + size + headers         | When another tool already did Play protocol. |
-| `PlayBinarySource`  | Subprocess bridge to `poc-firebase-google`    | Full Play protocol via the Go reference binary; auth via `~/.config/apkeep/apkeep.ini`. |
+| Source                | Used for                                      | Notes |
+|-----------------------|-----------------------------------------------|-------|
+| `LocalAPKSource`      | Any local `.apk` or `.xapk` file              | No network. Default for `ingest_apk` flow. |
+| `DirectURLSource`     | Pre-resolved CDN URL + size + headers         | When another tool already did the Play handshake. |
+| `PlayProtocolSource`  | Native Google Play protocol                   | Pure-Python `PlayClient` — auth, checkin, details, purchase, delivery. Default for `play-scan`. |
 
-A future `PlayProtocolSource` implementing the protocol natively in
-Python is purely additive — same protocol, same downstream pipeline.
+### Native Play protocol stack
+
+`PlayProtocolSource` wraps `PlayClient`, a pure-Python implementation
+of the protocol:
+
+1. **Authentication** — POSTs `email + AAS token` to
+   `https://android.clients.google.com/auth` form-encoded. Parses the
+   `Auth=` / `Expiry=` lines from the text response. The bearer token
+   is cached and refreshed 5 minutes before expiry.
+2. **Device check-in** — first run only. POSTs an
+   `AndroidCheckinRequest` protobuf to `/checkin`; the response's
+   `androidId` (fixed64 field 7) is the freshly minted GSFID, persisted
+   back into `playintel.ini` for future runs.
+3. **Details** — `GET /fdfe/details?doc=<pkg>` and walks the response
+   ResponseWrapper → Payload → DetailsResponse → Item → DocumentDetails
+   → AppDetails to extract `versionCode`.
+4. **Purchase** — `POST /fdfe/purchase` (free apps still require this)
+   to obtain an `encodedDeliveryToken`.
+5. **Delivery** — `GET /fdfe/delivery` returns the signed CDN URL plus
+   any splits and OBB additional files.
+
+Protobuf encoding/decoding is handled by the bundled `protobuf_codec`
+module — no `protobuf` runtime dependency. The codec is the
+foundational primitive: ~250 lines covering wire types 0/1/2/5,
+varint encoding (including 64-bit two's-complement for negative ints),
+zigzag, MGF1-friendly fixed-width reads, repeated-field iteration, and
+a `find_path` helper that walks length-delimited sub-message chains.
+
+### Authentication setup
+
+PlayIntel reads credentials in this priority order:
+
+1. Env vars `PLAYINTEL_EMAIL` + `PLAYINTEL_AAS_TOKEN`
+   (optionally `PLAYINTEL_GSFID`, `PLAYINTEL_LOCALE`).
+2. `~/.config/mnexus/playintel.ini` — the canonical location.
+3. `~/.config/apkeep/apkeep.ini` — legacy / compat fallback.
+
+The file is in apkeep INI format::
+
+    [google]
+    username = me@gmail.com
+    aas_token = aas_et/...
+    gsfid = 1234567890abcdef     # optional; minted by /checkin if absent
+    locale = en-US
+
+`mnexus play-login` writes this file. Two modes:
+
+* `--aas <token>` — paste an AAS token you already have.
+* `--password <pw>` — the password is exchanged for an AAS token via
+  `/auth` (using RSA-OAEP-SHA1 against Google's GMS public key, all in
+  pure Python). The password itself is never written to disk; only the
+  resulting `aas_et/...` token is persisted. Works with regular Google
+  passwords; if 2FA is enabled, use an
+  [app password](https://myaccount.google.com/apppasswords).
 
 ### Findings
 
@@ -102,19 +164,27 @@ that's enforced at construction time by `Finding.model_validator`.
   That path requires a working anonymous-auth provider on the target
   project (or a leaked OAuth client secret) and is left to a future
   iteration.
-- **Implement the Google Play protocol natively.** The
-  `PlayBinarySource` shells out to the existing Go binary for the
-  auth + GetDownloadInfo dance. Implementing the protobuf-based
-  protocol in Python is a separate, sizeable piece of work.
 - **Touch user data.** The RTDB write probe is the only mutating
   call, targets a dedicated child path, and self-cleans on success.
   Firestore and Storage probes are read-only.
 
 ## Usage
 
+### One-time setup (Play streaming)
+
+```
+mnexus play-login --email me@gmail.com --password '<password>'
+# or, if you already have an AAS token from elsewhere:
+mnexus play-login --email me@gmail.com --aas 'aas_et/...'
+```
+
+Writes `~/.config/mnexus/playintel.ini` with mode 0600. The password is
+exchanged for an AAS token and discarded.
+
 ### CLI — interactive REPL (slash command)
 
 ```
+🔱 nexus ❯ /play-login            # interactive prompt for email + secret
 🔱 nexus ❯ /play-scan com.example.app
 ```
 
