@@ -84,7 +84,7 @@ class APKToolEngine(BaseEngine):
 
     async def execute(self, context: AnalysisContext) -> list[Finding]:
         """Parse the APK's manifest + zip listing, populate context.extras, emit findings."""
-        meta = self.parse_apk(context.apk_path)
+        meta = await self.parse_apk_with_fallback(context.apk_path)
         if context.extras is None:
             context.extras = {}
         context.extras["apk_meta"] = meta
@@ -269,8 +269,14 @@ class APKToolEngine(BaseEngine):
         return meta
 
     async def extract_manifest(self, apk_path: Path) -> dict[str, str]:
-        """Fast path for the upload flow — just package + version."""
-        meta = self.parse_apk(apk_path)
+        """Fast path for the upload flow — just package + version.
+
+        Routes through :meth:`parse_apk_with_fallback` so callers
+        benefit from the apktool-binary fallback transparently when
+        the built-in AXML decoder hits an entry layout it doesn't
+        cover (Android 14+ compact entries, custom obfuscation, …).
+        """
+        meta = await self.parse_apk_with_fallback(apk_path)
         if not meta.get("package"):
             return {}
         return {
@@ -280,6 +286,88 @@ class APKToolEngine(BaseEngine):
             "min_sdk": meta.get("min_sdk", "") or "",
             "target_sdk": meta.get("target_sdk", "") or "",
         }
+
+    async def parse_apk_with_fallback(self, apk_path: Path) -> dict[str, Any]:
+        """``parse_apk`` + opt-in apktool-binary fallback.
+
+        The built-in :meth:`parse_apk` is best-effort — its ``_decode_axml``
+        covers the typical AXML layouts but loses on a long tail of
+        modern apps (Android 14+ compact entries, obfuscated string
+        pools, manifests stamped with custom plugin tags). When the
+        built-in returns a meta with no ``package`` field AND the
+        ``apktool`` binary is on PATH, we shell out to it to extract a
+        plain-XML manifest and re-merge the recovered fields.
+
+        Costs a few seconds per fallback (apktool's first-run JVM
+        warm-up + resource decode) but only pays it when the cheap path
+        actually failed. No-ops cleanly when apktool isn't installed —
+        the analyst gets the same empty meta they'd have gotten before
+        and the rest of the pipeline still runs.
+        """
+        meta = self.parse_apk(apk_path)
+        if meta.get("package"):
+            return meta
+        apktool_bin = shutil.which(self.config.apktool_path)
+        if not apktool_bin:
+            return meta
+        recovered = await self._apktool_extract_manifest(apktool_bin, apk_path)
+        if not recovered:
+            return meta
+        # Fold the recovered structured fields into meta. Native libs +
+        # zip listing came from parse_apk's zip walk and stay as is —
+        # apktool doesn't touch them. Manifest-derived fields (package,
+        # versions, sdk levels, components, deeplinks, permissions,
+        # debuggable / allow_backup / cleartext flags) get refreshed.
+        for key, value in recovered.items():
+            if value:
+                meta[key] = value
+        meta["_manifest_source"] = "apktool-fallback"
+        return meta
+
+    async def _apktool_extract_manifest(
+        self, apktool_bin: str, apk_path: Path
+    ) -> dict[str, Any]:
+        """Run ``apktool d -s -f -o <tmp> <apk>`` and re-parse the
+        resulting plain-XML AndroidManifest. Returns ``{}`` on any
+        failure (timeout, non-zero exit, no manifest emitted, parse
+        failure)."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="mnexus-apktool-") as tmp:
+            out_dir = Path(tmp) / "decoded"
+            cmd = [
+                apktool_bin, "d",
+                "-s",            # skip sources (resources only — we just want the manifest)
+                "-f",            # overwrite if out_dir already exists
+                "-o", str(out_dir),
+                str(apk_path),
+            ]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except OSError:
+                return {}
+            try:
+                _stdout, _stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=120.0
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return {}
+            if proc.returncode != 0:
+                return {}
+            manifest_path = out_dir / "AndroidManifest.xml"
+            if not manifest_path.is_file():
+                return {}
+            try:
+                blob = manifest_path.read_bytes()
+            except OSError:
+                return {}
+            return _parse_manifest(blob)
 
     async def decode(self, apk_path: Path, output_dir: Path) -> Path:
         """Full apktool decode — only available when the binary is installed."""
