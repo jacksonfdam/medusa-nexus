@@ -112,32 +112,65 @@ varint encoding (including 64-bit two's-complement for negative ints),
 zigzag, MGF1-friendly fixed-width reads, repeated-field iteration, and
 a `find_path` helper that walks length-delimited sub-message chains.
 
-### Authentication setup
+### Account manager
 
-PlayIntel reads credentials in this priority order:
+PlayIntel ships a proper account manager — multiple Play identities
+can be stored side-by-side, one is marked default, and the
+``/play-scan`` calls pick which to use via ``--account <name>`` /
+``account_name`` JSON field. The store is the same SQLite that holds
+projects and findings (``play_accounts`` table; the file is chmod 0600
+on init since AAS tokens are sensitive at rest).
 
-1. Env vars `PLAYINTEL_EMAIL` + `PLAYINTEL_AAS_TOKEN`
-   (optionally `PLAYINTEL_GSFID`, `PLAYINTEL_LOCALE`).
-2. `~/.config/mnexus/playintel.ini` — the canonical location.
-3. `~/.config/apkeep/apkeep.ini` — legacy / compat fallback.
+Identity precedence when no explicit name is given:
 
-The file is in apkeep INI format::
+1. Account flagged ``is_default`` in the store.
+2. Env vars ``PLAYINTEL_EMAIL`` + ``PLAYINTEL_AAS_TOKEN`` — for
+   stateless containers / CI runs that don't bring a sqlite file.
+3. Anything else fails fast with the documented setup hint.
 
-    [google]
-    username = me@gmail.com
-    aas_token = aas_et/...
-    gsfid = 1234567890abcdef     # optional; minted by /checkin if absent
-    locale = en-US
+`mnexus play-account` is the CLI surface:
 
-`mnexus play-login` writes this file. Two modes:
+```
+mnexus play-account add --name research-1 --email me@gmail.com --password '<pw>'
+mnexus play-account add --name qa-pixel    --email qa@gmail.com  --aas 'aas_et/...'
+mnexus play-account list
+mnexus play-account use qa-pixel    # promote to default
+mnexus play-account show research-1 # token is redacted
+mnexus play-account delete research-1
+```
 
-* `--aas <token>` — paste an AAS token you already have.
-* `--password <pw>` — the password is exchanged for an AAS token via
-  `/auth` (using RSA-OAEP-SHA1 against Google's GMS public key, all in
-  pure Python). The password itself is never written to disk; only the
-  resulting `aas_et/...` token is persisted. Works with regular Google
-  passwords; if 2FA is enabled, use an
-  [app password](https://myaccount.google.com/apppasswords).
+`add` accepts either ``--aas <token>`` (existing master token) or
+``--password <pw>`` (mints AAS via ``/auth`` using RSA-OAEP-SHA1
+against Google's GMS public key, all in pure Python; the password
+itself is never persisted — only the resulting ``aas_et/...`` token
+goes to disk). 2FA accounts need an
+[app password](https://myaccount.google.com/apppasswords).
+
+The first account added auto-promotes to default so the happy path
+ends in one command.
+
+REST surface mirrors the CLI:
+
+```
+GET    /v1/playintel/accounts                — list (redacted)
+POST   /v1/playintel/accounts                — create from email + (aas | password)
+DELETE /v1/playintel/accounts/{name}         — remove
+POST   /v1/playintel/accounts/{name}/default — promote
+```
+
+The web UI has a dedicated **PLAY ACCOUNTS** page and a "scan as"
+dropdown on the PLAY SCAN form that populates from this same endpoint.
+
+#### What the manager does **not** do
+
+It does not create Google accounts. The account creation flow is
+gated by Google's anti-abuse machinery (CAPTCHA, phone verification,
+behavioral fingerprinting); automating it via Selenium / web-form
+scraping puts the tool squarely on the abuse side regardless of
+intent, and the resulting accounts are typically suspended within
+24-72 hours alongside the AAS tokens they minted. Create the account
+manually (one-off, in a browser, with a phone number you control), then
+register it here.
 
 ### Findings
 
@@ -173,40 +206,53 @@ that's enforced at construction time by `Finding.model_validator`.
 ### One-time setup (Play streaming)
 
 ```
-mnexus play-login --email me@gmail.com --password '<password>'
+mnexus play-account add --name primary --email me@gmail.com --password '<pw>'
 # or, if you already have an AAS token from elsewhere:
-mnexus play-login --email me@gmail.com --aas 'aas_et/...'
+mnexus play-account add --name primary --email me@gmail.com --aas 'aas_et/...'
 ```
 
-Writes `~/.config/mnexus/playintel.ini` with mode 0600. The password is
-exchanged for an AAS token and discarded.
+The token (or minted token) and the email are stored in the same
+SQLite the rest of the platform uses. The first account auto-promotes
+to default; subsequent additions don't clobber the existing default
+unless you pass `--default`.
 
 ### CLI — interactive REPL (slash command)
 
 ```
-🔱 nexus ❯ /play-login            # interactive prompt for email + secret
+🔱 nexus ❯ /play-account add --name primary --email me@gmail.com   # interactive prompt for the secret
+🔱 nexus ❯ /play-account list
+🔱 nexus ❯ /play-account use research-1
 🔱 nexus ❯ /play-scan com.example.app
+🔱 nexus ❯ /play-scan com.example.app --account research-1
 ```
 
 Optional flags inside the REPL:
 
 * `/play-scan <pkg> --apk <local-file>` — bypass Play and use a local APK.
+* `/play-scan <pkg> --account <name>` — scan as a specific stored identity.
 * `/play-scan <pkg> --no-probes` — static-only scan (no outbound traffic).
 
-### CLI — flat subcommand
+### CLI — flat subcommands
 
 ```
 mnexus play-scan com.example.app
 mnexus play-scan com.example.app --apk ~/Downloads/target.apk
+mnexus play-scan com.example.app --account research-1
 mnexus play-scan com.example.app --no-probes
 ```
 
 ### Web UI
 
-Sidebar: **PLAY SCAN** (`#/play-scan`). Form takes a package name and
-an "active probes" toggle; results render Firebase project IDs,
-confirmed secrets, active-probe vulnerabilities, and the engine's
-emitted findings.
+Sidebar:
+
+* **PLAY SCAN** (`#/play-scan`) — package input, source-mode switcher
+  (PLAY STREAM / LOCAL PATH / UPLOAD .APK), "scan as" account
+  dropdown, active-probes toggle. Results panel renders Firebase
+  project IDs, confirmed secrets, active-probe vulnerabilities, and
+  the engine's emitted findings.
+* **PLAY ACCOUNTS** (`#/play-accounts`) — register / list / promote /
+  delete stored Play identities. Tokens never leave the server in
+  responses.
 
 ### REST API
 
@@ -216,9 +262,18 @@ Content-Type: application/json
 
 {
   "package": "com.example.app",
-  "apk_path": "/optional/local.apk",
+  "apk_path": "/optional/local.apk",        # bypass Play streaming
+  "account_name": "research-1",             # pick stored identity (default if unset)
   "run_active_probes": true
 }
+
+POST /v1/playintel/scan-upload              # multipart APK upload + scan
+  fields: file (.apk), package, run_active_probes
+
+GET    /v1/playintel/accounts               # list (redacted)
+POST   /v1/playintel/accounts               # create from email + (aas_token | password)
+DELETE /v1/playintel/accounts/{name}        # remove
+POST   /v1/playintel/accounts/{name}/default
 ```
 
 Response:
