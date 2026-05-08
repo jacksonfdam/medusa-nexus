@@ -403,25 +403,57 @@ function fmtBytes(n) {
 function view_play_scan() {
     return h`
     <div class="main">
-      ${sectionHeader("P", "04b // PLAY SCAN", "STREAM + RECON · NO LOCAL APK NEEDED")}
+      ${sectionHeader("P", "04b // PLAY SCAN", "STREAM + RECON · 3 SOURCES · 1 PIPELINE")}
       <section class="panel">
         <div class="panel-head"><span>// PACKAGE TARGET</span></div>
         <div class="panel-body col" style="gap:10px">
-          <div class="row" style="gap:10px;flex-wrap:wrap">
-            <input id="ps-pkg" class="input t-mono" placeholder="com.example.app" style="flex:1;min-width:260px" />
+          <input id="ps-pkg" class="input t-mono" placeholder="com.example.app" />
+          <div class="row" style="gap:6px;flex-wrap:wrap">
+            <button class="btn ps-mode" data-mode="play"   data-active="1">[ PLAY STREAM ]</button>
+            <button class="btn ps-mode" data-mode="path">[ LOCAL PATH ]</button>
+            <button class="btn ps-mode" data-mode="upload">[ UPLOAD .APK ]</button>
+            <span class="grow"></span>
             <label class="row" style="gap:6px;align-items:center">
               <input type="checkbox" id="ps-probes" />
               <span class="muted small">run active Firebase probes (RTDB · Firestore · Storage)</span>
             </label>
+          </div>
+
+          <!-- mode: play (default) -->
+          <div id="ps-mode-play" class="col" style="gap:8px">
+            <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+              <span class="muted small uppercase">scan as</span>
+              <select id="ps-account" class="input" style="min-width:200px">
+                <option value="">— default —</option>
+              </select>
+              <a class="btn" href="#/play-accounts" style="padding:4px 10px">[ MANAGE ACCOUNTS ]</a>
+            </div>
+            <div class="muted small">
+              Streams only the central directory + high-value zip entries
+              (resources.arsc, google-services.json, JS bundles) over HTTP Range.
+            </div>
+          </div>
+
+          <!-- mode: path -->
+          <div id="ps-mode-path" class="col" style="gap:8px;display:none">
+            <input id="ps-path" class="input t-mono" placeholder="/Users/you/Downloads/target.apk" />
+            <div class="muted small">Bypasses the Play CDN — reads the .apk straight off disk on the server.</div>
+          </div>
+
+          <!-- mode: upload -->
+          <div id="ps-mode-upload" class="col" style="gap:8px;display:none">
+            <input id="ps-file" type="file" accept=".apk,.xapk" />
+            <div class="muted small">
+              File is hashed + deduped under <code>workspace/playintel-uploads/</code>;
+              re-uploading the same .apk reuses the existing copy.
+            </div>
+          </div>
+
+          <div class="row">
             <button id="ps-go" class="btn primary">[ STREAM + SCAN ]</button>
+            <span class="grow"></span>
+            <span id="ps-status" class="muted small"></span>
           </div>
-          <div class="muted small">
-            Streams only the central directory + the high-value zip entries (resources.arsc,
-            google-services.json, JS bundles) over HTTP Range. Recovers Firebase project IDs,
-            API keys, and credential patterns. Active probes test whether the discovered
-            project actually accepts anonymous reads/writes.
-          </div>
-          <div id="ps-status" class="muted small" style="min-height:18px"></div>
         </div>
       </section>
       <section class="panel" id="ps-results-wrap" style="display:none">
@@ -431,7 +463,7 @@ function view_play_scan() {
     </div>`;
 }
 
-function mount_play_scan() {
+async function mount_play_scan() {
     const btn = $("#ps-go");
     const pkg = $("#ps-pkg");
     const probes = $("#ps-probes");
@@ -439,7 +471,37 @@ function mount_play_scan() {
     const wrap = $("#ps-results-wrap");
     const out = $("#ps-results");
     const title = $("#ps-result-title");
+    const accountSelect = $("#ps-account");
     if (!btn) return;
+
+    // ── source-mode toggle ────────────────────────────────────────────
+    let mode = "play";  // play | path | upload
+    const setMode = (next) => {
+        mode = next;
+        $$(".ps-mode").forEach((b) => b.dataset.active = (b.dataset.mode === next ? "1" : ""));
+        ["play", "path", "upload"].forEach((m) => {
+            const el = $(`#ps-mode-${m}`);
+            if (el) el.style.display = (m === next ? "" : "none");
+        });
+    };
+    $$(".ps-mode").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+
+    // ── populate account dropdown from /v1/playintel/accounts ────────
+    try {
+        const r = await fetch("/v1/playintel/accounts");
+        if (r.ok) {
+            const body = await r.json();
+            for (const a of (body.accounts || [])) {
+                const opt = document.createElement("option");
+                opt.value = a.name;
+                opt.textContent = a.name + (a.is_default ? "  ★" : "");
+                accountSelect.appendChild(opt);
+            }
+            if (!body.accounts || body.accounts.length === 0) {
+                status.innerHTML = `no Play accounts stored — <a href="#/play-accounts">register one</a> or use LOCAL PATH / UPLOAD .APK`;
+            }
+        }
+    } catch (_) { /* best-effort */ }
 
     pkg.addEventListener("keydown", (e) => { if (e.key === "Enter") btn.click(); });
 
@@ -450,22 +512,11 @@ function mount_play_scan() {
             return;
         }
         btn.disabled = true;
-        status.textContent = `streaming + scanning ${pkgName}…`;
         wrap.style.display = "none";
         out.innerHTML = "";
         try {
-            const resp = await fetch("/v1/playintel/scan", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ package: pkgName, run_active_probes: probes.checked }),
-            });
-            if (!resp.ok) {
-                const text = await resp.text();
-                status.textContent = `[${resp.status}] ${text.slice(0, 200)}`;
-                btn.disabled = false;
-                return;
-            }
-            const data = await resp.json();
+            const data = await runPlayScan(mode, pkgName, probes.checked, accountSelect.value, status);
+            if (!data) return;  // status was already set by the request path
             renderPlayScanResults(out, title, data);
             wrap.style.display = "";
             status.textContent = `done · source: ${data.source}`;
@@ -476,6 +527,173 @@ function mount_play_scan() {
         }
     });
 }
+
+async function runPlayScan(mode, pkgName, runProbes, accountName, status) {
+    if (mode === "upload") {
+        const file = $("#ps-file").files[0];
+        if (!file) { status.textContent = "pick an .apk file first"; return null; }
+        const form = new FormData();
+        form.append("file", file);
+        form.append("package", pkgName);
+        form.append("run_active_probes", runProbes ? "true" : "false");
+        status.textContent = `uploading ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)…`;
+        const resp = await fetch("/v1/playintel/scan-upload", { method: "POST", body: form });
+        if (!resp.ok) { status.textContent = `[${resp.status}] ${(await resp.text()).slice(0, 200)}`; return null; }
+        return resp.json();
+    }
+    // path or play — both go through the JSON endpoint.
+    const body = { package: pkgName, run_active_probes: runProbes };
+    if (mode === "path") {
+        const p = ($("#ps-path").value || "").trim();
+        if (!p) { status.textContent = "local path required"; return null; }
+        body.apk_path = p;
+        status.textContent = `scanning ${p}…`;
+    } else {
+        if (accountName) body.account_name = accountName;
+        status.textContent = `streaming + scanning ${pkgName}…`;
+    }
+    const resp = await fetch("/v1/playintel/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+    if (!resp.ok) { status.textContent = `[${resp.status}] ${(await resp.text()).slice(0, 200)}`; return null; }
+    return resp.json();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SCREEN 04c — Play Accounts (manage stored Play identities)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+function view_play_accounts() {
+    return h`
+    <div class="main">
+      ${sectionHeader("A", "04c // PLAY ACCOUNTS", "STORED IDENTITIES · NO CREATION")}
+      <section class="panel">
+        <div class="panel-head"><span>// REGISTER AN EXISTING ACCOUNT</span></div>
+        <div class="panel-body col" style="gap:8px">
+          <div class="row" style="gap:8px;flex-wrap:wrap">
+            <input id="pa-name"     class="input t-mono" placeholder="name (e.g. research-1)" style="width:200px" />
+            <input id="pa-email"    class="input t-mono" placeholder="me@gmail.com" style="flex:1;min-width:240px" />
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+            <label class="row" style="gap:6px"><input type="radio" name="pa-mode" value="aas" checked /> existing AAS token</label>
+            <label class="row" style="gap:6px"><input type="radio" name="pa-mode" value="password" /> password (mints AAS via /auth)</label>
+          </div>
+          <input id="pa-secret" class="input t-mono" type="password" placeholder="aas_et/... or your password" />
+          <input id="pa-notes"  class="input"        placeholder="notes (optional)" />
+          <label class="row" style="gap:6px;align-items:center">
+            <input type="checkbox" id="pa-default" />
+            <span class="muted small">make default for /play-scan</span>
+          </label>
+          <div class="row" style="gap:8px;align-items:center">
+            <button id="pa-add" class="btn primary">[ REGISTER ]</button>
+            <span id="pa-add-status" class="muted small"></span>
+          </div>
+          <div class="muted small">
+            <strong>This UI does not create Google accounts.</strong>
+            Sign into the Google account you want to use (in any browser),
+            create an app password if 2FA is on, then register it here.
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><span>// STORED ACCOUNTS</span></div>
+        <div class="panel-body col" id="pa-list" style="gap:6px">loading…</div>
+      </section>
+    </div>`;
+}
+
+async function mount_play_accounts() {
+    const addBtn = $("#pa-add");
+    const status = $("#pa-add-status");
+    addBtn.addEventListener("click", async () => {
+        const name = ($("#pa-name").value || "").trim();
+        const email = ($("#pa-email").value || "").trim();
+        const secret = ($("#pa-secret").value || "");
+        const notes = ($("#pa-notes").value || "").trim();
+        const isDefault = $("#pa-default").checked;
+        const mode = (document.querySelector('input[name="pa-mode"]:checked') || {}).value || "aas";
+        if (!name || !email || !secret) { status.textContent = "name, email and secret are required"; return; }
+        addBtn.disabled = true;
+        status.textContent = (mode === "password" ? "exchanging password for AAS…" : "saving…");
+        const body = { name, email, notes, is_default: isDefault };
+        body[mode === "password" ? "password" : "aas_token"] = secret;
+        try {
+            const r = await fetch("/v1/playintel/accounts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            if (!r.ok) {
+                status.textContent = `[${r.status}] ${(await r.text()).slice(0, 240)}`;
+                return;
+            }
+            status.textContent = "saved";
+            $("#pa-name").value = ""; $("#pa-email").value = ""; $("#pa-secret").value = "";
+            $("#pa-notes").value = ""; $("#pa-default").checked = false;
+            await renderPlayAccountsList();
+        } catch (e) {
+            status.textContent = `request failed: ${e.message || e}`;
+        } finally {
+            addBtn.disabled = false;
+        }
+    });
+    await renderPlayAccountsList();
+}
+
+async function renderPlayAccountsList() {
+    const root = $("#pa-list");
+    if (!root) return;
+    try {
+        const r = await fetch("/v1/playintel/accounts");
+        if (!r.ok) { root.innerHTML = `<div class="muted small">[${r.status}] failed to list accounts</div>`; return; }
+        const body = await r.json();
+        const accounts = body.accounts || [];
+        if (!accounts.length) {
+            root.innerHTML = `<div class="empty-state"><div class="muted small">no accounts stored — register one above</div></div>`;
+            return;
+        }
+        root.innerHTML = `
+          <table style="width:100%;border-collapse:collapse">
+            <thead>
+              <tr style="text-align:left">
+                <th class="muted small uppercase" style="padding:4px 8px">name</th>
+                <th class="muted small uppercase" style="padding:4px 8px">email</th>
+                <th class="muted small uppercase" style="padding:4px 8px">gsfid</th>
+                <th class="muted small uppercase" style="padding:4px 8px">notes</th>
+                <th class="muted small uppercase" style="padding:4px 8px">default</th>
+                <th class="muted small uppercase" style="padding:4px 8px">actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${accounts.map((a) => `
+                <tr style="border-top:1px solid var(--border)">
+                  <td class="t-mono" style="padding:6px 8px;color:var(--accent)">${a.name}</td>
+                  <td class="t-mono" style="padding:6px 8px">${a.email_local}@${a.email_domain}</td>
+                  <td class="muted small" style="padding:6px 8px">${a.gsfid_present ? "✓" : "—"}</td>
+                  <td class="muted small" style="padding:6px 8px">${(a.notes || "").slice(0, 40)}</td>
+                  <td style="padding:6px 8px">${a.is_default ? "★" : ""}</td>
+                  <td style="padding:6px 8px">
+                    ${a.is_default ? "" : `<button class="btn pa-default-btn" data-name="${a.name}" style="padding:2px 8px">set default</button>`}
+                    <button class="btn pa-delete-btn" data-name="${a.name}" style="padding:2px 8px">delete</button>
+                  </td>
+                </tr>`).join("")}
+            </tbody>
+          </table>`;
+        $$(".pa-default-btn").forEach((btn) => btn.addEventListener("click", async () => {
+            await fetch(`/v1/playintel/accounts/${encodeURIComponent(btn.dataset.name)}/default`, { method: "POST" });
+            await renderPlayAccountsList();
+        }));
+        $$(".pa-delete-btn").forEach((btn) => btn.addEventListener("click", async () => {
+            if (!confirm(`Delete account ${btn.dataset.name}?`)) return;
+            await fetch(`/v1/playintel/accounts/${encodeURIComponent(btn.dataset.name)}`, { method: "DELETE" });
+            await renderPlayAccountsList();
+        }));
+    } catch (e) {
+        root.innerHTML = `<div class="muted small">request failed: ${e.message || e}</div>`;
+    }
+}
+
 
 function renderPlayScanResults(out, title, data) {
     title.textContent = `// ${data.package}  ·  ${data.source}`;
@@ -4408,7 +4626,8 @@ const ROUTES = [
     { path: "dashboard",                        view: view_dashboard,         mount: mount_dashboard },
     { path: "projects",                         view: view_projects,          mount: mount_projects },
     { path: "scan",                             view: view_scan,              mount: async (ctx) => { mount_scan(); await mount_scan_after_upload_wiring(); } },
-    { path: "play-scan",                        view: view_play_scan,         mount: async () => { mount_play_scan(); } },
+    { path: "play-scan",                        view: view_play_scan,         mount: async () => { await mount_play_scan(); } },
+    { path: "play-accounts",                    view: view_play_accounts,     mount: async () => { await mount_play_accounts(); } },
     { path: "devices",                          view: view_devices,           mount: mount_devices },
     { path: "adb",                              view: view_devices,           mount: mount_devices },  // alias of /devices
     { path: "device/pull",                      view: view_device_pull,       mount: mount_device_pull },
