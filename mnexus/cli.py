@@ -682,13 +682,22 @@ def _play_scan(state: ReplState, args: list[str]) -> None:
             console.print(f"[yellow]ignored arg:[/yellow] {tok}")
 
     from mnexus.engines.play_intel_engine import PlayIntelEngine
-    from mnexus.playintel.apk_source import LocalAPKSource, PlayProtocolSource
+    from mnexus.playintel.apk_source import (
+        BundledAPKSource,
+        PlayProtocolSource,
+        local_source_for,
+    )
     from mnexus.playintel.play_client import PlayAuthError
 
     play_source = None
+    bundled_source = None
     if apk_override and apk_override.exists():
-        source = LocalAPKSource(apk_override)
-        source_label = f"local:{apk_override.name}"
+        source = local_source_for(apk_override, workspace=state.config.workspace)
+        if isinstance(source, BundledAPKSource):
+            bundled_source = source
+            source_label = f"local-bundle:{apk_override.name}"
+        else:
+            source_label = f"local:{apk_override.name}"
     else:
         try:
             play_source = PlayProtocolSource(
@@ -725,6 +734,8 @@ def _play_scan(state: ReplState, args: list[str]) -> None:
     finally:
         if play_source is not None:
             play_source.close()
+        if bundled_source is not None:
+            bundled_source.close()
 
     n_secrets = len(outcome.report.confirmed_secrets())
     n_suspected = len(outcome.report.suspected_secrets())

@@ -293,15 +293,25 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
     from mnexus.playintel.play_client import PlayAuthError
 
     play_source: PlayProtocolSource | None = None
+    bundled_source = None  # BundledAPKSource — needs explicit close() for temp cleanup
     local_apk_path: Path | None = None
     apk_sha256_value = ""
     if apk_override:
         p = Path(str(apk_override)).expanduser()
         if not p.exists():
             raise HTTPException(400, f"apk_path not found: {p}")
-        source = LocalAPKSource(p)
-        source_label = f"local:{p.name}"
-        local_apk_path = p
+        from mnexus.playintel.apk_source import BundledAPKSource, local_source_for
+        ls = local_source_for(p, workspace=nexus.config.workspace)
+        if isinstance(ls, BundledAPKSource):
+            bundled_source = ls
+            source = ls
+            source_label = f"local-bundle:{p.name}"
+            # Inner base APK is what the manifest detector should see.
+            local_apk_path = Path(ls.get_download_info("").base_url)
+        else:
+            source = ls
+            source_label = f"local:{p.name}"
+            local_apk_path = p
         apk_sha256_value = _hash_apk_file(p)
     else:
         try:
@@ -331,6 +341,8 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
     finally:
         if play_source is not None:
             play_source.close()
+        if bundled_source is not None:
+            bundled_source.close()
 
 
 @app.post("/v1/playintel/scan-upload")
@@ -380,20 +392,31 @@ async def playintel_scan_upload(
         tmp_path.unlink(missing_ok=True)
         raise
 
-    pkg = (package or "").strip() or _detect_package(final_path, file.filename)
+    from mnexus.playintel.apk_source import BundledAPKSource, local_source_for
 
-    from mnexus.playintel.apk_source import LocalAPKSource
-
-    source = LocalAPKSource(final_path)
-    return await _run_playintel_scan(
-        nexus,
-        pkg,
-        source,
-        f"upload:{file.filename}",
-        bool(run_active_probes),
-        apk_sha256=sha,                 # already computed during the streaming upload
-        local_apk_path=final_path,
+    source = local_source_for(final_path, workspace=nexus.config.workspace)
+    bundled = source if isinstance(source, BundledAPKSource) else None
+    # Manifest auto-detect needs the inner base APK when this is a bundle —
+    # the outer .apkm has no AndroidManifest.xml of its own.
+    detect_target = (
+        Path(source.get_download_info("").base_url) if bundled is not None else final_path
     )
+    pkg = (package or "").strip() or _detect_package(detect_target, file.filename)
+    label_prefix = "upload-bundle" if bundled is not None else "upload"
+
+    try:
+        return await _run_playintel_scan(
+            nexus,
+            pkg,
+            source,
+            f"{label_prefix}:{file.filename}",
+            bool(run_active_probes),
+            apk_sha256=sha,             # always the OUTER hash; identifies the bundle
+            local_apk_path=detect_target,
+        )
+    finally:
+        if bundled is not None:
+            bundled.close()
 
 
 def _hash_apk_file(path: Path) -> str:

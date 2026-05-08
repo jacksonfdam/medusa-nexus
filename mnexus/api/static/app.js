@@ -444,10 +444,14 @@ function view_play_scan() {
 
           <!-- mode: upload -->
           <div id="ps-mode-upload" class="col" style="gap:8px;display:none">
-            <input id="ps-file" type="file" accept=".apk,.xapk" />
+            <input id="ps-file" type="file" accept=".apk,.xapk,.apkm,.apks" />
             <div class="muted small">
-              Package id is auto-detected from the manifest — leave the field above blank to use the embedded one.
-              File is hashed + deduped under <code>workspace/playintel-uploads/</code>; re-uploading the same .apk reuses the existing copy.
+              Accepts <code>.apk</code> (single binary) and bundled formats <code>.apkm</code> /
+              <code>.apks</code> / <code>.xapk</code> (zip with base + per-config splits). Format
+              is sniffed from the contents — file extension is just a hint.
+              Package id is auto-detected from the inner base manifest if you leave the field blank.
+              File is hashed + deduped under <code>workspace/playintel-uploads/</code>; re-uploading
+              the same bundle reuses the existing copy.
             </div>
           </div>
 
