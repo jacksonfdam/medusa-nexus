@@ -31,6 +31,9 @@ All sources expose :meth:`open` which returns a context-managed
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -127,6 +130,195 @@ class LocalAPKSource:
     def open_split(self, info: DownloadInfo, split: SplitInfo) -> Iterator[LocalZip]:  # noqa: ARG002
         # LocalAPKSource never produces splits.
         raise RuntimeError("LocalAPKSource has no splits")
+
+
+# ─── Bundled formats: .apkm / .apks / .xapk ───────────────────────────────
+
+
+_BASE_APK_CANDIDATES = ("base.apk", "base/base.apk")
+
+
+def _looks_like_bundle(path: Path) -> bool:
+    """Return True if ``path`` is a zip whose contents are nested APKs.
+
+    APKM (APKMirror), APKS (Bundletool ``build-apks`` output), and XAPK
+    (universal cross-store format) are all zips that ship a base APK
+    plus per-config splits as inner ``*.apk`` entries. We don't trust
+    the file extension alone because users rename these all the time;
+    we sniff the central directory.
+    """
+    if not zipfile.is_zipfile(path):
+        return False
+    try:
+        with zipfile.ZipFile(path) as zf:
+            for entry in zf.namelist():
+                if entry.lower().endswith(".apk"):
+                    return True
+    except zipfile.BadZipFile:
+        return False
+    return False
+
+
+class BundledAPKSource:
+    """Source backed by a bundle (.apkm / .apks / .xapk) of nested APKs.
+
+    On open, walks the outer zip and pulls each inner ``*.apk`` entry
+    out to a temp directory under the workspace. The base APK is
+    whichever entry matches :data:`_BASE_APK_CANDIDATES` (or, failing
+    that, the largest ``.apk`` — Bundletool builds the base as the
+    biggest split). Everything else becomes a :class:`SplitInfo` and
+    flows through the analyzer's existing splits loop, so credential
+    / Firebase recovery covers per-locale, per-ABI, and per-density
+    splits without any pipeline changes.
+
+    Temps live under ``<workspace>/playintel-uploads/bundled-<stem>/``
+    and are removed on :meth:`close` (or on context-manager exit).
+    """
+
+    def __init__(self, bundle_path: Path, *, workspace: Path | None = None) -> None:
+        self.bundle_path = Path(bundle_path).expanduser().resolve()
+        if not self.bundle_path.exists():
+            raise FileNotFoundError(f"bundle not found: {self.bundle_path}")
+        self._workspace = workspace
+        self._tmp_dir: Path | None = None
+        self._base_path: Path | None = None
+        self._splits: list[tuple[Path, int, str]] = []  # (path, size, name)
+        self._extract()
+
+    # ─── extraction ──────────────────────────────────────────────────
+
+    def _extract(self) -> None:
+        # Prefer a workspace-scoped temp so the analyst's saved-files
+        # directory and the bundle scratch live next to each other;
+        # fall back to a system temp dir for tests / standalone use.
+        parent = (
+            self._workspace / "playintel-uploads" if self._workspace is not None else None
+        )
+        if parent is not None:
+            parent.mkdir(parents=True, exist_ok=True)
+        self._tmp_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f"bundled-{self.bundle_path.stem}-",
+                dir=str(parent) if parent else None,
+            )
+        )
+
+        with zipfile.ZipFile(self.bundle_path) as zf:
+            apk_entries = [n for n in zf.namelist() if n.lower().endswith(".apk")]
+            if not apk_entries:
+                raise RuntimeError(
+                    f"{self.bundle_path.name} contained no .apk entries — "
+                    "not a recognised .apkm / .apks / .xapk bundle"
+                )
+
+            # Identify the base. Try the documented filenames first;
+            # otherwise fall back to the largest .apk inside.
+            lower_to_orig = {n.lower(): n for n in apk_entries}
+            base_entry: str | None = None
+            for candidate in _BASE_APK_CANDIDATES:
+                if candidate in lower_to_orig:
+                    base_entry = lower_to_orig[candidate]
+                    break
+                # Also accept "anything ending in /base.apk" for nested layouts.
+                for lower_n, orig in lower_to_orig.items():
+                    if lower_n.endswith("/" + candidate.split("/")[-1]):
+                        base_entry = orig
+                        break
+                if base_entry is not None:
+                    break
+            if base_entry is None:
+                base_entry = max(apk_entries, key=lambda n: zf.getinfo(n).file_size)
+
+            # Extract every inner .apk to disk; tag base + splits.
+            for entry in apk_entries:
+                # Flatten nested paths into a single filename so the
+                # extracted layout is `<tmp>/base.apk`, `<tmp>/split_armv7a.apk`.
+                flat_name = entry.replace("/", "_").replace("\\", "_")
+                out = self._tmp_dir / flat_name
+                with zf.open(entry) as src, out.open("wb") as dst:
+                    while chunk := src.read(1024 * 1024):
+                        dst.write(chunk)
+                size = out.stat().st_size
+                if entry == base_entry:
+                    self._base_path = out
+                else:
+                    self._splits.append((out, size, _split_label(entry)))
+
+        if self._base_path is None:
+            raise RuntimeError("base APK could not be identified in bundle")
+
+    # ─── APKSource protocol ──────────────────────────────────────────
+
+    def get_download_info(self, package_name: str) -> DownloadInfo:
+        assert self._base_path is not None
+        splits = [
+            SplitInfo(name=name, url=str(p), size=size)
+            for p, size, name in self._splits
+        ]
+        return DownloadInfo(
+            package_name=package_name or self.bundle_path.stem,
+            base_url=str(self._base_path),
+            base_size=self._base_path.stat().st_size,
+            splits=splits,
+            additional_files=[],
+        )
+
+    @contextmanager
+    def open_base(self, info: DownloadInfo) -> Iterator[LocalZip]:
+        with LocalZip(Path(info.base_url)) as z:
+            yield z
+
+    @contextmanager
+    def open_split(self, info: DownloadInfo, split: SplitInfo) -> Iterator[LocalZip]:  # noqa: ARG002
+        # Splits in a bundle are always real files on disk now.
+        with LocalZip(Path(split.url)) as z:
+            yield z
+
+    # ─── lifecycle ───────────────────────────────────────────────────
+
+    def close(self) -> None:
+        if self._tmp_dir is not None and self._tmp_dir.exists():
+            shutil.rmtree(self._tmp_dir, ignore_errors=True)
+            self._tmp_dir = None
+
+    def __enter__(self) -> BundledAPKSource:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def _split_label(entry: str) -> str:
+    """Strip path components and the .apk suffix so split names look clean
+    in the UI / report ("config.arm64_v8a" not "splits/config.arm64_v8a.apk").
+    """
+    name = entry.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if name.lower().endswith(".apk"):
+        name = name[:-4]
+    return name
+
+
+# ─── Factory: pick the right local source ────────────────────────────────
+
+
+def local_source_for(
+    path: Path,
+    *,
+    workspace: Path | None = None,
+) -> LocalAPKSource | BundledAPKSource:
+    """Return :class:`BundledAPKSource` for .apkm/.apks/.xapk-shaped
+    bundles, :class:`LocalAPKSource` for a single APK.
+
+    Detection runs against the file contents (a zip with nested .apk
+    entries → bundle), not against the extension — users rename these
+    all the time and a misnamed file shouldn't change the analysis.
+    """
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        raise FileNotFoundError(f"file not found: {p}")
+    if _looks_like_bundle(p):
+        return BundledAPKSource(p, workspace=workspace)
+    return LocalAPKSource(p)
 
 
 # ─── Direct URL ───────────────────────────────────────────────────────────
