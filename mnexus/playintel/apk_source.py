@@ -31,10 +31,6 @@ All sources expose :meth:`open` which returns a context-managed
 
 from __future__ import annotations
 
-import json
-import os
-import shutil
-import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -42,6 +38,11 @@ from pathlib import Path
 from typing import Protocol
 
 import httpx
+
+from mnexus.playintel.play_client import (
+    PlayClient,
+    PlayCredentials,
+)
 
 from mnexus.playintel.remote_zip import LocalZip, RemoteZip
 
@@ -176,175 +177,73 @@ class DirectURLSource:
             yield z
 
 
-# ─── Google Play (via Go reference binary) ────────────────────────────────
+# ─── Google Play (native pure-Python protocol) ────────────────────────────
 
 
-class PlayBinarySource:
-    """Bridge to the existing Go reference scanner ``poc-firebase-google``.
+class PlayProtocolSource:
+    """Source backed by the native :class:`PlayClient`.
 
-    The Go binary already implements the full Play protocol — auth,
-    device check-in, GetDownloadInfo, signed URLs. Re-implementing
-    that in Python is a big-enough piece of work that a separate
-    follow-up makes more sense than trying to fit it into this engine.
-    Until then, when the Go binary is on the system this source acts
-    as the production data path.
+    Talks the Google Play protocol directly in Python — no Go binary,
+    no `apkeep` subprocess. Authentication uses the same
+    ``~/.config/apkeep/apkeep.ini`` schema apkeep itself uses, so
+    existing setups roll forward without re-pairing.
 
-    Modes:
+    One-line usage::
 
-    * ``--resolve <package>`` (preferred when supported): the binary
-      prints a JSON ``DownloadInfo`` we can parse and feed to a
-      :class:`DirectURLSource` for streaming.
-    * Fallback: the binary is invoked with ``-pk <package>`` to do its
-      own scan + write the persisted ``secrets/<pkg>/`` directory; we
-      then read those files as a :class:`LocalAPKSource`-style local
-      source.
+        source = PlayProtocolSource()  # loads creds from apkeep.ini
+        outcome = analyze_package(source, "com.example.app", workspace=ws)
 
-    The fallback mode produces no streaming benefit — the Go binary
-    already streamed and saved the high-value entries. We just lift
-    the saved files into the analyzer's pipeline so findings get into
-    MedusaNexus's database alongside everything else.
-
-    Set ``MNEXUS_PLAYBIN_PATH`` or pass ``binary_path`` to point at a
-    specific build.
+    The source owns the underlying ``PlayClient`` lifetime via a
+    context manager. Splits and OBB additional files come back from
+    Play in the same DownloadInfo so the analyzer pipeline scans
+    every part of the app (base + per-ABI splits + per-locale splits).
     """
-
-    DEFAULT_BINARY_NAMES = ("poc-firebase-google", "go-google-login")
 
     def __init__(
         self,
         *,
-        binary_path: Path | None = None,
+        credentials: PlayCredentials | None = None,
         config_path: Path | None = None,
-        proxy: str | None = None,
-        secrets_root: Path | None = None,
+        device_props: dict[str, str] | None = None,
+        client: PlayClient | None = None,
     ) -> None:
-        self.binary_path = self._resolve_binary(binary_path)
-        self.config_path = config_path
-        self.proxy = proxy
-        self.secrets_root = secrets_root or Path.cwd() / "secrets"
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            creds = credentials or PlayCredentials.load(config_path)
+            self._client = PlayClient(creds, device_props=device_props)
+            self._owns_client = True
 
-    @staticmethod
-    def _resolve_binary(explicit: Path | None) -> Path:
-        """Resolve the bridge binary in this order:
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
 
-        1. ``explicit`` argument from the caller.
-        2. ``MNEXUS_PLAYBIN_PATH`` env var.
-        3. ``shutil.which()`` against the documented binary names.
-        """
-        if explicit:
-            p = Path(explicit).expanduser()
-            if not p.exists():
-                raise FileNotFoundError(f"Play binary not found: {p}")
-            return p
-        env_path = os.environ.get("MNEXUS_PLAYBIN_PATH")
-        if env_path:
-            p = Path(env_path).expanduser()
-            if not p.exists():
-                raise FileNotFoundError(
-                    f"MNEXUS_PLAYBIN_PATH points at missing file: {p}"
-                )
-            return p
-        for name in PlayBinarySource.DEFAULT_BINARY_NAMES:
-            found = shutil.which(name)
-            if found:
-                return Path(found)
-        raise FileNotFoundError(
-            "Play binary not found. Set MNEXUS_PLAYBIN_PATH=/path/to/poc-firebase-google, "
-            "or symlink the binary into a directory on PATH "
-            "(e.g. `ln -s ~/Downloads/Projects/go-google-login-master/poc-firebase-google /usr/local/bin/`)."
-        )
+    def __enter__(self) -> PlayProtocolSource:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def get_download_info(self, package_name: str) -> DownloadInfo:
-        """Try ``--resolve``; fall back to legacy ``-pk`` scan-and-import."""
-        # Optimistic call — the Go binary may not implement --resolve yet,
-        # in which case the fallback path takes over.
-        try:
-            return self._resolve_via_binary(package_name)
-        except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
-            return self._scan_and_import(package_name)
-
-    def _resolve_via_binary(self, package_name: str) -> DownloadInfo:
-        argv = [str(self.binary_path), "-pk", package_name, "-resolve-only"]
-        if self.config_path:
-            argv += ["-config", str(self.config_path)]
-        if self.proxy:
-            argv += ["-proxy", self.proxy]
-        proc = subprocess.run(  # noqa: S603 — argv assembled from typed inputs
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        )
-        payload = json.loads(proc.stdout)
+        """Resolve a package name → signed CDN URL via the Play protocol."""
+        play_info = self._client.get_download_info(package_name)
         return DownloadInfo(
-            package_name=package_name,
-            base_url=payload["url"],
-            base_size=int(payload["size"]),
-            splits=[SplitInfo(**s) for s in payload.get("splits", [])],
-            additional_files=[FileInfo(**f) for f in payload.get("additional_files", [])],
-            headers=payload.get("headers"),
-        )
-
-    def _scan_and_import(self, package_name: str) -> DownloadInfo:
-        """Run the Go scanner end-to-end and import its output dir.
-
-        The Go binary writes ``secrets/<package>/`` containing the
-        bearing files (resources.arsc, google-services.json, …).
-        We treat that directory as the input to a synthetic
-        :class:`LocalAPKSource`-shaped session.
-        """
-        argv = [str(self.binary_path), "-pk", package_name]
-        if self.config_path:
-            argv += ["-config", str(self.config_path)]
-        if self.proxy:
-            argv += ["-proxy", self.proxy]
-        # Fire it; ignore non-zero exit (Go binary may exit non-zero on
-        # auth issues but still produce useful output).
-        try:
-            subprocess.run(  # noqa: S603
-                argv,
-                cwd=str(self.secrets_root.parent if self.secrets_root.parent.exists() else "."),
-                capture_output=True,
-                text=True,
-                timeout=600,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            pass
-        # The expected output dir is `<cwd>/secrets/<package>/`.
-        out_dir = self.secrets_root / package_name
-        if not out_dir.exists():
-            raise FileNotFoundError(
-                f"Go scanner produced no output at {out_dir}. "
-                "Verify auth in ~/.config/apkeep/apkeep.ini and try again."
-            )
-        # Synthesize a "DownloadInfo" pointing at the saved
-        # resources.arsc — the analyzer code path detects this and
-        # uses a per-file scan instead of a zip scan.
-        arsc = out_dir / "ROOT_resources.arsc"
-        if not arsc.exists():
-            raise FileNotFoundError(f"resources.arsc missing under {out_dir}")
-        return DownloadInfo(
-            package_name=package_name,
-            base_url=str(arsc),
-            base_size=arsc.stat().st_size,
-            splits=[],
-            additional_files=[],
-            headers={"x-mnexus-source": "play-binary-import"},
+            package_name=play_info.package_name,
+            base_url=play_info.base_url,
+            base_size=play_info.base_size,
+            splits=[SplitInfo(name=s.name, url=s.url, size=s.size) for s in play_info.splits],
+            additional_files=[
+                FileInfo(name=f.name, url=f.url, size=f.size)
+                for f in play_info.additional_files
+            ],
+            headers=None,
         )
 
     @contextmanager
-    def open_base(self, info: DownloadInfo) -> Iterator[LocalZip | RemoteZip]:
-        # If the bridge produced a real CDN URL, stream it. Otherwise
-        # the base_url points at a local file (the import path).
-        path = Path(info.base_url)
-        if path.exists():
-            with LocalZip(path) as z:
-                yield z
-        else:
-            with RemoteZip(info.base_url, info.base_size, headers=info.headers) as z:
-                yield z
+    def open_base(self, info: DownloadInfo) -> Iterator[RemoteZip]:
+        with RemoteZip(info.base_url, info.base_size, headers=info.headers) as z:
+            yield z
 
     @contextmanager
     def open_split(self, info: DownloadInfo, split: SplitInfo) -> Iterator[RemoteZip]:

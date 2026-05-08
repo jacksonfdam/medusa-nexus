@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import configparser
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,22 +107,67 @@ class PlayCredentials:
     gsfid: str = ""  # filled in by checkin if missing
     locale: str = "en-US"
 
+    # Conventional location for MedusaNexus's own config; takes
+    # precedence over the legacy apkeep one for parity with the rest of
+    # the platform's `~/.config/mnexus/...` layout.
+    DEFAULT_CONFIG_PATH = Path.home() / ".config" / "mnexus" / "playintel.ini"
+    LEGACY_APKEEP_PATH = Path.home() / ".config" / "apkeep" / "apkeep.ini"
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> PlayCredentials:
+        """Load credentials in the canonical priority order.
+
+        1. Env vars ``PLAYINTEL_EMAIL`` + ``PLAYINTEL_AAS_TOKEN``
+           (optionally ``PLAYINTEL_GSFID``, ``PLAYINTEL_LOCALE``).
+        2. ``~/.config/mnexus/playintel.ini`` — the preferred file.
+        3. ``~/.config/apkeep/apkeep.ini`` — legacy, for compatibility
+           with people who already had apkeep configured.
+        4. ``path`` — explicit override always wins if provided.
+
+        Each fallback re-raises a :class:`PlayAuthError` describing
+        what's missing. The error message is the user-facing setup
+        guidance — keep it actionable.
+        """
+        if path is not None:
+            return cls._from_ini(Path(path).expanduser())
+
+        env_email = os.environ.get("PLAYINTEL_EMAIL", "").strip()
+        env_aas = os.environ.get("PLAYINTEL_AAS_TOKEN", "").strip()
+        if env_email and env_aas:
+            return cls(
+                email=env_email,
+                aas_token=env_aas,
+                gsfid=os.environ.get("PLAYINTEL_GSFID", "").strip(),
+                locale=os.environ.get("PLAYINTEL_LOCALE", "en-US"),
+            )
+
+        for candidate in (cls.DEFAULT_CONFIG_PATH, cls.LEGACY_APKEEP_PATH):
+            if candidate.exists():
+                return cls._from_ini(candidate)
+
+        raise PlayAuthError(
+            "no Play credentials found. Run `mnexus play-login --email <gmail> "
+            "--aas <token>` to write them, or set PLAYINTEL_EMAIL + "
+            f"PLAYINTEL_AAS_TOKEN in the environment. Searched: "
+            f"{cls.DEFAULT_CONFIG_PATH}, {cls.LEGACY_APKEEP_PATH}."
+        )
+
+    # Back-compat alias — keeps callers that expected the old name
+    # working through the rename. Plumbs through to :meth:`load`.
     @classmethod
     def from_apkeep_ini(cls, path: Path | None = None) -> PlayCredentials:
-        """Load from ``~/.config/apkeep/apkeep.ini`` (or override path).
-
-        The apkeep config schema is::
-
-            [google]
-            username = me@gmail.com
-            aas_token = aas_et/...
-            gsfid = 1234567890abcdef   # optional; minted by checkin
+        """Deprecated. Prefer :meth:`load` — which also handles env vars
+        and the new ``~/.config/mnexus/playintel.ini`` location.
         """
-        ini_path = path or Path.home() / ".config" / "apkeep" / "apkeep.ini"
+        return cls.load(path)
+
+    @classmethod
+    def _from_ini(cls, ini_path: Path) -> PlayCredentials:
+        """Parse one apkeep-format INI file (the schema both files share)."""
         if not ini_path.exists():
             raise PlayAuthError(
-                f"apkeep config not found at {ini_path}. "
-                "See https://github.com/EFForg/apkeep#configuration for setup."
+                f"Play credentials file not found at {ini_path}. "
+                "Run `mnexus play-login --email <gmail> --aas <token>` to create it."
             )
         parser = configparser.ConfigParser()
         parser.read(ini_path)
@@ -140,6 +186,31 @@ class PlayCredentials:
             gsfid=section.get("gsfid", ""),
             locale=section.get("locale", "en-US"),
         )
+
+    def save(self, path: Path | None = None) -> Path:
+        """Persist credentials to disk in apkeep INI format.
+
+        Default location is :attr:`DEFAULT_CONFIG_PATH`; the parent
+        directory is created if it doesn't exist. Returns the path
+        actually written so the caller can show it back to the user.
+        """
+        out = (path or self.DEFAULT_CONFIG_PATH).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        parser = configparser.ConfigParser()
+        parser["google"] = {
+            "username": self.email,
+            "aas_token": self.aas_token,
+            "gsfid": self.gsfid,
+            "locale": self.locale,
+        }
+        with out.open("w") as fh:
+            parser.write(fh)
+        # Restrict file mode — these are credentials.
+        try:
+            out.chmod(0o600)
+        except OSError:
+            pass
+        return out
 
 
 # ─── Wire-format result types ──────────────────────────────────────────────

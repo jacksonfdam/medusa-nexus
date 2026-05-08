@@ -118,6 +118,7 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/help",            "Show this table."),
         ("/doctor",          "Run engine health checks (live spinner)."),
         ("/scan <apk>",      "Static scan an APK file. Auto-detects package + version."),
+        ("/play-login",       "Write Play credentials (gmail + AAS token) to ~/.config/mnexus/playintel.ini."),
         ("/play-scan <pkg>",  "Stream an APK from Google Play and scan for Firebase / credential leaks."),
         ("/projects",        "List stored projects with risk score + finding counts."),
         ("/use <id>",        "Set the active project for subsequent commands."),
@@ -462,6 +463,41 @@ def _adb(state: ReplState, args: list[str]) -> None:
     console.print(Panel(out, title=f"[bold {style}]$ adb {' '.join(args)}[/bold {style}]", border_style=style, box=ROUNDED))
 
 
+def _play_login(state: ReplState, args: list[str]) -> None:
+    """`/play-login --email <gmail> --aas <token>` — write playintel credentials."""
+    email = ""
+    aas = ""
+    gsfid = ""
+    it = iter(args)
+    for tok in it:
+        if tok in ("--email", "-e"):
+            email = next(it, "")
+        elif tok in ("--aas", "-a"):
+            aas = next(it, "")
+        elif tok in ("--gsfid",):
+            gsfid = next(it, "")
+        else:
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+
+    if not email:
+        email = Prompt.ask("[cyan]gmail[/cyan]").strip()
+    if not aas:
+        aas = Prompt.ask("[cyan]aas_token[/cyan] (long-lived master token)", password=True).strip()
+    if not email or not aas:
+        console.print("[red]email and aas token are both required[/red]")
+        return
+
+    from mnexus.playintel.play_client import PlayCredentials
+
+    creds = PlayCredentials(email=email, aas_token=aas, gsfid=gsfid)
+    out = creds.save()
+    console.print(f"[green]✓ wrote credentials → [/green]{out}")
+    console.print(
+        "[dim]Run [bold]/play-scan <package>[/bold] to verify. "
+        "First call will mint a GSFID via /checkin if you didn't provide one.[/dim]"
+    )
+
+
 def _play_scan(state: ReplState, args: list[str]) -> None:
     """`/play-scan <package>` — stream an APK from Google Play and analyze it."""
     if not args:
@@ -485,20 +521,23 @@ def _play_scan(state: ReplState, args: list[str]) -> None:
             console.print(f"[yellow]ignored arg:[/yellow] {tok}")
 
     from mnexus.engines.play_intel_engine import PlayIntelEngine
-    from mnexus.playintel.apk_source import LocalAPKSource, PlayBinarySource
+    from mnexus.playintel.apk_source import LocalAPKSource, PlayProtocolSource
+    from mnexus.playintel.play_client import PlayAuthError
 
+    play_source = None
     if apk_override and apk_override.exists():
         source = LocalAPKSource(apk_override)
         source_label = f"local:{apk_override.name}"
     else:
         try:
-            source = PlayBinarySource(binary_path=state.config.playbin_path)
-            source_label = "play-bridge"
-        except FileNotFoundError as e:
-            console.print(f"[red]no APK source available:[/red] {e}")
+            play_source = PlayProtocolSource()
+            source = play_source
+            source_label = "play"
+        except PlayAuthError as e:
+            console.print(f"[red]Play auth failed:[/red] {e}")
             console.print(
-                "[dim]Either pass --apk <local-file> or set "
-                "MNEXUS_PLAYBIN_PATH=/path/to/poc-firebase-google.[/dim]"
+                "[dim]Configure ~/.config/apkeep/apkeep.ini with your Gmail + AAS token, "
+                "or pass --apk <local-file>.[/dim]"
             )
             return
 
@@ -506,15 +545,19 @@ def _play_scan(state: ReplState, args: list[str]) -> None:
     spinner = Spinner(
         "dots", text=Text(f"streaming + scanning {package} via {source_label}…", style="cyan")
     )
-    with Live(spinner, console=console, transient=True):
-        outcome, findings = asyncio.run(
-            engine.analyze_package(
-                package,
-                source=source,
-                workspace=state.config.workspace,
-                run_active_probes=run_probes,
+    try:
+        with Live(spinner, console=console, transient=True):
+            outcome, findings = asyncio.run(
+                engine.analyze_package(
+                    package,
+                    source=source,
+                    workspace=state.config.workspace,
+                    run_active_probes=run_probes,
+                )
             )
-        )
+    finally:
+        if play_source is not None:
+            play_source.close()
 
     n_secrets = len(outcome.report.confirmed_secrets())
     n_suspected = len(outcome.report.suspected_secrets())
@@ -698,6 +741,7 @@ SLASH_COMMANDS = {
     "help":      _help,
     "doctor":    _doctor,
     "scan":      _scan,
+    "play-login": _play_login,
     "play-scan": _play_scan,
     "projects":  _projects,
     "use":       _use,
@@ -883,6 +927,16 @@ def scan(ctx: click.Context, apk_path: Path, package_name: str, version_name: st
     if version_name:
         args += ["--version", version_name]
     _scan(state, args)
+
+
+@cli.command(name="play-login", help="Write Play credentials to ~/.config/mnexus/playintel.ini.")
+@click.option("--email", "-e", required=True, help="Gmail address tied to the Play account.")
+@click.option("--aas", "-a", "aas_token", required=True, help="AAS master token (long-lived).")
+@click.option("--gsfid", default="", help="Optional Google Services Framework ID; minted by /checkin if omitted.")
+@click.pass_context
+def play_login(ctx: click.Context, email: str, aas_token: str, gsfid: str) -> None:
+    state = ReplState(ctx.obj["config"])
+    _play_login(state, ["--email", email, "--aas", aas_token, *(["--gsfid", gsfid] if gsfid else [])])
 
 
 @cli.command(name="play-scan", help="Stream an APK from Google Play and scan for Firebase / credential leaks.")

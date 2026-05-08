@@ -35,7 +35,6 @@ from mnexus.playintel.analyzer import AnalysisOutcome, analyze_package, unique_f
 from mnexus.playintel.apk_source import (
     APKSource,
     LocalAPKSource,
-    PlayBinarySource,
 )
 from mnexus.playintel.firebase_config import FirebaseConfig
 from mnexus.playintel.secret_detector import SecretMatch
@@ -72,10 +71,11 @@ _SECRET_SEVERITY: dict[str, Severity] = {
 class PlayIntelEngine(BaseEngine):
     """Mobile credential / Firebase-misconfig recon head.
 
-    Override the APK source via constructor injection or ``MNEXUS_PLAYBIN_PATH``
-    (consumed by :class:`PlayBinarySource`). By default the engine acts
-    on local APKs only; ``analyze_package`` is the entry point for the
-    streaming flow.
+    Pure-Python end-to-end. Local APK scanning works everywhere; the
+    streaming flow over the Google Play protocol additionally requires
+    Play credentials in ``~/.config/mnexus/playintel.ini`` (or the
+    legacy ``~/.config/apkeep/apkeep.ini`` location). Override the APK
+    source via constructor injection if you want to bypass that.
     """
 
     def __init__(self, config, *, source: APKSource | None = None) -> None:  # type: ignore[no-untyped-def]
@@ -91,25 +91,27 @@ class PlayIntelEngine(BaseEngine):
         return ["firebase", "credentials", "play-stream"]
 
     async def health_check(self) -> EngineStatus:
-        # The pure-Python static path always works; the only optional
-        # piece is the Play bridge binary.
+        # Static path is always available; report whether Play credentials
+        # are wired in too (so /doctor reflects which mode is usable).
+        from mnexus.playintel.play_client import PlayCredentials, PlayAuthError
+
         try:
-            PlayBinarySource()
-            return EngineStatus(
-                name=self.name,
-                installed=True,
-                version="bridge:go",
-                path=None,
-                message="ready · pure-Python scan + Play bridge available",
-            )
-        except FileNotFoundError:
+            PlayCredentials.from_apkeep_ini()
+        except PlayAuthError as e:
             return EngineStatus(
                 name=self.name,
                 installed=True,
                 version="static-only",
                 path=None,
-                message="ready · pure-Python scan; Play bridge missing (optional)",
+                message=f"ready · pure-Python scan; Play streaming disabled ({e})",
             )
+        return EngineStatus(
+            name=self.name,
+            installed=True,
+            version="play+static",
+            path=None,
+            message="ready · Play protocol + pure-Python scan",
+        )
 
     async def execute(self, context: AnalysisContext) -> list[Finding]:
         """Scan an APK that's already on disk.

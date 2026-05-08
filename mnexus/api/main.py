@@ -285,8 +285,10 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
     apk_override = payload.get("apk_path")
 
     from mnexus.engines.play_intel_engine import PlayIntelEngine
-    from mnexus.playintel.apk_source import LocalAPKSource, PlayBinarySource
+    from mnexus.playintel.apk_source import LocalAPKSource, PlayProtocolSource
+    from mnexus.playintel.play_client import PlayAuthError
 
+    play_source: PlayProtocolSource | None = None
     if apk_override:
         p = Path(str(apk_override)).expanduser()
         if not p.exists():
@@ -295,22 +297,27 @@ async def playintel_scan(payload: dict[str, Any]) -> dict[str, Any]:
         source_label = f"local:{p.name}"
     else:
         try:
-            source = PlayBinarySource(binary_path=nexus.config.playbin_path)
-        except FileNotFoundError as e:
+            play_source = PlayProtocolSource()
+        except PlayAuthError as e:
             raise HTTPException(
                 503,
-                f"no APK source available: {e}. Provide `apk_path` or install "
-                "the Play bridge binary (`poc-firebase-google`).",
+                f"Play auth failed: {e}. Provide `apk_path` or configure "
+                "~/.config/apkeep/apkeep.ini.",
             ) from e
-        source_label = "play-bridge"
+        source = play_source
+        source_label = "play"
 
     engine = PlayIntelEngine(nexus.config)
-    outcome, findings = await engine.analyze_package(
-        package,
-        source=source,
-        workspace=nexus.config.workspace,
-        run_active_probes=run_probes,
-    )
+    try:
+        outcome, findings = await engine.analyze_package(
+            package,
+            source=source,
+            workspace=nexus.config.workspace,
+            run_active_probes=run_probes,
+        )
+    finally:
+        if play_source is not None:
+            play_source.close()
 
     configs = sorted(
         {c.project_id for c in outcome.report.firebase_configs if c.project_id}
