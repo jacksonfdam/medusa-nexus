@@ -679,13 +679,14 @@ async def _ingest_upload(
         package = package or detected.get("package") or ""
         version = version or detected.get("version_name") or "unknown"
 
+    # Manifest auto-detect is best-effort — our built-in AXML decoder
+    # doesn't cover every Android-14+ compact-entry layout in the wild,
+    # and on the iOS side ipatool can fail on signed-only IPAs. Rather
+    # than rejecting the upload (which leaves the analyst stranded with
+    # the file already on disk), fall back to the filename stem so the
+    # ingest can proceed under a deterministic, recognisable label.
     if not package:
-        artifact_path.unlink(missing_ok=True)
-        raise HTTPException(
-            400,
-            f"could not auto-detect {'bundle id' if platform == 'ios' else 'package name'} — "
-            f"pass `package` form field explicitly",
-        )
+        package = _safe_package_from_filename(file.filename) or "unknown.package"
 
     try:
         if platform == "ios":
@@ -736,6 +737,24 @@ async def _detect_metadata(nexus: MedusaNexus, path: Path, platform: str) -> dic
         return await engine.extract_manifest(path)  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _safe_package_from_filename(name: str | None) -> str:
+    """Filename-stem fallback when manifest detection comes back empty.
+
+    Real .apk filenames look like ``McDonald's_3.44.0_APKPure.apk`` or
+    ``com.example_22-bundled.apk`` — we strip the suffix and any
+    characters that would make a poor identifier downstream. Result is
+    safe to use as a project label and as a directory name.
+    """
+    if not name:
+        return ""
+    stem = Path(name).stem
+    # Replace non-(alnum / dot / dash / underscore) with dot, collapse runs.
+    cleaned = "".join(ch if (ch.isalnum() or ch in "._-") else "." for ch in stem)
+    while ".." in cleaned:
+        cleaned = cleaned.replace("..", ".")
+    return cleaned.strip(".")
 
 
 # Back-compat shim — kept because tests import `_detect_manifest`.
