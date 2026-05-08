@@ -91,26 +91,46 @@ class PlayIntelEngine(BaseEngine):
         return ["firebase", "credentials", "play-stream"]
 
     async def health_check(self) -> EngineStatus:
-        # Static path is always available; report whether Play credentials
-        # are wired in too (so /doctor reflects which mode is usable).
-        from mnexus.playintel.play_client import PlayCredentials, PlayAuthError
+        # Static path is always available; report whether the account
+        # manager has at least one usable identity stored so /doctor
+        # reflects which mode is usable.
+        from mnexus.core.artifact_store import ArtifactStore
+        from mnexus.config import NexusConfig
 
         try:
-            PlayCredentials.from_apkeep_ini()
-        except PlayAuthError as e:
+            store = ArtifactStore(NexusConfig.from_env().db_path)
+            try:
+                accounts = store.list_play_accounts()
+                count = len(accounts)
+                default = next((a.name for a in accounts if a.is_default), None)
+            finally:
+                store.close()
+        except Exception as exc:  # noqa: BLE001 — diagnostic path
             return EngineStatus(
                 name=self.name,
                 installed=True,
                 version="static-only",
                 path=None,
-                message=f"ready · pure-Python scan; Play streaming disabled ({e})",
+                message=f"ready · pure-Python scan; account store unavailable ({exc})",
+            )
+
+        if count == 0:
+            return EngineStatus(
+                name=self.name,
+                installed=True,
+                version="static-only",
+                path=None,
+                message="ready · pure-Python scan; no Play accounts (use `play-account add`)",
             )
         return EngineStatus(
             name=self.name,
             installed=True,
             version="play+static",
             path=None,
-            message="ready · Play protocol + pure-Python scan",
+            message=(
+                f"ready · {count} Play account(s) stored"
+                + (f" · default={default}" if default else " · no default set")
+            ),
         )
 
     async def execute(self, context: AnalysisContext) -> list[Finding]:

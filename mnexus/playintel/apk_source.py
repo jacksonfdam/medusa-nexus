@@ -39,10 +39,15 @@ from typing import Protocol
 
 import httpx
 
+from typing import TYPE_CHECKING
+
 from mnexus.playintel.play_client import (
     PlayClient,
     PlayCredentials,
 )
+
+if TYPE_CHECKING:
+    from mnexus.core.artifact_store import ArtifactStore
 
 from mnexus.playintel.remote_zip import LocalZip, RemoteZip
 
@@ -203,7 +208,8 @@ class PlayProtocolSource:
         self,
         *,
         credentials: PlayCredentials | None = None,
-        config_path: Path | None = None,
+        account_name: str | None = None,
+        store: "ArtifactStore | None" = None,
         device_props: dict[str, str] | None = None,
         client: PlayClient | None = None,
     ) -> None:
@@ -211,8 +217,10 @@ class PlayProtocolSource:
             self._client = client
             self._owns_client = False
         else:
-            creds = credentials or PlayCredentials.load(config_path)
-            self._client = PlayClient(creds, device_props=device_props)
+            creds = credentials or PlayCredentials.load(
+                store=store, account_name=account_name
+            )
+            self._client = PlayClient(creds, device_props=device_props, store=store)
             self._owns_client = True
 
     def close(self) -> None:

@@ -30,14 +30,17 @@ This client is the native replacement for the Go-binary bridge in
 
 from __future__ import annotations
 
-import configparser
 import logging
 import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
+
+if TYPE_CHECKING:
+    from mnexus.core.artifact_store import ArtifactStore
+    from mnexus.models.play_account import PlayAccount
 
 from mnexus.playintel.device_props import (
     DEFAULT_DEVICE_PROPS,
@@ -95,41 +98,64 @@ class PlayAuthError(RuntimeError):
 class PlayCredentials:
     """The four facts that identify one Play account on one device.
 
-    Loaded from ``~/.config/apkeep/apkeep.ini`` by default. The
-    ``aas_token`` is the long-lived master token (also called
-    "Token=oauth2_master" by the apkeep wiki); ``gsfid`` is the
-    Google Services Framework ID minted by checkin and effectively
-    permanent for that account/device pair.
+    Loaded from the persisted account manager
+    (:class:`mnexus.core.artifact_store.ArtifactStore`) by default,
+    falling back to environment variables. The ``aas_token`` is the
+    long-lived master token (also called "Token=oauth2_master" by the
+    apkeep wiki); ``gsfid`` is the Google Services Framework ID minted
+    by ``/checkin`` and effectively permanent for that account/device
+    pair.
+
+    Account names tie back to the ``play_accounts`` SQLite table — a
+    populated ``account_name`` field means runtime state (notably the
+    GSFID after a fresh checkin) gets written back through
+    :meth:`PlayClient.checkin` without the caller having to plumb the
+    store through.
     """
 
     email: str
     aas_token: str
     gsfid: str = ""  # filled in by checkin if missing
     locale: str = "en-US"
-
-    # Conventional location for MedusaNexus's own config; takes
-    # precedence over the legacy apkeep one for parity with the rest of
-    # the platform's `~/.config/mnexus/...` layout.
-    DEFAULT_CONFIG_PATH = Path.home() / ".config" / "mnexus" / "playintel.ini"
-    LEGACY_APKEEP_PATH = Path.home() / ".config" / "apkeep" / "apkeep.ini"
+    account_name: str = ""  # tag tying back to a stored PlayAccount, if any
 
     @classmethod
-    def load(cls, path: Path | None = None) -> PlayCredentials:
+    def load(
+        cls,
+        *,
+        store: "ArtifactStore | None" = None,
+        account_name: str | None = None,
+    ) -> PlayCredentials:
         """Load credentials in the canonical priority order.
 
-        1. Env vars ``PLAYINTEL_EMAIL`` + ``PLAYINTEL_AAS_TOKEN``
-           (optionally ``PLAYINTEL_GSFID``, ``PLAYINTEL_LOCALE``).
-        2. ``~/.config/mnexus/playintel.ini`` — the preferred file.
-        3. ``~/.config/apkeep/apkeep.ini`` — legacy, for compatibility
-           with people who already had apkeep configured.
-        4. ``path`` — explicit override always wins if provided.
+        1. ``account_name`` — explicit pick from the store always wins.
+        2. The store's default account, if one is set.
+        3. Env vars ``PLAYINTEL_EMAIL`` + ``PLAYINTEL_AAS_TOKEN``
+           (optionally ``PLAYINTEL_GSFID``, ``PLAYINTEL_LOCALE``) —
+           useful for CI / one-shot containers that don't bring a
+           sqlite file.
+        4. Anything else is an error: the user is prompted with the
+           exact CLI command to register an account.
 
-        Each fallback re-raises a :class:`PlayAuthError` describing
-        what's missing. The error message is the user-facing setup
-        guidance — keep it actionable.
+        ``store`` is an :class:`ArtifactStore` instance; when not
+        supplied we open the platform's default DB. Lazy import to
+        avoid a circular dependency through the orchestrator.
         """
-        if path is not None:
-            return cls._from_ini(Path(path).expanduser())
+        if store is None:
+            store = _open_default_store()
+
+        if account_name:
+            account = store.get_play_account(account_name)
+            if account is None:
+                raise PlayAuthError(
+                    f"no Play account named '{account_name}'. "
+                    f"Run `mnexus play-account list` to see what's stored."
+                )
+            return cls.from_account(account)
+
+        default = store.get_default_play_account()
+        if default is not None:
+            return cls.from_account(default)
 
         env_email = os.environ.get("PLAYINTEL_EMAIL", "").strip()
         env_aas = os.environ.get("PLAYINTEL_AAS_TOKEN", "").strip()
@@ -141,50 +167,22 @@ class PlayCredentials:
                 locale=os.environ.get("PLAYINTEL_LOCALE", "en-US"),
             )
 
-        for candidate in (cls.DEFAULT_CONFIG_PATH, cls.LEGACY_APKEEP_PATH):
-            if candidate.exists():
-                return cls._from_ini(candidate)
-
         raise PlayAuthError(
-            "no Play credentials found. Run `mnexus play-login --email <gmail> "
-            "--aas <token>` to write them, or set PLAYINTEL_EMAIL + "
-            f"PLAYINTEL_AAS_TOKEN in the environment. Searched: "
-            f"{cls.DEFAULT_CONFIG_PATH}, {cls.LEGACY_APKEEP_PATH}."
+            "no Play credentials found. Run `mnexus play-account add "
+            "--name <handle> --email <gmail> --password <pw>` to register "
+            "an account, or set PLAYINTEL_EMAIL + PLAYINTEL_AAS_TOKEN "
+            "in the environment for a one-off run."
         )
 
-    # Back-compat alias — keeps callers that expected the old name
-    # working through the rename. Plumbs through to :meth:`load`.
     @classmethod
-    def from_apkeep_ini(cls, path: Path | None = None) -> PlayCredentials:
-        """Deprecated. Prefer :meth:`load` — which also handles env vars
-        and the new ``~/.config/mnexus/playintel.ini`` location.
-        """
-        return cls.load(path)
-
-    @classmethod
-    def _from_ini(cls, ini_path: Path) -> PlayCredentials:
-        """Parse one apkeep-format INI file (the schema both files share)."""
-        if not ini_path.exists():
-            raise PlayAuthError(
-                f"Play credentials file not found at {ini_path}. "
-                "Run `mnexus play-login --email <gmail> --aas <token>` to create it."
-            )
-        parser = configparser.ConfigParser()
-        parser.read(ini_path)
-        if "google" not in parser:
-            raise PlayAuthError(f"[google] section missing in {ini_path}")
-        section = parser["google"]
-        email = section.get("username") or section.get("email") or ""
-        aas = section.get("aas_token") or section.get("oauth_token") or ""
-        if not email or not aas:
-            raise PlayAuthError(
-                f"username and aas_token required in [google] section of {ini_path}"
-            )
+    def from_account(cls, account: "PlayAccount") -> PlayCredentials:
+        """Build credentials from a stored :class:`PlayAccount`."""
         return cls(
-            email=email,
-            aas_token=aas,
-            gsfid=section.get("gsfid", ""),
-            locale=section.get("locale", "en-US"),
+            email=account.email,
+            aas_token=account.aas_token,
+            gsfid=account.gsfid,
+            locale=account.locale,
+            account_name=account.name,
         )
 
     @classmethod
@@ -212,30 +210,17 @@ class PlayCredentials:
             raise PlayAuthError(str(exc)) from exc
         return cls(email=email, aas_token=aas, locale=locale)
 
-    def save(self, path: Path | None = None) -> Path:
-        """Persist credentials to disk in apkeep INI format.
 
-        Default location is :attr:`DEFAULT_CONFIG_PATH`; the parent
-        directory is created if it doesn't exist. Returns the path
-        actually written so the caller can show it back to the user.
-        """
-        out = (path or self.DEFAULT_CONFIG_PATH).expanduser()
-        out.parent.mkdir(parents=True, exist_ok=True)
-        parser = configparser.ConfigParser()
-        parser["google"] = {
-            "username": self.email,
-            "aas_token": self.aas_token,
-            "gsfid": self.gsfid,
-            "locale": self.locale,
-        }
-        with out.open("w") as fh:
-            parser.write(fh)
-        # Restrict file mode — these are credentials.
-        try:
-            out.chmod(0o600)
-        except OSError:
-            pass
-        return out
+def _open_default_store() -> "ArtifactStore":
+    """Open the project's standard SQLite store. Lazy to avoid a cycle:
+    ArtifactStore imports models, models don't import the client, and we
+    only resolve here at call time."""
+    from mnexus.config import NexusConfig
+    from mnexus.core.artifact_store import ArtifactStore
+
+    cfg = NexusConfig.from_env()
+    cfg.ensure_workspace()
+    return ArtifactStore(cfg.db_path)
 
 
 # ─── Wire-format result types ──────────────────────────────────────────────
@@ -283,7 +268,7 @@ class PlayClient:
 
     Typical lifecycle::
 
-        creds = PlayCredentials.from_apkeep_ini()
+        creds = PlayCredentials.load()  # default account from the store
         client = PlayClient(creds)
         client.ensure_ready()                      # auth + checkin if needed
         info = client.get_download_info("com.example.app")
@@ -300,6 +285,7 @@ class PlayClient:
         device_props: dict[str, str] | None = None,
         http_client: httpx.Client | None = None,
         timeout_s: float = 30.0,
+        store: "ArtifactStore | None" = None,
     ) -> None:
         self.credentials = credentials
         self.device_props = device_props or DEFAULT_DEVICE_PROPS
@@ -308,6 +294,10 @@ class PlayClient:
         self._auth_token: str = ""
         self._auth_token_expiry: float = 0.0
         self._device_checkin_token: str = ""
+        # When set, runtime state discovered during /checkin (the
+        # freshly minted GSFID) is persisted back to the matching
+        # account row so subsequent runs skip the round-trip.
+        self._store = store
 
     def __enter__(self) -> PlayClient:
         return self
@@ -438,6 +428,14 @@ class PlayClient:
         consistency = find_field(resp.content, 12)
         if isinstance(consistency, (bytes, bytearray)):
             self._device_checkin_token = bytes(consistency).decode("utf-8", errors="replace")
+        # Persist back to the account row if we know which one this is.
+        if self._store is not None and self.credentials.account_name:
+            try:
+                self._store.update_play_account_runtime_state(
+                    self.credentials.account_name, gsfid=gsfid
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                log.warning("playintel: failed to persist GSFID: %s", exc)
         log.info("playintel: checkin ok → gsfid=%s", gsfid)
         return gsfid
 
