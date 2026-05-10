@@ -141,7 +141,14 @@ def _help(state: ReplState, args: list[str]) -> None:
 
 
 def _doctor(state: ReplState, args: list[str]) -> None:
-    """Run /v1/doctor with a live spinner per row."""
+    """Run /v1/doctor with a live spinner per row.
+
+    Pass ``--env`` (or ``-e``) to also dump the MNEXUS_* env vars the running
+    process actually sees — handy when an engine reports MISS because the
+    shell that launched mnexus didn't source ~/.mnexus/env.sh.
+    """
+    show_env = any(a in ("--env", "-e", "--verbose", "-v") for a in args)
+
     console.print()
     spinner = Spinner("dots", text=Text("running engine health checks…", style="cyan"))
     with Live(spinner, console=console, transient=True):
@@ -167,6 +174,71 @@ def _doctor(state: ReplState, args: list[str]) -> None:
         console.print(f"  [bold red]{bad}[/bold red] engine(s) missing · [green]{ok}[/green] healthy")
     else:
         console.print(f"  [bold green]all {ok} engines online[/bold green] — every head answered")
+
+    if show_env:
+        _doctor_env_dump(state)
+    elif bad:
+        console.print("  [dim]hint: re-run with [bold]/doctor --env[/bold] to see which MNEXUS_* vars made it to this process[/dim]")
+
+
+def _doctor_env_dump(state: ReplState) -> None:
+    """Print every MNEXUS_* env var the running process can see, with secrets masked.
+
+    Reads from `os.environ` directly (the source of truth for the current
+    shell) AND from `state.config` (the values pydantic actually loaded into
+    the orchestrator). When the two disagree the issue is almost always that
+    the user `source`d env.sh in another shell, or that some other layer
+    (a wrapper script, a pyenv shim) clobbered the env.
+    """
+    table = Table(box=ROUNDED, border_style="dim magenta", show_header=True,
+                  header_style="bold magenta", title="MNEXUS_* environment", title_style="dim")
+    table.add_column("variable", style="bold cyan", no_wrap=True)
+    table.add_column("os.environ", no_wrap=False)
+    table.add_column("nexus.config", no_wrap=False)
+
+    def mask(value: object) -> str:
+        if value is None or value == "":
+            return "[dim]—[/dim]"
+        s = str(value)
+        if any(t in (table_var or "") for t in ("KEY", "TOKEN", "SECRET")):
+            return s[:4] + "…" + s[-4:] if len(s) > 12 else "[dim]set[/dim]"
+        return s
+
+    cfg = state.config
+    rows = [
+        ("MNEXUS_ADB_PATH",      cfg.adb_path),
+        ("MNEXUS_JADX_PATH",     cfg.jadx_path),
+        ("MNEXUS_APKTOOL_PATH",  cfg.apktool_path),
+        ("MNEXUS_GHIDRA_PATH",   cfg.ghidra_path),
+        ("MNEXUS_MEDUSA_PATH",   cfg.medusa_path),
+        ("MNEXUS_STHENO_PATH",   cfg.stheno_path),
+        ("MNEXUS_WORKSPACE",     cfg.workspace),
+        ("MNEXUS_DB_PATH",       cfg.db_path),
+        ("MNEXUS_MOBSF_URL",     cfg.mobsf_url),
+        ("MNEXUS_MOBSF_API_KEY", cfg.mobsf_api_key),
+        ("MNEXUS_BURP_URL",      cfg.burp_url),
+        ("MNEXUS_BURP_API_KEY",  cfg.burp_api_key),
+        ("MNEXUS_CAIDO_URL",     cfg.caido_url),
+        ("MNEXUS_CAIDO_API_KEY", cfg.caido_api_key),
+        ("MNEXUS_PROXY_FLAVOR",  cfg.proxy_flavor),
+    ]
+    for table_var, cfg_value in rows:
+        env_value = os.environ.get(table_var)
+        env_cell = mask(env_value) if env_value is not None else "[dim]unset[/dim]"
+        cfg_cell = mask(cfg_value)
+        # Highlight mismatches — the most common cause of "MISS but env is set".
+        if env_value is None and cfg_value not in (None, "", cfg.__class__.model_fields[_field_for(table_var)].default):
+            cfg_cell = f"[yellow]{cfg_cell}[/yellow] [dim](from default)[/dim]"
+        elif env_value is not None and str(cfg_value or "") != str(env_value):
+            cfg_cell = f"[red]{cfg_cell}[/red] [dim](≠ env)[/dim]"
+        table.add_row(table_var, env_cell, cfg_cell)
+    console.print()
+    console.print(table)
+
+
+def _field_for(env_var: str) -> str:
+    """MNEXUS_FOO_BAR → foo_bar (NexusConfig field name)."""
+    return env_var.removeprefix("MNEXUS_").lower()
 
 
 def _scan(state: ReplState, args: list[str]) -> None:
