@@ -247,6 +247,61 @@ async def get_finding(finding_id: str) -> dict[str, Any]:
     raise HTTPException(404, f"no finding with id {finding_id}")
 
 
+# ─── apkeep fetch ─────────────────────────────────────────────────────────
+
+@app.post("/v1/apks/fetch")
+async def fetch_apk(
+    package: str = Form(...),
+    source: str = Form(default="google-play"),
+    auto_ingest: bool = Form(default=True),
+) -> dict[str, Any]:
+    """Pull an APK from a store via apkeep, then optionally ingest it.
+
+    Source ∈ {google-play, aurora, f-droid, apkpure, huawei-appgallery}.
+    For google-play apkeep needs ~/.config/apkeep/apkeep.ini configured;
+    aurora and f-droid don't require credentials.
+
+    When `auto_ingest` is true (default) we run the same pipeline as
+    `/v1/apks/upload` against the downloaded APK and return the new
+    project_id. Otherwise we just return the file paths apkeep wrote.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    apkeep = nexus.engines.get("apkeep")
+    if apkeep is None:
+        raise HTTPException(503, "apkeep engine not registered (rebuild engines/__init__)")
+
+    from mnexus.engines.apkeep_engine import ApkeepError
+
+    try:
+        result = await apkeep.fetch(package=package, source=source)  # type: ignore[attr-defined]
+    except ApkeepError as exc:
+        raise HTTPException(502, f"apkeep failed: {exc}") from exc
+
+    response: dict[str, Any] = {
+        "package": package,
+        "source": source,
+        "files": [str(p) for p in result.files],
+        "primary_apk": str(result.primary_apk) if result.primary_apk else None,
+    }
+    if not auto_ingest or not result.primary_apk:
+        return response
+
+    # Hand off to the standard ingest path so playintel/jadx/ghidra/mobsf
+    # all run as if the APK had been dragged in by the user.
+    try:
+        project = await nexus.ingest_apk(
+            result.primary_apk,
+            package_name=package,
+            version="store-latest",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"ingest failed after fetch: {exc.__class__.__name__}: {exc}") from exc
+
+    response["project_id"] = project.id
+    response["risk_score"] = project.attack_surface.risk_score() if project.attack_surface else 0.0
+    return response
+
+
 # ─── upload ───────────────────────────────────────────────────────────────
 
 @app.post("/v1/apks/upload")

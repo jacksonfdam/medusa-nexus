@@ -19,6 +19,7 @@ from mnexus.config import NexusConfig
 from mnexus.core.artifact_store import ArtifactStore
 from mnexus.engines import (
     ADBEngine,
+    ApkeepEngine,
     APKToolEngine,
     BaseEngine,
     BurpEngine,
@@ -52,6 +53,7 @@ class MedusaNexus:
     def _register_engines(self) -> dict[str, BaseEngine]:
         return {
             "adb": ADBEngine(self.config),
+            "apkeep": ApkeepEngine(self.config),
             "apktool": APKToolEngine(self.config),
             "ipatool": IPAToolEngine(self.config),
             "jadx": JADXEngine(self.config),
