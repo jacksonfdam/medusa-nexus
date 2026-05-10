@@ -1,6 +1,7 @@
 """Engines — one wrapper per external tool. Each speaks `Finding`."""
 
 from mnexus.engines.adb_engine import ADBEngine
+from mnexus.engines.apkeep_engine import ApkeepEngine
 from mnexus.engines.apktool_engine import APKToolEngine
 from mnexus.engines.base import BaseEngine, EngineStatus
 from mnexus.engines.burp_engine import BurpEngine
@@ -14,6 +15,7 @@ from mnexus.engines.vphone_engine import VPhoneEngine
 
 __all__ = [
     "ADBEngine",
+    "ApkeepEngine",
     "APKToolEngine",
     "BaseEngine",
     "BurpEngine",
