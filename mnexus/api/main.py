@@ -2583,12 +2583,80 @@ async def get_settings() -> dict[str, Any]:
             "mobsf_has_api_key": bool(cfg.mobsf_api_key),
             "burp_url": cfg.burp_url,
             "burp_has_api_key": bool(cfg.burp_api_key),
+            "caido_url": cfg.caido_url,
+            "caido_has_api_key": bool(cfg.caido_api_key),
+            "proxy_flavor": cfg.proxy_flavor,
         },
         "workspace": str(cfg.workspace),
         "db_path": str(cfg.db_path),
         "parallel_engines": cfg.parallel_engines,
         "default_dynamic_duration_s": cfg.default_dynamic_duration_s,
     }
+
+
+# ─── exports: API collections + deeplink probe script ───────────────────
+
+@app.get("/v1/projects/{project_id}/export/{fmt}")
+async def export_project(project_id: str, fmt: str) -> Response:
+    """Export the recovered endpoints + deeplinks in the chosen format.
+
+    Formats:
+      - postman   — Postman v2.1 collection (JSON)
+      - caido     — Caido import bundle (JSON)
+      - burp      — Burp Suite items file (XML)
+      - moxy      — Moxy ruleset (YAML)
+      - deeplinks — bash probe script (am start loop)
+    """
+    nexus: MedusaNexus = app.state.nexus
+    project = nexus.db.load_project(project_id)
+    if not project:
+        raise HTTPException(404, f"no project with id {project_id}")
+
+    from mnexus.exporters import (
+        to_burp_items,
+        to_caido,
+        to_deeplink_script,
+        to_moxy_config,
+        to_postman,
+    )
+
+    fmt_l = fmt.lower()
+    media: str
+    suffix: str
+    body: str
+
+    if fmt_l == "postman":
+        body = to_postman(project)
+        media = "application/json"
+        suffix = "postman_collection.json"
+    elif fmt_l == "caido":
+        body = to_caido(project)
+        media = "application/json"
+        suffix = "caido.json"
+    elif fmt_l in ("burp", "burp-items"):
+        body = to_burp_items(project)
+        media = "application/xml"
+        suffix = "burp-items.xml"
+    elif fmt_l == "moxy":
+        body = to_moxy_config(project)
+        media = "application/yaml"
+        suffix = "moxy.yml"
+    elif fmt_l in ("deeplinks", "deeplink"):
+        body = to_deeplink_script(project)
+        media = "application/x-sh"
+        suffix = "deeplink-probe.sh"
+    else:
+        raise HTTPException(400, f"unsupported format '{fmt}' — pick postman / caido / burp / moxy / deeplinks")
+
+    fname = f"{project_id}-{suffix}"
+    return Response(
+        content=body,
+        media_type=media,
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "X-Mnexus-Project": project_id,
+        },
+    )
 
 
 # ─── reports ──────────────────────────────────────────────────────────────
