@@ -157,6 +157,13 @@ class GhidraEngine(BaseEngine):
             "jailbreak_detection_detected": jb_detected,
             "jailbreak_detection_library": jb_library,
         }
+
+        # Collapse duplicate findings: when the same pattern hits across N
+        # native libs (very common for `ptrace`, `frida`, etc.) we get N
+        # separate Findings with near-identical title/description. Group by
+        # (severity, category, normalised-title) and merge their location
+        # + evidence into one entry per signal.
+        findings = _collapse_native_duplicates(findings)
         return findings
 
     def _scan_elf(self, name: str, data: bytes, findings: list[Finding], crypto_ops: list[CryptoOperation]) -> None:
@@ -345,3 +352,45 @@ def _looks_like_main_macho(name: str) -> bool:
     if "/Frameworks/" in name and len(parts) >= 5 and parts[-1].split(".")[-1] not in ("plist", "nib", "strings"):
         return True
     return False
+
+
+def _collapse_native_duplicates(findings: list[Finding]) -> list[Finding]:
+    """Group findings by (severity, category, normalised-title-prefix) and merge.
+
+    The same pattern (anti-Frida, ptrace, root paths, …) often hits in every
+    .so / framework. Without this, a single APK can ship 8 nearly-identical
+    "Anti-Frida tripwire in liba.so / libb.so / …" rows. We collapse those
+    into one Finding whose location is the comma-joined list of files.
+    """
+    grouped: dict[tuple, Finding] = {}
+    extras: dict[tuple, list[str]] = {}
+
+    for f in findings:
+        # Normalise: drop trailing "in <filename>" so libraries with the
+        # same signal collapse into one bucket.
+        title_key = f.title.split(" in ")[0].strip().lower()
+        key = (f.severity, f.category, title_key)
+        first = grouped.get(key)
+        if first is None:
+            grouped[key] = f
+            extras[key] = [f.location] if f.location else []
+            continue
+        if f.location and f.location not in extras[key]:
+            extras[key].append(f.location)
+
+    # Apply the merged location string. Pydantic models are immutable by
+    # default — copy with model_copy.
+    out: list[Finding] = []
+    for key, f in grouped.items():
+        locs = extras[key]
+        if len(locs) <= 1:
+            out.append(f)
+            continue
+        merged_location = f"{locs[0]} (+ {len(locs) - 1} more)"
+        evidence = f.evidence + " · also: " + ", ".join(Path(loc).name for loc in locs[1:])
+        out.append(f.model_copy(update={
+            "location": merged_location,
+            "evidence": evidence[:500],  # cap for sanity
+            "title": f.title.split(" in ")[0] + f" — across {len(locs)} native binaries",
+        }))
+    return out
