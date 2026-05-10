@@ -17,14 +17,12 @@ playintel streaming source) — it doesn't produce findings.
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from mnexus.engines.base import AnalysisContext, BaseEngine, EngineStatus
 from mnexus.models.finding import Finding
-
 
 SUPPORTED_SOURCES = {
     "google-play",
@@ -119,7 +117,7 @@ class ApkeepEngine(BaseEngine):
         # ~/.config/apkeep/apkeep.ini — same file the playintel client uses.
         try:
             await self._run(cmd, timeout=timeout_s)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise ApkeepError(f"apkeep timed out after {timeout_s}s") from exc
 
         new_files = sorted(p for p in target.iterdir() if p.name not in before and p.is_file())
@@ -152,7 +150,7 @@ class ApkeepEngine(BaseEngine):
         cmd = [path, "--app", package, "--download-source", "google-play", "--print-url"]
         try:
             out = await self._run(cmd, timeout=30)
-        except (ApkeepError, asyncio.TimeoutError):
+        except (TimeoutError, ApkeepError):
             return None
         out = out.strip()
         if out.startswith("http"):
@@ -169,7 +167,7 @@ class ApkeepEngine(BaseEngine):
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             raise
         if proc.returncode != 0:

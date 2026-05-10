@@ -16,7 +16,6 @@ in a small banner so the operator can scroll the terminal output.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from urllib.parse import urlparse
 
 from mnexus.models.project import Project
 
@@ -37,7 +36,7 @@ def to_deeplink_script(project: Project, *, screenshot: bool = True, delay_s: fl
     lines: list[str] = [
         "#!/usr/bin/env bash",
         "#",
-        f"# MEDUSA NEXUS · deeplink + exported-activity probe",
+        "# MEDUSA NEXUS · deeplink + exported-activity probe",
         f"# project : {project.id}",
         f"# package : {pkg}",
         f"# version : {project.version_name}",

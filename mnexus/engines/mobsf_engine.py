@@ -27,7 +27,6 @@ import httpx
 from mnexus.engines.base import AnalysisContext, BaseEngine, EngineStatus
 from mnexus.models.finding import Finding, FindingCategory, Severity
 
-
 # MobSF severity strings → our Severity enum.
 _MOBSF_SEVERITY = {
     "high":     Severity.HIGH,

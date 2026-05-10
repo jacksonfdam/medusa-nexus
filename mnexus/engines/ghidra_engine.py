@@ -20,7 +20,6 @@ from mnexus.engines.base import AnalysisContext, BaseEngine, EngineStatus
 from mnexus.models.attack_surface import CryptoOperation
 from mnexus.models.finding import Finding, FindingCategory, Severity
 
-
 # Patterns shared by both formats — compiled cryptography libs reuse the same
 # C symbol names whether the host is Android NDK or iOS.
 _NATIVE_PATTERNS = {

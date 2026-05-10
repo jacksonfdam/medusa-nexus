@@ -9,14 +9,11 @@ each unique URL.
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from datetime import UTC, datetime
-from typing import Iterable
 from urllib.parse import urlparse
 
 from mnexus.models.project import Project
-
 
 # ─── helpers ────────────────────────────────────────────────────────────
 
@@ -255,7 +252,7 @@ def to_moxy_config(project: Project) -> str:
     hosts = sorted({urlparse(url).netloc for url in endpoints if urlparse(url).netloc})
 
     lines: list[str] = []
-    lines.append(f"# Moxy ruleset · MEDUSA NEXUS export")
+    lines.append("# Moxy ruleset · MEDUSA NEXUS export")
     lines.append(f"# project: {project.id}  package: {project.package_name}  version: {project.version_name}")
     lines.append(f"# generated: {datetime.now(UTC).isoformat()}")
     lines.append("")
@@ -265,9 +262,9 @@ def to_moxy_config(project: Project) -> str:
         lines.append("  # no hosts recovered from the APK yet")
     for host in hosts:
         lines.append(f"  - name: log {host}")
-        lines.append(f"    match:")
+        lines.append("    match:")
         lines.append(f"      host: {host}")
-        lines.append(f"    action: log")
+        lines.append("    action: log")
     lines.append("")
     lines.append("# To enrich:")
     lines.append("# - replace `action: log` with `action: replace_response` and inline a body")
