@@ -34,6 +34,9 @@ class NexusConfig(BaseModel):
     mobsf_api_key: str | None = Field(default=None, description="MobSF API key. Yes, it's required.")
     burp_url: str = Field(default="http://localhost:1337", description="Burp REST API base URL.")
     burp_api_key: str | None = Field(default=None)
+    caido_url: str = Field(default="http://localhost:8080", description="Caido (https://caido.io) REST API base URL — alternative to Burp.")
+    caido_api_key: str | None = Field(default=None, description="Caido API token. Generate at Workbench → Settings → Tokens.")
+    proxy_flavor: str = Field(default="burp", description="Which intercepting proxy to drive: 'burp' (default) | 'caido'.")
 
     # ─── workspace ───
     workspace: Path = Field(default=Path.home() / ".mnexus" / "workspace")

@@ -5,6 +5,7 @@ from mnexus.engines.apkeep_engine import ApkeepEngine
 from mnexus.engines.apktool_engine import APKToolEngine
 from mnexus.engines.base import BaseEngine, EngineStatus
 from mnexus.engines.burp_engine import BurpEngine
+from mnexus.engines.caido_engine import CaidoEngine
 from mnexus.engines.frida_engine import FridaEngine
 from mnexus.engines.ghidra_engine import GhidraEngine
 from mnexus.engines.ipatool_engine import IPAToolEngine
@@ -19,6 +20,7 @@ __all__ = [
     "APKToolEngine",
     "BaseEngine",
     "BurpEngine",
+    "CaidoEngine",
     "EngineStatus",
     "FridaEngine",
     "GhidraEngine",
