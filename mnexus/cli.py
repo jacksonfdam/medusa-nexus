@@ -655,16 +655,24 @@ def _play_account_show(state: ReplState, args: list[str]) -> None:
 
 
 def _play_scan(state: ReplState, args: list[str]) -> None:
-    """`/play-scan <package>` — stream an APK from Google Play and analyze it."""
+    """`/play-scan <package>` — stream an APK from Google Play and analyze it.
+
+    Active Firebase / Firestore / Storage probes are **opt-in** (you're hitting
+    third-party services on behalf of someone else's app — be explicit about
+    consent). Pass ``--probe`` to enable, or set
+    ``MNEXUS_PLAYINTEL_ACTIVE_PROBES=1`` in the environment.
+    """
     if not args:
         console.print(
-            "[red]usage:[/red] /play-scan <package> [--apk <local-path>] [--no-probes]"
+            "[red]usage:[/red] /play-scan <package> [--apk <local-path>] [--probe]"
         )
         return
 
     package = args[0]
     apk_override: Path | None = None
-    run_probes = True
+    # Default OFF — active probes are an opt-in network-touch.
+    env_flag = os.environ.get("MNEXUS_PLAYINTEL_ACTIVE_PROBES", "").lower() in {"1", "true", "yes", "on"}
+    run_probes = env_flag
     account_name: str | None = None
     it = iter(args[1:])
     for tok in it:
@@ -676,10 +684,17 @@ def _play_scan(state: ReplState, args: list[str]) -> None:
             val = next(it, "")
             if val:
                 account_name = val
-        elif tok in ("--no-probes",):
+        elif tok in ("--probe", "--probes"):
+            run_probes = True
+        elif tok in ("--no-probe", "--no-probes"):
             run_probes = False
         else:
             console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+    if run_probes:
+        console.print(
+            "[yellow]⚠ active probes enabled — this hits the target's Firebase / Firestore / Storage. "
+            "Make sure you have permission to test this app.[/yellow]"
+        )
 
     from mnexus.engines.play_intel_engine import PlayIntelEngine
     from mnexus.playintel.apk_source import (

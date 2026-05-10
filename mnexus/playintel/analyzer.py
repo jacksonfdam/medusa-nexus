@@ -59,14 +59,19 @@ def analyze_package(
     package_name: str,
     *,
     workspace: Path,
-    run_active_probes: bool = True,
+    run_active_probes: bool = False,
 ) -> AnalysisOutcome:
     """End-to-end analysis of one Android package.
 
     ``workspace`` is the directory under which ``secrets/<package>/``
-    is created when bearing files need to be persisted. Pass
-    ``run_active_probes=False`` for a pure static-only scan (no
-    outbound traffic to Firebase / GCP).
+    is created when bearing files need to be persisted.
+
+    **Active probes are opt-in.** Default is False: a static scan that
+    never sends a packet to Firebase / Firestore / Storage. Pass
+    ``run_active_probes=True`` (or set ``MNEXUS_PLAYINTEL_ACTIVE_PROBES=1``
+    at the call site) to verify discovered config IDs against the live
+    services. You're hitting third-party infra on someone else's
+    behalf — make sure you have permission to test the app.
     """
     info = source.get_download_info(package_name)
     log.info(
