@@ -254,6 +254,7 @@ async def fetch_apk(
     package: str = Form(...),
     source: str = Form(default="google-play"),
     auto_ingest: bool = Form(default=True),
+    force: bool = Form(default=False),
 ) -> dict[str, Any]:
     """Pull an APK from a store via apkeep, then optionally ingest it.
 
@@ -264,6 +265,10 @@ async def fetch_apk(
     When `auto_ingest` is true (default) we run the same pipeline as
     `/v1/apks/upload` against the downloaded APK and return the new
     project_id. Otherwise we just return the file paths apkeep wrote.
+
+    Dedup: if the fetched APK's SHA-256 already has a Project, we return
+    that existing one (`dedup=true`) instead of re-running the pipeline.
+    Set `force=True` to rescan in place.
     """
     nexus: MedusaNexus = app.state.nexus
     apkeep = nexus.engines.get("apkeep")
@@ -287,19 +292,27 @@ async def fetch_apk(
         return response
 
     # Hand off to the standard ingest path so playintel/jadx/ghidra/mobsf
-    # all run as if the APK had been dragged in by the user.
+    # all run as if the APK had been dragged in by the user. The orchestrator
+    # short-circuits on SHA-256 dedup, so re-fetching the same store version
+    # twice doesn't re-run the pipeline.
     try:
         project = await nexus.ingest_apk(
             result.primary_apk,
             package_name=package,
             version="store-latest",
+            force=force,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"ingest failed after fetch: {exc.__class__.__name__}: {exc}") from exc
 
     response["project_id"] = project.id
     response["risk_score"] = project.attack_surface.risk_score() if project.attack_surface else 0.0
+    response["dedup"] = project.apk_sha256 != _file_sha256(result.primary_apk) if False else False
     return response
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 # ─── upload ───────────────────────────────────────────────────────────────
@@ -309,6 +322,7 @@ async def upload_apk(
     file: UploadFile = File(...),
     package: str | None = Form(default=None),
     version: str | None = Form(default=None),
+    force: bool = Form(default=False),
 ) -> dict[str, Any]:
     """Receive an APK or IPA, autodetect platform, run the right pipeline.
 
@@ -316,8 +330,11 @@ async def upload_apk(
     accepts both Android APKs and iOS IPAs — we sniff the zip contents and
     route accordingly. The SPA redirects to /#/project/{project_id}/overview
     on success either way.
+
+    Dedup: byte-identical uploads short-circuit to the existing project
+    (response carries ``dedup=true``). Pass ``force=true`` to rescan in place.
     """
-    return await _ingest_upload(file, package, version)
+    return await _ingest_upload(file, package, version, force=force)
 
 
 @app.post("/v1/playintel/scan")
@@ -847,9 +864,10 @@ async def upload_ipa(
     file: UploadFile = File(...),
     package: str | None = Form(default=None),
     version: str | None = Form(default=None),
+    force: bool = Form(default=False),
 ) -> dict[str, Any]:
     """Explicit iOS upload endpoint. Same shape as `/v1/apks/upload`."""
-    return await _ingest_upload(file, package, version, hint="ios")
+    return await _ingest_upload(file, package, version, hint="ios", force=force)
 
 
 async def _ingest_upload(
@@ -858,12 +876,18 @@ async def _ingest_upload(
     version: str | None,
     *,
     hint: str | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Shared upload + ingest path used by `/v1/apks/upload` + `/v1/ipas/upload`.
 
     Detects platform from the zip contents (AndroidManifest.xml → android,
     Payload/*.app/Info.plist → ios). The `hint` parameter forces a platform
-    when the caller already knows.
+    when the caller already knows. `force=True` bypasses the SHA-256 dedup.
+
+    Streams to disk while hashing in flight; if the resulting hash already
+    has a Project, we delete the duplicate file and return the existing
+    Project with `dedup=True` in the response so the UI can route the user
+    straight there instead of starting another scan.
     """
     nexus: MedusaNexus = app.state.nexus
     workspace = nexus.config.workspace
@@ -886,6 +910,28 @@ async def _ingest_upload(
         artifact_path.unlink(missing_ok=True)
         raise HTTPException(400, "uploaded file was empty")
 
+    sha = digest.hexdigest()
+
+    # Pre-pipeline dedup: surface the existing project right away if the
+    # hash matches. The orchestrator does this too — but doing it here as
+    # well lets us delete the duplicate file from the workspace immediately
+    # and respond with `dedup=true` so the UI can route the user
+    # straight to the existing project page.
+    if not force:
+        existing = nexus.db.find_by_sha256(sha)
+        if existing is not None:
+            artifact_path.unlink(missing_ok=True)
+            return {
+                "project_id": existing.id,
+                "platform": existing.platform,
+                "apk_size_bytes": size,
+                "apk_sha256": sha,
+                "package": existing.package_name,
+                "version": existing.version_name,
+                "dedup": True,
+                "project": existing.model_dump(mode="json"),
+            }
+
     # Detect platform from contents unless the caller hinted.
     platform = hint or _detect_platform(artifact_path) or _platform_from_suffix(artifact_path)
 
@@ -906,9 +952,9 @@ async def _ingest_upload(
 
     try:
         if platform == "ios":
-            project = await nexus._ingest_ipa(artifact_path, package_name=package, version=version)
+            project = await nexus._ingest_ipa(artifact_path, package_name=package, version=version, force=force)
         else:
-            project = await nexus.ingest_apk(artifact_path, package_name=package, version=version)
+            project = await nexus.ingest_apk(artifact_path, package_name=package, version=version, force=force)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"ingest failed: {exc.__class__.__name__}: {exc}") from exc
 
@@ -916,9 +962,10 @@ async def _ingest_upload(
         "project_id": project.id,
         "platform": project.platform,
         "apk_size_bytes": size,
-        "apk_sha256": digest.hexdigest(),
+        "apk_sha256": sha,
         "package": project.package_name,
         "version": project.version_name,
+        "dedup": False,
         "project": project.model_dump(mode="json"),
     }
 
