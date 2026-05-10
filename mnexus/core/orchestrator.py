@@ -11,6 +11,7 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import shutil
 from pathlib import Path
@@ -108,6 +109,7 @@ class MedusaNexus:
         version: str,
         *,
         existing_id: str | None = None,
+        force: bool = False,
     ) -> Project:
         """Main entry point. APK in, Project out. Pipeline runs in phases.
 
@@ -123,9 +125,25 @@ class MedusaNexus:
                   per-engine extras + their findings).
         Phase 3 — generate hooks: Frida scripts derived from static findings.
 
-        When `existing_id` is provided the new project payload reuses that id,
-        which lets the rescan endpoint refresh data in place.
+        Pass ``existing_id`` to refresh a stored project in place (used by
+        ``/v1/projects/{id}/rescan``).
+
+        Pass ``force=True`` to re-run the pipeline even when a project with
+        the same SHA-256 already exists. Default is to short-circuit and
+        return the existing Project — the platform's APK-dedup contract.
         """
+        # Dedup by SHA-256 first so we never re-run the pipeline on a file
+        # the platform has already processed. Cheap pre-hash on disk.
+        if not force and existing_id is None:
+            sha = hashlib.sha256(apk_path.read_bytes()).hexdigest()
+            existing = self.db.find_by_sha256(sha)
+            if existing is not None:
+                log.info(
+                    "ingest dedup: %s already analysed as %s (sha=%s)",
+                    apk_path.name, existing.id, sha[:12],
+                )
+                return existing
+
         scan_path, bundle_cleanup_dir = _prepare_scan_path(apk_path, self.config.workspace)
         try:
             return await self._ingest_apk_inner(
@@ -286,8 +304,12 @@ class MedusaNexus:
         version: str,
         *,
         existing_id: str | None = None,
+        force: bool = False,
     ) -> Project:
         """iOS-flavoured pipeline.
+
+        Same SHA-256 dedup contract as the APK path: re-ingesting the same
+        .ipa returns the existing Project unless ``force=True``.
 
         Phase 1 — static (parallel): ipatool + mobsf + ghidra (Mach-O path).
                   jadx is skipped (no DEX in iOS).
@@ -296,6 +318,16 @@ class MedusaNexus:
         Phase 3 — auto-hooks. HookGenerator is platform-aware — emits
                   Obj-C runtime hooks when project.platform == "ios".
         """
+        if not force and existing_id is None:
+            sha = hashlib.sha256(ipa_path.read_bytes()).hexdigest()
+            existing = self.db.find_by_sha256(sha)
+            if existing is not None:
+                log.info(
+                    "[ios] ingest dedup: %s already analysed as %s",
+                    ipa_path.name, existing.id,
+                )
+                return existing
+
         project = Project.from_apk(ipa_path, package_name=package_name, version=version, platform="ios")
         if existing_id:
             project.id = existing_id

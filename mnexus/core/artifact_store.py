@@ -168,6 +168,23 @@ class ArtifactStore:
             return None
         return Project.model_validate_json(row["payload"])
 
+    def find_by_sha256(self, apk_sha256: str) -> Project | None:
+        """Return the most-recently-updated project that matches a given APK hash.
+
+        Powers dedup on upload — if the same .apk lands twice (drag-drop, CLI,
+        apkeep fetch, …) we surface the existing project instead of minting a
+        new one. Same hash ⇒ same artefact ⇒ same findings.
+        """
+        if not apk_sha256:
+            return None
+        row = self._conn.execute(
+            "SELECT payload FROM projects WHERE apk_sha256 = ? ORDER BY updated_at DESC LIMIT 1",
+            (apk_sha256,),
+        ).fetchone()
+        if not row:
+            return None
+        return Project.model_validate_json(row["payload"])
+
     def list_projects(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT id, name, package_name, version_name, updated_at, platform FROM projects ORDER BY updated_at DESC"
