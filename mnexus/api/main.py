@@ -2546,13 +2546,27 @@ async def list_recipes(platform: str | None = None) -> list[dict[str, Any]]:
     if nexus.config.medusa_path and nexus.config.medusa_path.exists():
         modules_dir = nexus.config.medusa_path / "modules"
         if modules_dir.exists():
-            for path in sorted(modules_dir.glob("*.med")):
+            # Medusa organises modules hierarchically under modules/<category>/<name>.med.
+            # rglob (recursive) catches the whole tree — modules.glob picks up
+            # only top-level files, which historically meant we exposed 1 of 124.
+            for path in sorted(modules_dir.rglob("*.med")):
+                rel = path.relative_to(modules_dir)
+                # Stable id used both for display and as the slug /v1/recipes/{name}/script
+                # consumes — never collides because it carries the category prefix.
+                slug = str(rel.with_suffix("")).replace("\\", "/")
+                # Category = the immediate parent dir, uppercased. Top-level
+                # files (e.g. `scratchpad.med`) fall back to a heuristic on
+                # the filename so they still get a reasonable badge.
+                if rel.parent == Path("."):
+                    category = _guess_category(rel.stem)
+                else:
+                    category = rel.parent.parts[0].upper().replace("_", " ")
                 recipes.append({
-                    "name": path.stem,
+                    "name": slug,
                     "origin": "medusa",
-                    "category": _guess_category(path.stem),
+                    "category": category,
                     "platform": "android",
-                    "description": f"Medusa recipe loaded from {path.name}",
+                    "description": _medusa_recipe_blurb(path),
                     "compatibility": "frida ≥ 16",
                     "path": str(path),
                 })
@@ -2588,7 +2602,33 @@ def _guess_category(name: str) -> str:
     return "MISC"
 
 
-@app.get("/v1/recipes/{name}/script")
+def _medusa_recipe_blurb(path: Path) -> str:
+    """Pull a one-line description out of a Medusa .med file.
+
+    Medusa modules conventionally start with a banner comment. We grab the
+    first non-empty line of leading `// …` comments — falls back to a
+    filename-based blurb when the module has no header.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                if line.startswith("//"):
+                    cleaned = line.lstrip("/").strip()
+                    if cleaned and not cleaned.startswith(("=", "─", "—")):
+                        return cleaned[:160]
+                    continue
+                # First non-comment, non-blank line → stop scanning. We don't
+                # want to leak the actual script body.
+                break
+    except OSError:
+        pass
+    return f"Medusa recipe loaded from {path.relative_to(path.parents[1])}"
+
+
+@app.get("/v1/recipes/{name:path}/script")
 async def recipe_script(name: str) -> dict[str, Any]:
     """Return the Frida script text for a recipe (unevaluated)."""
     from mnexus.recipes import BUILTIN_RECIPES
