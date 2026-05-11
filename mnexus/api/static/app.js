@@ -1324,7 +1324,7 @@ function view_project_network(ctx) {
         <div class="metric-card grow" style="min-width:180px">
           <div class="metric-label">// CAPTURED TRAFFIC</div>
           <div class="metric-value" id="net-traffic-count">—</div>
-          <div class="metric-sub" id="net-traffic-sub">via Burp / mitm</div>
+          <div class="metric-sub" id="net-traffic-sub">via Burp / Moxy / mitm</div>
         </div>
         <div class="metric-card grow" style="min-width:180px">
           <div class="metric-label">// SSL PINNING</div>
@@ -1353,8 +1353,21 @@ function view_project_network(ctx) {
           <span>// CAPTURED TRAFFIC</span>
           <span class="spacer"></span>
           <span class="muted small" id="net-traffic-meta">—</span>
+          <button class="btn" id="net-traffic-refresh" style="padding:2px 10px;font-size:10px">[ ⟳ REFRESH ]</button>
         </div>
-        <div class="panel-body tight" id="net-traffic">loading…</div>
+        <div class="panel-body tight col" style="gap:6px">
+          <div class="row" id="net-traffic-controls" style="gap:8px;align-items:center;flex-wrap:wrap;padding:6px 8px;background:var(--bg-accent-panel);border:1px solid var(--border-accent);border-radius:2px;font-size:10px">
+            <span class="muted uppercase">moxy workspace:</span>
+            <select id="net-moxy-project" class="t-mono" style="background:var(--bg-base);color:var(--cyan);border:1px solid var(--border);padding:2px 6px;font-family:inherit;font-size:10px"></select>
+            <label class="row" style="gap:6px;cursor:pointer">
+              <input type="checkbox" id="net-moxy-match-only">
+              <span>matches-only</span>
+            </label>
+            <span class="spacer"></span>
+            <span class="muted t-mono" id="net-moxy-status">—</span>
+          </div>
+          <div id="net-traffic">loading…</div>
+        </div>
       </section>
 
       <section class="panel">
@@ -2663,12 +2676,13 @@ async function mount_project_dynamic(ctx) {
 async function mount_project_network(ctx) {
     const id = ctx.params.id;
     if (!id) return;
-    const [project, apimap, sslmap, traffic, findings] = await Promise.all([
+    const [project, apimap, sslmap, traffic, findings, moxy] = await Promise.all([
         getJSON(`/v1/projects/${encodeURIComponent(id)}`).catch(() => null),
         getJSON(`/v1/projects/${encodeURIComponent(id)}/api-map`).catch(() => ({tree: {}, endpoints: [], flagged: []})),
         getJSON(`/v1/projects/${encodeURIComponent(id)}/ssl-map`).catch(() => ({pinning_detected: false, library: "—", rows: []})),
         getJSON(`/v1/projects/${encodeURIComponent(id)}/traffic`).catch(() => ({captured: []})),
         getJSON(`/v1/projects/${encodeURIComponent(id)}/findings?category=network-security`).catch(() => []),
+        getJSON(`/v1/projects/${encodeURIComponent(id)}/moxy-traffic`).catch((e) => ({captured: [], moxy_project: null, available_projects: [], error: e.message || "moxy unreachable"})),
     ]);
 
     const surface = (project && project.attack_surface) || {};
@@ -2689,10 +2703,14 @@ async function mount_project_network(ctx) {
     $("#net-endpoints-count").className = "metric-value " + (ec ? "cyan" : "");
     $("#net-endpoints-sub").textContent = ec ? `${Object.keys(apimap.tree || {}).length} host(s)` : "none — needs Burp capture or static URL extraction";
 
-    const tc = (traffic.captured || []).length;
+    const burpRows = (traffic.captured || []).map((r) => ({...r, origin: r.origin || "burp"}));
+    const moxyRows = (moxy && moxy.captured) || [];
+    const tc = burpRows.length + moxyRows.length;
     $("#net-traffic-count").textContent = String(tc).padStart(2, "0");
     $("#net-traffic-count").className = "metric-value " + (tc ? "acid" : "");
-    $("#net-traffic-sub").textContent = tc ? "captured" : "no Burp data yet";
+    $("#net-traffic-sub").textContent = tc
+        ? `${burpRows.length} burp · ${moxyRows.length} moxy`
+        : "no proxy data yet";
 
     const sslMetric = $("#net-ssl");
     sslMetric.textContent = sslmap.pinning_detected ? "ON" : "—";
@@ -2721,30 +2739,101 @@ async function mount_project_network(ctx) {
         }).join("");
     }
 
-    // Traffic panel
+    // Traffic panel — merged Burp + Moxy
     const tEl = $("#net-traffic");
+    const moxyStatusEl = $("#net-moxy-status");
+    const moxyProjEl = $("#net-moxy-project");
+    const matchOnlyEl = $("#net-moxy-match-only");
+    const refreshBtn = $("#net-traffic-refresh");
     $("#net-traffic-meta").textContent = tc ? `${tc} request(s)` : "no traffic captured yet";
-    if (!tc) {
-        tEl.innerHTML = `<div class="empty-state">no captured traffic — start a Burp session and proxy the device through it. The events will land in the dynamic_events table and surface here.</div>`;
-    } else {
+
+    // Populate the Moxy workspace picker from /moxy-traffic's available_projects.
+    if (moxyProjEl) {
+        const avail = (moxy && moxy.available_projects) || [];
+        const picked = moxy && moxy.moxy_project ? moxy.moxy_project.id : null;
+        moxyProjEl.innerHTML = avail.length
+            ? avail.map((p) => `<option value="${p.id}" ${p.id === picked ? "selected" : ""}>${escapeHtml(p.name || ("#" + p.id))}</option>`).join("")
+            : `<option value="">(no moxy workspaces)</option>`;
+        if (moxyStatusEl) {
+            if (moxy && moxy.error) {
+                moxyStatusEl.innerHTML = `<span style="color:var(--magenta)">${escapeHtml(moxy.error)}</span>`;
+            } else if (moxy && moxy.moxy_project) {
+                moxyStatusEl.innerHTML = `picked <span style="color:var(--acid)">${escapeHtml(moxy.moxy_project.name || "?")}</span> · ${(moxy.hosts || []).length} known host(s)`;
+            } else {
+                moxyStatusEl.textContent = "moxy idle";
+            }
+        }
+    }
+
+    const renderRows = (rows) => {
+        if (!rows.length) {
+            tEl.innerHTML = `<div class="empty-state">no captured traffic — start a Burp / Moxy session and proxy the device through it. The events will surface here.</div>`;
+            return;
+        }
+        const sevColor = (status) => {
+            const s = Number(status) || 0;
+            if (!s) return "info";
+            if (s < 300) return "acid";
+            if (s < 400) return "info";
+            if (s < 500) return "sev-high";
+            return "sev-crit";
+        };
         tEl.innerHTML = `
-          <div class="table-hdr" style="grid-template-columns: 60px 180px 1fr 70px 80px 60px 100px">
-            <span>M</span><span>HOST</span><span>PATH</span><span>STATUS</span><span>SIZE</span><span>MS</span><span>FLAGS</span>
-          </div>` + traffic.captured.map((row) => {
+          <div class="table-hdr" style="grid-template-columns: 50px 60px 180px 1fr 70px 80px 60px 80px">
+            <span>SRC</span><span>M</span><span>HOST</span><span>PATH</span><span>STATUS</span><span>SIZE</span><span>MS</span><span>FLAGS</span>
+          </div>` + rows.map((row) => {
             const m = row.method || "GET";
-            const sev = row.severity || "info";
+            const sev = sevColor(row.status);
+            const origin = row.origin || "burp";
+            const originColor = origin === "moxy" ? "var(--magenta)" : "var(--cyan)";
+            const matched = row.matches_project === false ? false : true;
+            const dim = !matched ? "opacity:0.55" : "";
             return `
-              <div class="table-row" style="grid-template-columns: 60px 180px 1fr 70px 80px 60px 100px">
+              <div class="table-row" style="grid-template-columns: 50px 60px 180px 1fr 70px 80px 60px 80px;${dim}">
+                <span class="t-mono" style="color:${originColor};font-weight:700;font-size:9px;letter-spacing:1px">${escapeHtml(origin.toUpperCase())}</span>
                 <span class="t-mono" style="color:${m === "POST" ? "var(--acid)" : "var(--cyan)"};font-weight:700">${escapeHtml(m)}</span>
                 <span class="t-mono" style="color:var(--cyan)">${escapeHtml(row.host || "?")}</span>
-                <span class="t-mono" style="color:var(--cyan)">${escapeHtml(row.path || "/")}</span>
-                <span class="t-mono" style="color:var(--${(row.status || 0) < 300 ? "acid" : (row.status || 0) < 500 ? "sev-high" : "sev-crit"});font-weight:700">${row.status || "—"}</span>
+                <span class="t-mono" style="color:var(--cyan);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(row.url || row.path || "")}">${escapeHtml(row.path || "/")}</span>
+                <span class="t-mono" style="color:var(--${sev});font-weight:700">${row.status || "—"}</span>
                 <span class="t-muted">${fmtBytes(row.size || 0)}</span>
                 <span class="t-muted">${row.ms || "—"}</span>
-                <span style="font-size:9px;color:var(--sev-${sev});font-weight:700">${(row.flags || []).map((f) => "[" + escapeHtml(f) + "]").join("")}</span>
+                <span style="font-size:9px;color:var(--sev-info);font-weight:700">${(row.flags || []).map((f) => "[" + escapeHtml(f) + "]").join("")}${matched && row.origin === "moxy" ? "[✓]" : ""}</span>
               </div>`;
         }).join("");
-    }
+    };
+
+    // Initial render: Burp rows on top, Moxy rows underneath. Sort by timestamp
+    // descending so the most recent flow is at the top regardless of origin.
+    const merged = [...burpRows, ...moxyRows].sort((a, b) => String(b.ts || "").localeCompare(String(a.ts || "")));
+    renderRows(merged);
+
+    // Workspace switcher → re-fetch /moxy-traffic and merge.
+    const reloadMoxy = async () => {
+        const wsId = moxyProjEl && moxyProjEl.value;
+        const matchOnly = matchOnlyEl && matchOnlyEl.checked;
+        const params = new URLSearchParams();
+        if (wsId) params.set("moxy_project", wsId);
+        if (matchOnly) params.set("match_only", "true");
+        if (moxyStatusEl) moxyStatusEl.textContent = "reloading…";
+        try {
+            const fresh = await getJSON(`/v1/projects/${encodeURIComponent(id)}/moxy-traffic?${params.toString()}`);
+            const freshMoxy = fresh.captured || [];
+            if (moxyStatusEl) {
+                moxyStatusEl.innerHTML = `picked <span style="color:var(--acid)">${escapeHtml(fresh.moxy_project && fresh.moxy_project.name || "?")}</span> · ${freshMoxy.length} flow(s)${matchOnly ? " · matches only" : ""}`;
+            }
+            $("#net-traffic-count").textContent = String(burpRows.length + freshMoxy.length).padStart(2, "0");
+            $("#net-traffic-sub").textContent = `${burpRows.length} burp · ${freshMoxy.length} moxy`;
+            $("#net-traffic-meta").textContent = `${burpRows.length + freshMoxy.length} request(s)`;
+            const merged2 = [...burpRows, ...freshMoxy].sort((a, b) => String(b.ts || "").localeCompare(String(a.ts || "")));
+            renderRows(merged2);
+        } catch (e) {
+            if (moxyStatusEl) moxyStatusEl.innerHTML = `<span style="color:var(--magenta)">${escapeHtml(e.message || "moxy fetch failed")}</span>`;
+        }
+    };
+
+    if (moxyProjEl) moxyProjEl.addEventListener("change", reloadMoxy);
+    if (matchOnlyEl) matchOnlyEl.addEventListener("change", reloadMoxy);
+    if (refreshBtn) refreshBtn.addEventListener("click", reloadMoxy);
 
     // Findings panel
     const fEl = $("#net-findings");
