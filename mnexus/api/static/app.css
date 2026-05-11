@@ -589,8 +589,10 @@ body::before {
 .recipe-card .origin { margin-left: auto; font-size: 10px; color: var(--muted); }
 .recipe-card .name { font-size: 14px; font-weight: 700; color: var(--cyan); }
 .recipe-card .desc { font-size: 11px; color: var(--muted); }
-.recipe-card .foot { display: flex; align-items: center; gap: 8px; margin-top: auto; }
-.recipe-card .foot .compat { flex: 1; font-size: 10px; color: var(--muted); }
+.recipe-card .foot { display: flex; flex-direction: column; gap: 8px; margin-top: auto; }
+.recipe-card .foot .compat { font-size: 10px; color: var(--muted); line-height: 1.4; }
+.recipe-card .foot .actions { display: flex; gap: 8px; }
+.recipe-card .foot .actions .btn { flex: 1; white-space: nowrap; text-align: center; }
 
 /* ─── modal / drawer ─── */
 .drawer-backdrop {

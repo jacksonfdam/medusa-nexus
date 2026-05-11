@@ -3938,8 +3938,10 @@ async function mount_recipes() {
                   <div class="desc">${escapeHtml(r.description || "")}</div>
                   <div class="foot">
                     <span class="compat">${escapeHtml(r.compatibility || "")}</span>
-                    <button class="btn" data-preview="${escapeHtml(r.name)}" style="padding:4px 10px">[ PREVIEW ]</button>
-                    <button class="btn primary" data-load="${escapeHtml(r.name)}" style="padding:4px 10px">[ LOAD ]</button>
+                    <div class="actions">
+                      <button class="btn" data-preview="${escapeHtml(r.name)}" style="padding:4px 10px">[ PREVIEW ]</button>
+                      <button class="btn primary" data-load="${escapeHtml(r.name)}" style="padding:4px 10px">[ LOAD ]</button>
+                    </div>
                   </div>
                 </div>`).join("")
             : `<div class="empty-state"><span class="muted">no recipes match the current filter</span></div>`;
