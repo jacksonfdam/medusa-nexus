@@ -693,6 +693,12 @@ async function renderPlayScanHistory(packageFilter) {
                   <td class="t-mono" style="padding:4px 8px;text-align:right">${s.findings_count || 0}</td>
                   <td style="padding:4px 8px;white-space:nowrap">
                     <button class="btn ps-history-view" data-id="${escapeHtml(s.id)}" style="padding:2px 8px">view</button>
+                    <button class="btn primary ps-history-import" data-import-scan="${escapeHtml(s.id)}"
+                            ${((s.source || "").split(":", 1)[0] === "play") ? "disabled style=\"opacity:0.45;cursor:not-allowed\"" : ""}
+                            title="${((s.source || "").split(":", 1)[0] === "play")
+                                ? "Play-stream scan has no on-disk APK — re-import via UPLOAD or PULL."
+                                : "Promote to a regular Project (full static fan-out)."}"
+                            style="padding:2px 8px;white-space:nowrap">import</button>
                     <button class="btn ps-history-delete" data-id="${escapeHtml(s.id)}" style="padding:2px 8px">delete</button>
                   </td>
                 </tr>`).join("")}
@@ -704,6 +710,7 @@ async function renderPlayScanHistory(packageFilter) {
             await fetch(`/v1/playintel/scans/${encodeURIComponent(b.dataset.id)}`, { method: "DELETE" });
             await renderPlayScanHistory(packageFilter);
         }));
+        bindImportToProjectsButtons();
     } catch (e) {
         root.innerHTML = `<div class="muted small">request failed: ${e.message || e}</div>`;
     }
@@ -903,6 +910,7 @@ async function renderPlayAccountsList() {
 function renderPlayScanResults(out, title, data) {
     title.textContent = `// ${data.package}  ·  ${data.source}`;
     out.innerHTML = [
+        renderImportToProjectsBlock(data),
         renderFirebaseConfigsBlock(data.firebase_configs || []),
         renderActiveProbesBlock(data.active_probes || {}, data.vulnerabilities || []),
         renderConfirmedSecretsBlock(data.confirmed_secrets || []),
@@ -911,6 +919,76 @@ function renderPlayScanResults(out, title, data) {
         renderEngineFindingsBlock(data.findings || []),
         renderSavedFilesBlock(data.saved_files || [], data.saved_files_dir),
     ].join("");
+    bindImportToProjectsButtons();
+}
+
+/* ─── Import-to-Projects strip ─────────────────────────────────────────
+ *  Lets the analyst promote the APK that was just scanned into a regular
+ *  Project (full static fan-out, findings table, dynamic tab, …). Wired
+ *  to /v1/playintel/scans/{id}/import which resolves the APK on disk
+ *  from record.apk_local_path → workspace/playintel-uploads/<sha>.apk
+ *  → 410 (only Play streaming has no full APK). ──────────────────────── */
+function renderImportToProjectsBlock(data) {
+    const scanId = data.scan_id;
+    if (!scanId) {
+        // Some legacy payloads pre-date the scan_id stamp; without it we
+        // can't address the record from the API. Render nothing rather
+        // than a button that 404s.
+        return "";
+    }
+    // Streaming runs don't materialise the full APK — gray the button
+    // out instead of letting the user click and hit a 410.
+    const importable = (data.source || "").split(":", 1)[0] !== "play";
+    const tooltip = importable
+        ? "Run the full static pipeline (apktool · jadx · mobsf · ghidra) on this APK and store it as a regular Project."
+        : "Play-stream scans don't keep a full APK on disk — re-import via UPLOAD .APK or PULL FROM DEVICE.";
+    return `
+      <div class="row" style="gap:8px;align-items:center;padding:8px 10px;background:var(--bg-accent-panel);border:1px solid var(--border-accent);border-radius:2px;margin-bottom:6px">
+        <span class="muted small uppercase" style="letter-spacing:2px">// next step</span>
+        <span class="t-mono small">scan complete — promote this APK to a regular Project?</span>
+        <span class="spacer"></span>
+        <button class="btn primary" data-import-scan="${escapeHtml(scanId)}"
+                ${importable ? "" : "disabled style=\"opacity:0.45;cursor:not-allowed\""}
+                title="${escapeHtml(tooltip)}"
+                style="white-space:nowrap;padding:4px 10px">[ IMPORT TO PROJECTS ]</button>
+      </div>`;
+}
+
+function bindImportToProjectsButtons() {
+    $$("[data-import-scan]").forEach((btn) => {
+        if (btn.disabled || btn.dataset.importBound === "1") return;
+        btn.dataset.importBound = "1";
+        btn.addEventListener("click", async () => {
+            const scanId = btn.dataset.importScan;
+            const orig = btn.textContent;
+            btn.textContent = "[ INGESTING… ]";
+            btn.disabled = true;
+            try {
+                const r = await fetch(`/v1/playintel/scans/${encodeURIComponent(scanId)}/import`, { method: "POST" });
+                const j = await r.json();
+                if (!r.ok) throw new Error(j.detail || r.statusText);
+                const label = j.dedup
+                    ? `[ ✓ ALREADY SCANNED — OPEN ${j.project_id} ]`
+                    : `[ ✓ INGESTED — OPEN ${j.project_id} ]`;
+                btn.textContent = label;
+                btn.style.color = j.dedup ? "var(--magenta)" : "var(--acid)";
+                btn.disabled = false;
+                btn.onclick = () => { location.hash = `#/project/${j.project_id}/overview`; };
+                setTimeout(() => {
+                    if (location.hash.startsWith("#/play-scan")) {
+                        location.hash = `#/project/${j.project_id}/overview`;
+                    }
+                }, 1500);
+            } catch (e) {
+                btn.textContent = `[ FAILED ]`;
+                btn.style.color = "var(--sev-crit)";
+                btn.title = (e && e.message) || String(e);
+                btn.disabled = false;
+                // Restore the original label on the next hover so retrying is obvious.
+                setTimeout(() => { if (btn.textContent === "[ FAILED ]") btn.textContent = orig; }, 4000);
+            }
+        });
+    });
 }
 
 /* ─── one block per recovered Firebase project — every field the SDK
