@@ -33,6 +33,15 @@ class PlayScanRecord(BaseModel):
     source: str = Field(description="One of: play | local | upload.")
     source_label: str = Field(description="Human-readable source detail: 'play:research-1', 'upload:McD_3.44.apk', …")
     apk_sha256: str = Field(default="", description="sha256 of the APK bytes when the source was a local file.")
+    apk_local_path: str = Field(
+        default="",
+        description=(
+            "Absolute path to the on-disk APK used for the scan, when we have one. "
+            "Used by /v1/playintel/scans/{id}/import to ingest the same artefact "
+            "into a regular Project. Empty for play-stream runs (no full APK "
+            "ever materialised) — those have to be re-downloaded to import."
+        ),
+    )
     scanned_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Denormalised counts so the listing endpoint can rank/filter
@@ -56,6 +65,7 @@ class PlayScanRecord(BaseModel):
             "source": self.source,
             "source_label": self.source_label,
             "apk_sha256": self.apk_sha256,
+            "apk_local_path": self.apk_local_path,
             "scanned_at": self.scanned_at.isoformat(),
             "firebase_project_count": self.firebase_project_count,
             "confirmed_secrets_count": self.confirmed_secrets_count,

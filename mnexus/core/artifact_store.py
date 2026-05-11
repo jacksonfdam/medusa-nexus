@@ -117,6 +117,12 @@ class ArtifactStore:
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "platform" not in cols:
             self._conn.execute("ALTER TABLE projects ADD COLUMN platform TEXT NOT NULL DEFAULT 'android'")
+        # apk_local_path lets /v1/playintel/scans/{id}/import find the on-disk
+        # APK after a scan. Legacy rows default to '' and fall through to the
+        # sha-keyed cache lookup.
+        ps_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(playintel_scans)").fetchall()}
+        if "apk_local_path" not in ps_cols:
+            self._conn.execute("ALTER TABLE playintel_scans ADD COLUMN apk_local_path TEXT NOT NULL DEFAULT ''")
         self._conn.commit()
 
     # ─── projects ───
@@ -313,11 +319,11 @@ class ArtifactStore:
                 """
                 INSERT OR REPLACE INTO playintel_scans
                     (id, package, version_name, version_code, source, source_label,
-                     apk_sha256, scanned_at,
+                     apk_sha256, apk_local_path, scanned_at,
                      firebase_project_count, confirmed_secrets_count, suspected_secrets_count,
                      vulnerability_count, findings_count, saved_files_count,
                      payload)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -327,6 +333,7 @@ class ArtifactStore:
                     record.source,
                     record.source_label,
                     record.apk_sha256,
+                    record.apk_local_path,
                     record.scanned_at.isoformat(),
                     record.firebase_project_count,
                     record.confirmed_secrets_count,
@@ -391,6 +398,12 @@ def _row_to_play_scan(row: sqlite3.Row) -> PlayScanRecord:
             payload = {}
     except (json.JSONDecodeError, TypeError):
         payload = {}
+    # Older DBs predate apk_local_path — sqlite3.Row throws on missing
+    # keys, so probe the row by name lookup defensively.
+    try:
+        apk_local_path = row["apk_local_path"] or ""
+    except (IndexError, KeyError):
+        apk_local_path = ""
     return PlayScanRecord(
         id=row["id"],
         package=row["package"],
@@ -399,6 +412,7 @@ def _row_to_play_scan(row: sqlite3.Row) -> PlayScanRecord:
         source=row["source"],
         source_label=row["source_label"],
         apk_sha256=row["apk_sha256"] or "",
+        apk_local_path=apk_local_path,
         scanned_at=datetime.fromisoformat(row["scanned_at"]),
         firebase_project_count=int(row["firebase_project_count"] or 0),
         confirmed_secrets_count=int(row["confirmed_secrets_count"] or 0),
