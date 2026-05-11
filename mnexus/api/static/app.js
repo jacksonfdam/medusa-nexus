@@ -1333,6 +1333,8 @@ function view_project_network(ctx) {
         <div class="panel-head">// NETWORK FINDINGS</div>
         <div class="panel-body col" style="gap:8px" id="net-findings">loading…</div>
       </section>
+
+      ${_exports_panel(id)}
     </div>`;
 }
 
@@ -2443,6 +2445,40 @@ async function mount_project_overview(ctx) {
               ${surfaceCards.map(([label, value]) => `<div class="col grow" style="min-width:140px"><span class="muted small uppercase">${label}</span><span class="t-mono">${value}</span></div>`).join("")}
             </div>
           </section>
+          ${_exports_panel(id)}
+        </div>
+      </section>`;
+}
+
+/* Exports panel — five one-click downloads that turn the recovered endpoints
+   + deeplinks into ready-to-replay collections. Wired here on the project
+   Overview, and again on the Static tab for analyst convenience. */
+function _exports_panel(id) {
+    const fmts = [
+        ["postman",   "POSTMAN",  "API endpoints as a Postman v2.1 collection (any host, GET defaults)"],
+        ["caido",     "CAIDO",    "Caido Replay import — open in Workbench → Replay → Import"],
+        ["burp",      "BURP",     "Burp Suite items XML — right-click → Send to Repeater"],
+        ["moxy",      "MOXY",     "Moxy ruleset YAML — drop into Moxy listen-port 8080"],
+        ["deeplinks", "DEEPLINK SH", "bash am-start probe loop for every deeplink + exported activity"],
+    ];
+    return `
+      <section class="panel">
+        <div class="panel-head"><span>// EXPORTS</span><span class="spacer"></span><span class="muted small">one click per format</span></div>
+        <div class="panel-body col" style="gap:8px">
+          <div class="muted small">
+            Every recovered URL / deeplink / exported activity, packaged for the tool of your choice.
+            Each download is generated fresh from the live project data.
+          </div>
+          <div class="row" style="flex-wrap:wrap;gap:8px">
+            ${fmts.map(([fmt, label, hint]) => `
+              <a class="btn primary"
+                 href="/v1/projects/${encodeURIComponent(id)}/export/${fmt}"
+                 download
+                 title="${hint}">[ ${label} ]</a>`).join("")}
+          </div>
+          <div class="muted small">
+            Paste / re-run the export anywhere — bytes are cached server-side until the project re-scans.
+          </div>
         </div>
       </section>`;
 }
