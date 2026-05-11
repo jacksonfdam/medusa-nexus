@@ -183,6 +183,9 @@ The web UI ships an ADBugger-style control panel at `#/adb`:
 | `engines: 0/7 healthy`                   | run `./scripts/setup.sh` to install adb / jadx / apktool  |
 | `mobsf MISSING`                          | `./scripts/setup.sh --mobsf`                              |
 | `burp MISSING`                           | `./scripts/setup.sh --burp` and follow the prompts        |
+| `moxy MISSING`                           | `./scripts/setup.sh --moxy` (see [`docs/MOXY.md`](MOXY.md)) |
+| "No response available" in Moxy UI       | turn off the `Intercept` toggle — see [`docs/MOXY.md`](MOXY.md#common-pitfalls) |
+| phone can reach LAN UI but proxy times out | Wi-Fi client isolation or macOS firewall — [`docs/MOXY.md`](MOXY.md#common-pitfalls) |
 | sidebar is in the way on a small window  | click `[☰]` in the topbar (or hit `⌘B` / `Ctrl-B`)        |
 | server didn't reload                     | check the `dev.sh` log; uvicorn watches `mnexus/` only    |
 | device tabs say "no device"              | plug a phone, authorize USB debugging, click `⟳`         |

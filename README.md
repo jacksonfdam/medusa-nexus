@@ -96,6 +96,9 @@ Idempotent — safe to re-run. `NO_COLOR=1 ./scripts/setup.sh` kills ANSI output
 | `--minimal` | skip Ghidra, MobSF docker, frida-server push |
 | `--device` | only push frida-server to the currently connected device |
 | `--mobsf` | start MobSF in Docker with a pinned API key + write it to `~/.mnexus/env.sh` |
+| `--burp` | verify Burp Pro REST API + write `MNEXUS_BURP_URL` / `_API_KEY` to env |
+| `--burp-rest-api` | install `vmware-archive/burp-rest-api` (jar + `run.sh` wrapper) |
+| `--moxy` | start [Moxy](https://github.com/matank001/Moxy) in Docker, extract the mitmproxy CA, push it to the connected device via `adb`, write `MNEXUS_MOXY_*` to env. Details in [`docs/MOXY.md`](docs/MOXY.md). |
 | `--doctor` | only run `mnexus doctor` |
 | `--help` | print usage |
 
@@ -192,6 +195,51 @@ source ~/.mnexus/env.sh && mnexus doctor
 - `vmware-archive/burp-rest-api` is unmaintained (archived). It tracks Burp Suite internal APIs that drift between releases; real-world sweet spot is Burp **2020.x – 2023.x**. Newer builds may break.
 - Runs without authentication by default. Don't expose port 8090 beyond `localhost`.
 - Uses ~2 GB of heap. The wrapper sets `-Xmx2g`; override with `JAVA_OPTS`.
+
+### Capturing mobile traffic with Moxy (no Burp / Caido license needed)
+
+[Moxy](https://github.com/matank001/Moxy) is an open-source MITM proxy + web
+UI built on mitmproxy. Same role as Burp for HTTP/HTTPS interception, but
+free, scriptable from a browser, and docker-friendly. The installer wires it
+up end-to-end:
+
+```bash
+./scripts/setup.sh --moxy
+```
+
+What that does:
+
+1. Pulls + runs `ghcr.io/matank001/moxy:latest` with `projects_data` mounted
+   under `~/.mnexus/tools/moxy/` so state lives outside the repo.
+2. Polls the UI on `http://localhost:5000` until it answers.
+3. `docker cp`s the mitmproxy CA out of the container into
+   `~/.mnexus/tools/moxy/moxy-ca.cer`.
+4. Detects the host's LAN IP — that's the address the device has to point
+   at, not `localhost`.
+5. If a single `adb` device is attached, copies the CA to
+   `/sdcard/Download/moxy-ca.cer` so you can install it from
+   **Settings → Security → Install a certificate** in three taps.
+6. Writes `MNEXUS_MOXY_URL` / `_PROXY_HOST` / `_PROXY_PORT` / `_CA_PATH` to
+   `~/.mnexus/env.sh`.
+7. Prints device-side instructions with the resolved IP/port substituted.
+
+Custom ports (5000/8081 are commonly occupied — AirPlay Receiver squats on
+5000 under macOS Sonoma+):
+
+```bash
+MOXY_UI_PORT=5001 MOXY_PROXY_PORT=8082 ./scripts/setup.sh --moxy
+```
+
+After:
+
+```bash
+source ~/.mnexus/env.sh
+mnexus doctor                    # moxy row should flip to OK
+```
+
+Device-side setup, common pitfalls (Network Security Config, certificate
+pinning, the intercept-mode "No response available" trap), and the diagnosis
+tree are all in [`docs/MOXY.md`](docs/MOXY.md).
 
 ## Running
 
