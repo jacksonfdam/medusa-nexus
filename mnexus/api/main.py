@@ -1100,13 +1100,21 @@ async def device_info() -> dict[str, Any]:
 
 
 @app.get("/v1/device/packages")
-async def device_packages(filter: str = "") -> list[dict[str, Any]]:
-    """List installed packages on the connected device. `filter` is a grep-string."""
+async def device_packages(filter: str = "", scope: str = "all") -> list[dict[str, Any]]:
+    """List installed packages on the connected device.
+
+    Args:
+        filter: grep-style substring passed straight to ``pm list packages``.
+        scope:  ``all`` (default) · ``3rd`` (user-installed only) · ``system``
+                · ``uninstalled`` · ``with-paths``. ``3rd`` is what you almost
+                always want on a Samsung — it strips Knox / Bixby / Galaxy
+                Store / et al. so the analyst can find the target app.
+    """
     nexus: MedusaNexus = app.state.nexus
     adb = nexus.engines["adb"]
     if not shutil.which(nexus.config.adb_path) or not await adb.is_device_connected():  # type: ignore[attr-defined]
         return []
-    packages = await adb.list_packages(filter)  # type: ignore[attr-defined]
+    packages = await adb.list_packages(filter, scope=scope)  # type: ignore[attr-defined]
     return [{"package": p} for p in packages]
 
 

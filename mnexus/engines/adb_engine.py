@@ -53,8 +53,25 @@ class ADBEngine(BaseEngine):
         lines = [ln for ln in output.splitlines()[1:] if ln.strip()]
         return any("device" in ln and "offline" not in ln for ln in lines)
 
-    async def list_packages(self, filter_: str = "") -> list[str]:
+    async def list_packages(self, filter_: str = "", scope: str = "all") -> list[str]:
+        """List packages with an optional ``pm list packages`` scope.
+
+        ``scope`` maps to the ``pm`` flag set:
+
+          * ``all``         — every package (default, ``pm list packages``)
+          * ``3rd``         — user-installed only (``-3``); strips the
+                              Samsung/Google/Knox bloat you don't care about
+          * ``system``      — system-only (``-s``)
+          * ``uninstalled`` — including uninstalled (``-u``)
+          * ``with-paths``  — return apk_path=pkg pairs (``-f``)
+
+        Anything else falls back to ``all`` silently so callers can pass
+        free-form scope strings without exception-handling.
+        """
+        scope_flag = {"3rd": "-3", "system": "-s", "uninstalled": "-u", "with-paths": "-f"}.get(scope, "")
         cmd = [self.config.adb_path, "shell", "pm", "list", "packages"]
+        if scope_flag:
+            cmd.append(scope_flag)
         if filter_:
             cmd.append(filter_)
         output = await self._run(cmd)
