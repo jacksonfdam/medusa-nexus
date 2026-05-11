@@ -2970,9 +2970,9 @@ async function mount_device_pull() {
             btn.textContent = label;
             btn.style.color = j.dedup ? "var(--magenta)" : "var(--acid)";
             btn.disabled = false;
-            btn.onclick = () => { location.hash = `#/project/${j.project_id}`; };
+            btn.onclick = () => { location.hash = `#/project/${j.project_id}/overview`; };
             // Short auto-route so the user doesn't have to click twice.
-            setTimeout(() => { if (location.hash.startsWith("#/device/pull")) location.hash = `#/project/${j.project_id}`; }, 1500);
+            setTimeout(() => { if (location.hash.startsWith("#/device/pull")) location.hash = `#/project/${j.project_id}/overview`; }, 1500);
         } catch (e) {
             btn.textContent = `[ FAILED ]`;
             btn.style.color = "var(--sev-crit)";
@@ -5388,6 +5388,9 @@ const ROUTES = [
     { path: "finding/:fid",                     view: view_finding_detail,    mount: mount_finding_detail },
 
     /* project scoped */
+    // Bare project hash → overview. location.replace keeps the back button clean
+    // so users don't bounce back into the redirect target's predecessor.
+    { path: "project/:id", view: (ctx) => { location.replace(`#/project/${encodeURIComponent(ctx.params.id)}/overview`); return ""; } },
     { path: "project/:id/overview",             view: view_project_overview,  mount: mount_project_overview },
     { path: "project/:id/static",               view: view_project_static,    mount: mount_project_static },
     { path: "project/:id/static/secrets",       view: view_project_secrets,    mount: mount_project_secrets },
