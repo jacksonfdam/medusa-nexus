@@ -1122,9 +1122,17 @@ function view_device_pull() {
     <div class="main">
       ${sectionHeader("P", "05 // INTAKE", "PULL FROM DEVICE")}
       ${deviceTabs("pull")}
-      <section class="row">
-        <div class="input grow"><span class="prompt">&gt;</span><input id="pull-filter" placeholder="grep packages — e.g. com.target"><span class="cursor">_</span></div>
+      <section class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="input grow"><span class="prompt">&gt;</span><input id="pull-filter" placeholder="filter — substring of package name"><span class="cursor">_</span></div>
         <span class="badge" id="pull-device-badge"><span class="dot">●</span>scanning…</span>
+      </section>
+      <section class="row" id="pull-scope" style="gap:6px;align-items:center;flex-wrap:wrap;font-size:11px">
+        <span class="muted uppercase" style="letter-spacing:2px">scope:</span>
+        <button class="btn primary" data-scope="3rd">[ 3RD-PARTY ]</button>
+        <button class="btn"         data-scope="all">[ ALL ]</button>
+        <button class="btn"         data-scope="system">[ SYSTEM ]</button>
+        <span class="spacer"></span>
+        <span class="muted small">tip: 3rd-party skips Samsung/Google/Knox bloat — flip to ALL only if you need a system package.</span>
       </section>
       <section class="panel">
         <div class="panel-head">
@@ -2907,7 +2915,6 @@ async function mount_project_network(ctx) {
 
 async function mount_device_pull() {
     const info = await getJSON("/v1/device/info").catch(() => ({connected: false, reason: "network error"}));
-    const pkgs = info.connected ? await getJSON("/v1/device/packages").catch(() => []) : [];
     const badgeRoot = $(".row .badge");
     if (badgeRoot) {
         badgeRoot.innerHTML = info.connected
@@ -2918,27 +2925,73 @@ async function mount_device_pull() {
 
     const panel = $(".panel");
     if (!panel) return;
-    panel.querySelector(".panel-head").innerHTML = `// PACKAGES · ${pkgs.length} ${info.connected ? "· " + info.abi : ""}`;
+    const head = panel.querySelector(".panel-head");
     const body = panel.querySelector(".panel-body");
 
     if (!info.connected) {
+        head.innerHTML = `// PACKAGES`;
         body.innerHTML = `<div class="empty-state"><div style="color:var(--sev-crit);font-size:20px;letter-spacing:3px">NO DEVICE CONNECTED</div><div class="muted">${info.reason || ""}</div><div class="muted small" style="margin-top:12px">plug a device, authorize USB debugging, then reload this screen.</div></div>`;
         return;
     }
-    if (!pkgs.length) {
-        body.innerHTML = `<div class="empty-state">no packages matched.</div>`;
-        return;
-    }
-    body.innerHTML = `
-        <div class="table-hdr" style="grid-template-columns: 1fr 200px">
-            <span>PACKAGE</span><span></span>
-        </div>` +
-        pkgs.slice(0, 50).map(({ package: pkg }) => `
-            <div class="table-row" style="grid-template-columns: 1fr 200px">
-                <span class="t-mono">${pkg}</span>
-                <span style="text-align:right"><button class="btn primary" data-pull="${pkg}" style="padding:4px 10px;white-space:nowrap">[ PULL ]</button></span>
-            </div>`).join("");
 
+    // Cached per-scope so flipping between 3RD/ALL/SYSTEM doesn't re-shell.
+    const cache = {};
+    let activeScope = "3rd";
+    let activeFilter = "";
+
+    const renderTable = (pkgs) => {
+        const filter = activeFilter.toLowerCase();
+        const filtered = filter ? pkgs.filter((p) => p.package.toLowerCase().includes(filter)) : pkgs;
+        head.innerHTML = `// PACKAGES · <span style="color:var(--cyan)">${filtered.length}</span>${filter ? ` of ${pkgs.length}` : ""} · scope <span style="color:var(--acid)">${activeScope}</span>${info.abi ? ` · ${info.abi}` : ""}`;
+        if (!filtered.length) {
+            body.innerHTML = `<div class="empty-state">no packages match — try a different filter or switch scope to ALL.</div>`;
+            return;
+        }
+        // Render the entire matched set. On a Samsung that's ~600 rows of
+        // bare-DOM; well within budget. Virtualisation can land when someone
+        // actually hits a flagship Android device with > 2k packages.
+        body.innerHTML = `
+            <div class="table-hdr" style="grid-template-columns: 1fr 200px">
+                <span>PACKAGE</span><span></span>
+            </div>` +
+            filtered.map(({ package: pkg }) => `
+                <div class="table-row" style="grid-template-columns: 1fr 200px">
+                    <span class="t-mono">${escapeHtml(pkg)}</span>
+                    <span style="text-align:right"><button class="btn primary" data-pull="${escapeHtml(pkg)}" style="padding:4px 10px;white-space:nowrap">[ PULL ]</button></span>
+                </div>`).join("");
+        bindPullButtons();
+    };
+
+    const fetchScope = async (scope) => {
+        if (cache[scope] !== undefined) return cache[scope];
+        body.innerHTML = `<div class="empty-state"><span class="muted small uppercase">listing ${scope === "3rd" ? "third-party" : scope} packages…</span></div>`;
+        const pkgs = await getJSON(`/v1/device/packages?scope=${encodeURIComponent(scope)}`).catch(() => []);
+        cache[scope] = pkgs;
+        return pkgs;
+    };
+
+    const reloadActive = async () => renderTable(await fetchScope(activeScope));
+
+    // Scope toggle. data-scope buttons highlight the active one.
+    $$('[data-scope]').forEach((btn) => btn.addEventListener("click", async () => {
+        activeScope = btn.dataset.scope;
+        $$('[data-scope]').forEach((b) => b.classList.toggle("primary", b === btn));
+        await reloadActive();
+    }));
+
+    // Live search — debounce so the table doesn't thrash on every keystroke.
+    const filterInput = $("#pull-filter");
+    let debounce = null;
+    if (filterInput) filterInput.addEventListener("input", () => {
+        activeFilter = filterInput.value || "";
+        clearTimeout(debounce);
+        debounce = setTimeout(reloadActive, 120);
+    });
+
+    await reloadActive();
+}
+
+function bindPullButtons() {
     $$("[data-pull]").forEach((btn) => btn.addEventListener("click", async () => {
         const pkg = btn.dataset.pull;
         btn.textContent = "[ PULLING… ]";
