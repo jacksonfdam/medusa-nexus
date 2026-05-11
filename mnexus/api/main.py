@@ -534,17 +534,27 @@ def _detect_package(apk_path: Path, original_filename: str) -> str:
 
 @app.get("/v1/playintel/scans")
 async def playintel_scans_list(
-    package: str | None = None, limit: int = 100
+    package: str | None = None,
+    apk_sha256: str | None = None,
+    limit: int = 100,
 ) -> dict[str, Any]:
     """List previous PlayIntel scans, recent-first.
 
-    Optional ``package`` query filter narrows to one app's history;
+    Filters:
+      * ``package``    narrows to one app's history.
+      * ``apk_sha256`` narrows to a specific APK binary — useful when the
+                       Project Overview screen wants to ask "has this APK
+                       been Play-scanned yet?" by hash rather than by
+                       package (package can drift across renamings).
+
     ``limit`` is server-clamped to [1, 1000]. Returned rows carry the
-    denormalised counts only — fetch ``/scans/{id}`` for the full
-    payload.
+    denormalised counts only — fetch ``/scans/{id}`` for the full payload.
     """
     nexus: MedusaNexus = app.state.nexus
     rows = nexus.db.list_play_scans(package=package, limit=limit)
+    if apk_sha256:
+        sha = apk_sha256.lower()
+        rows = [r for r in rows if (r.apk_sha256 or "").lower() == sha]
     return {
         "scans": [r.summary() for r in rows],
         "count": len(rows),
@@ -567,6 +577,56 @@ async def playintel_scans_delete(scan_id: str) -> dict[str, Any]:
     if nexus.db.delete_play_scan(scan_id):
         return {"deleted": scan_id}
     raise HTTPException(404, f"no scan with id '{scan_id}'")
+
+
+@app.post("/v1/projects/{project_id}/play-scan")
+async def project_play_scan(
+    project_id: str,
+    run_active_probes: bool = Form(default=False),
+) -> dict[str, Any]:
+    """Run the PlayIntel pipeline against a Project's stored APK.
+
+    The Project already owns the APK on disk (``project.apk_path``),
+    so we skip the upload-or-stream step entirely and feed the file
+    straight into ``_run_playintel_scan``. The resulting PlayScanRecord
+    is linked back to this Project by ``apk_sha256`` (and ``package_name``)
+    so /v1/playintel/scans?apk_sha256=… can surface prior scans on the
+    Overview screen.
+
+    ``run_active_probes`` opts into the same live Firebase / Firestore /
+    Storage probes /v1/playintel/scan and /scan-upload expose — default
+    is False so the call stays passive unless the analyst asks.
+    """
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    apk_path = p.apk_path if isinstance(p.apk_path, Path) else Path(str(p.apk_path))
+    if not apk_path.exists():
+        raise HTTPException(
+            410,
+            f"APK no longer present at {apk_path} — re-import via UPLOAD .APK or PULL FROM DEVICE.",
+        )
+
+    from mnexus.playintel.apk_source import BundledAPKSource, local_source_for
+
+    source = local_source_for(apk_path, workspace=nexus.config.workspace)
+    bundled = source if isinstance(source, BundledAPKSource) else None
+    detect_target = (
+        Path(source.get_download_info("").base_url) if bundled is not None else apk_path
+    )
+
+    try:
+        return await _run_playintel_scan(
+            nexus,
+            p.package_name or _detect_package(detect_target, apk_path.name),
+            source,
+            f"project:{p.id}",
+            bool(run_active_probes),
+            apk_sha256=p.apk_sha256,
+            local_apk_path=detect_target,
+        )
+    finally:
+        if bundled is not None:
+            bundled.close()
 
 
 @app.post("/v1/playintel/scans/{scan_id}/import")
