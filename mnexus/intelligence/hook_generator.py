@@ -88,11 +88,24 @@ Java.perform(function () {{
 
     def _ssl_bypass(self, library: str | None) -> GeneratedHook:
         lib = library or "okhttp+trustmanager"
-        script = """// auto: universal-ish pinning bypass
+        # Every callback intercept emits a structured event so the orchestrator's
+        # /v1/projects/{id}/dynamic/events POST adapter can route them into the
+        # ssl_pin channel — which the SSL Map screen polls every few seconds.
+        # Without these `send()` calls the bypass is silent and the live map
+        # stays blank even when pinning is actively being neutralised.
+        script = """// auto: universal-ish pinning bypass + live event emitter
 Java.perform(function () {
+    function emit(host, lib, outcome) {
+        try {
+            send({ channel: 'ssl_pin', host: host || '?', lib: lib, outcome: outcome });
+        } catch (_) { /* gum.js / no host context — swallow */ }
+    }
     try {
         var CP = Java.use('okhttp3.CertificatePinner');
-        CP.check.overload('java.lang.String', 'java.util.List').implementation = function () {};
+        CP.check.overload('java.lang.String', 'java.util.List').implementation = function (host, chain) {
+            emit(host, 'okhttp', 'bypassed');
+            // Pretend the chain validated — original return is void.
+        };
     } catch (_) {}
     try {
         var TMF = Java.use('javax.net.ssl.X509TrustManager');
@@ -100,8 +113,8 @@ Java.perform(function () {
             name: 'com.mnexus.NoopTrust',
             implements: [TMF],
             methods: {
-                checkClientTrusted: function () {},
-                checkServerTrusted: function () {},
+                checkClientTrusted: function () { emit(null, 'trustmanager', 'bypassed'); },
+                checkServerTrusted: function () { emit(null, 'trustmanager', 'bypassed'); },
                 getAcceptedIssuers: function () { return []; },
             },
         });
@@ -111,7 +124,7 @@ Java.perform(function () {
 """
         return GeneratedHook(
             name="ssl_pinning_bypass",
-            description=f"Neutralize SSL pinning (tuned for {lib}).",
+            description=f"Neutralize SSL pinning (tuned for {lib}) + emit ssl_pin events.",
             script=script,
         )
 
