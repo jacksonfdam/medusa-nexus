@@ -3160,6 +3160,79 @@ async def project_traffic(project_id: str, limit: int = 200) -> dict[str, Any]:
     return {"project_id": p.id, "captured": captured, "count": len(captured)}
 
 
+@app.get("/v1/projects/{project_id}/moxy-traffic")
+async def project_moxy_traffic(
+    project_id: str,
+    limit: int = 1000,
+    moxy_project: int | None = None,
+    match_only: bool = False,
+) -> dict[str, Any]:
+    """Pull live HTTP flows from a Moxy workspace and tag them for this APK.
+
+    Strategy:
+      * If ``moxy_project`` is given, fetch from that workspace verbatim.
+      * Otherwise let MoxyEngine.pick_project pick by name (package_name match
+        → updated_at fallback). The picked workspace id round-trips in the
+        response so the UI can show it / let the user override.
+      * ``match_only=true`` filters server-side to flows whose host is in the
+        project's discovered API map (handy when Moxy is collecting ambient
+        traffic and you only want this APK's). Default is false so the UI can
+        show everything and just *highlight* matches.
+
+    Returns the same shape as /traffic so the SPA renders both in one table.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    p = _require_project(project_id)
+    moxy = nexus.engines.get("moxy")
+    if moxy is None:
+        raise HTTPException(503, "moxy engine not registered")
+
+    # Build the project's known-host set from the api-map (URL endpoints
+    # extracted statically + dynamic captures from prior runs).
+    surface = p.attack_surface
+    hosts: set[str] = set()
+    if surface:
+        for ep in surface.api_endpoints:
+            _, url = _split_method_url(ep)
+            host, _ = _split_host_path(url)
+            if host:
+                hosts.add(host)
+
+    # Resolve the Moxy workspace.
+    if moxy_project is not None:
+        picked = {"id": int(moxy_project), "name": f"#{moxy_project}"}
+    else:
+        picked = await moxy.pick_project(p.package_name)  # type: ignore[attr-defined]
+        if not picked:
+            return {
+                "project_id": p.id,
+                "moxy_project": None,
+                "captured": [],
+                "count": 0,
+                "available_projects": [],
+                "hosts": sorted(hosts),
+                "error": "moxy unreachable or no workspaces — run scripts/setup.sh --moxy",
+            }
+
+    flows = await moxy.fetch_flows(  # type: ignore[attr-defined]
+        int(picked["id"]),
+        limit=limit,
+        hosts=hosts if match_only and hosts else None,
+    )
+    if match_only and hosts:
+        flows = [f for f in flows if f.get("matches_project")]
+
+    available = await moxy.list_projects()  # type: ignore[attr-defined]
+    return {
+        "project_id": p.id,
+        "moxy_project": picked,
+        "captured": flows,
+        "count": len(flows),
+        "available_projects": available,
+        "hosts": sorted(hosts),
+    }
+
+
 # ─── dynamic session control (screen 12) ──────────────────────────────────
 
 # In-memory session state — process-local. Survives within one uvicorn run only.
