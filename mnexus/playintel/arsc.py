@@ -291,12 +291,12 @@ def _parse_string_pool(data: bytes, pos: int) -> tuple[list[str], int]:
             # UTF-8 layout: [u16-length-in-chars][u8-length-in-bytes][bytes][\0]
             _u16len, s_pos = _decode_len8(data, s_pos)
             byte_len, s_pos = _decode_len8(data, s_pos)
-            if 0 <= s_pos and s_pos + byte_len <= len(data):
+            if s_pos >= 0 and s_pos + byte_len <= len(data):
                 strings[i] = data[s_pos : s_pos + byte_len].decode("utf-8", errors="replace")
         else:
             # UTF-16-LE layout: [u16-length-in-chars][u16 chars][\0\0]
             char_len, s_pos = _decode_len16(data, s_pos)
-            if 0 <= s_pos and s_pos + (char_len * 2) <= len(data):
+            if s_pos >= 0 and s_pos + (char_len * 2) <= len(data):
                 strings[i] = data[s_pos : s_pos + (char_len * 2)].decode(
                     "utf-16-le", errors="replace"
                 )

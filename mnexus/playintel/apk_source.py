@@ -38,11 +38,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import httpx
-
-from typing import TYPE_CHECKING
 
 from mnexus.playintel.play_client import (
     PlayClient,
@@ -62,8 +60,8 @@ class DownloadInfo:
     package_name: str
     base_url: str
     base_size: int
-    splits: list["SplitInfo"]
-    additional_files: list["FileInfo"]
+    splits: list[SplitInfo]
+    additional_files: list[FileInfo]
     headers: dict[str, str] | None = None
 
 
@@ -452,7 +450,7 @@ class PlayProtocolSource:
         *,
         credentials: PlayCredentials | None = None,
         account_name: str | None = None,
-        store: "ArtifactStore | None" = None,
+        store: ArtifactStore | None = None,
         device_props: dict[str, str] | None = None,
         client: PlayClient | None = None,
     ) -> None:

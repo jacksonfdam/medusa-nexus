@@ -54,7 +54,6 @@ from mnexus.playintel.protobuf_codec import (
     get_int,
     get_string,
     get_uint64_fixed,
-    iter_fields,
 )
 
 log = logging.getLogger(__name__)
@@ -123,7 +122,7 @@ class PlayCredentials:
     def load(
         cls,
         *,
-        store: "ArtifactStore | None" = None,
+        store: ArtifactStore | None = None,
         account_name: str | None = None,
     ) -> PlayCredentials:
         """Load credentials in the canonical priority order.
@@ -175,7 +174,7 @@ class PlayCredentials:
         )
 
     @classmethod
-    def from_account(cls, account: "PlayAccount") -> PlayCredentials:
+    def from_account(cls, account: PlayAccount) -> PlayCredentials:
         """Build credentials from a stored :class:`PlayAccount`."""
         return cls(
             email=account.email,
@@ -211,7 +210,7 @@ class PlayCredentials:
         return cls(email=email, aas_token=aas, locale=locale)
 
 
-def _open_default_store() -> "ArtifactStore":
+def _open_default_store() -> ArtifactStore:
     """Open the project's standard SQLite store. Lazy to avoid a cycle:
     ArtifactStore imports models, models don't import the client, and we
     only resolve here at call time."""
@@ -285,7 +284,7 @@ class PlayClient:
         device_props: dict[str, str] | None = None,
         http_client: httpx.Client | None = None,
         timeout_s: float = 30.0,
-        store: "ArtifactStore | None" = None,
+        store: ArtifactStore | None = None,
     ) -> None:
         self.credentials = credentials
         self.device_props = device_props or DEFAULT_DEVICE_PROPS
