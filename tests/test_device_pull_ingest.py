@@ -145,3 +145,42 @@ def test_pull_no_device_returns_503(pull_client) -> None:
     r = pull_client.post("/v1/device/pull", data={"package": "com.xiaoji.egggame"})
     assert r.status_code == 503
     assert "no device" in r.text.lower()
+
+
+# ─── /v1/device/packages scope plumbing ──────────────────────────────
+
+
+def test_packages_endpoint_threads_scope_to_adb_engine(pull_client) -> None:
+    """The scope query param has to reach ADBEngine.list_packages so the
+    user can ask for 3rd-party-only on a Samsung that ships 500 system pkgs."""
+    calls: list[dict] = []
+
+    async def list_packages_recording(filter_: str = "", scope: str = "all"):
+        calls.append({"filter": filter_, "scope": scope})
+        # Return one row so the response is non-trivial.
+        return ["com.target.app"]
+
+    pull_client.adb.list_packages = list_packages_recording  # type: ignore[method-assign]
+
+    pull_client.get("/v1/device/packages?scope=3rd")
+    pull_client.get("/v1/device/packages?scope=all")
+    pull_client.get("/v1/device/packages?scope=system&filter=com.target")
+
+    assert calls == [
+        {"filter": "", "scope": "3rd"},
+        {"filter": "", "scope": "all"},
+        {"filter": "com.target", "scope": "system"},
+    ]
+
+
+def test_packages_endpoint_default_scope_is_all(pull_client) -> None:
+    calls: list[dict] = []
+
+    async def list_packages_recording(filter_: str = "", scope: str = "all"):
+        calls.append({"scope": scope})
+        return []
+
+    pull_client.adb.list_packages = list_packages_recording  # type: ignore[method-assign]
+
+    pull_client.get("/v1/device/packages")
+    assert calls == [{"scope": "all"}]
