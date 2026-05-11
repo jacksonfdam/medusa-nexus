@@ -9,6 +9,7 @@
 #   scripts/setup.sh              full install
 #   scripts/setup.sh --minimal    skip Ghidra, MobSF, frida-server
 #   scripts/setup.sh --device     only push frida-server on the connected device
+#   scripts/setup.sh --moxy       start Moxy in Docker + extract & push the mitmproxy CA
 #   scripts/setup.sh --doctor     only run `mnexus doctor`
 #   scripts/setup.sh --help
 #
@@ -61,6 +62,7 @@ for arg in "$@"; do
         --mobsf)   MODE="mobsf" ;;
         --burp)    MODE="burp" ;;
         --burp-rest-api) MODE="burp-rest-api" ;;
+        --moxy)    MODE="moxy" ;;
         --help|-h)
             cat <<'HELP'
 MEDUSA NEXUS — installer. Opinionated. Idempotent.
@@ -72,6 +74,7 @@ Usage:
   scripts/setup.sh --mobsf      start MobSF in Docker with a pinned API key and write it to env
   scripts/setup.sh --burp       verify Burp Pro REST API + write MNEXUS_BURP_URL / _API_KEY to env
   scripts/setup.sh --burp-rest-api   install vmware-archive/burp-rest-api (jar + run.sh wrapper)
+  scripts/setup.sh --moxy       start Moxy in Docker, extract the mitmproxy CA, push to attached device
   scripts/setup.sh --doctor     only run `mnexus doctor`
   scripts/setup.sh --help
 
@@ -84,6 +87,9 @@ Environment overrides:
   BURP_API_KEY       required for --burp mode (copy from Burp → Settings → Suite → API)
   BURP_SUITE_JAR     absolute path to burpsuite_pro.jar / burpsuite_community.jar
                      (for --burp-rest-api, auto-detected if installed via brew cask)
+  MOXY_UI_PORT       default 5000 (host port mapped to Moxy's web UI)
+  MOXY_PROXY_PORT    default 8081 (host port mapped to Moxy's MITM proxy)
+  MOXY_PUSH_TO_DEVICE  default 1 — push the CA to /sdcard/Download via adb if a device is attached
   NO_COLOR=1         disable ANSI output
 HELP
             exit 0
@@ -498,6 +504,176 @@ start_mobsf() {
     hint "then verify with:                         mnexus doctor"
 }
 
+# ─── Moxy (matank001/Moxy) — MITMproxy front-end for mobile traffic ──────
+
+# Best-effort LAN IP detection so the device knows where to point its proxy.
+# Loopback is useless: the phone has to reach the Mac on Wi-Fi/Ethernet.
+_detect_lan_ip() {
+    local ip=""
+    if [[ "$PLATFORM" == "darwin" ]]; then
+        for iface in en0 en1 en2 en3 en4 en5; do
+            ip=$(ipconfig getifaddr "$iface" 2>/dev/null || true)
+            [[ -n "$ip" ]] && { echo "$ip"; return 0; }
+        done
+    else
+        # Linux: prefer the interface that owns the default route.
+        ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
+        if [[ -z "$ip" ]] && command -v hostname >/dev/null 2>&1; then
+            ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        fi
+        [[ -n "$ip" ]] && { echo "$ip"; return 0; }
+    fi
+    return 1
+}
+
+# Poll Moxy's UI port until it answers or we give up.
+wait_for_moxy() {
+    local port="$1" max_seconds="${2:-60}" elapsed=0
+    while (( elapsed < max_seconds )); do
+        if curl -fsSL -o /dev/null --max-time 2 "http://localhost:${port}/" 2>/dev/null; then
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+        printf "  ${C_MUTED}…waiting on Moxy (%ds)${C_RESET}\r" "$elapsed"
+    done
+    echo ""
+    return 1
+}
+
+# Pull the mitmproxy CA out of the running container. mitmproxy writes it on
+# first start; the path has historically lived at ~/.mitmproxy inside the
+# container. We try the common locations and fall back to a filesystem scan.
+_extract_moxy_ca() {
+    local dest="$1"
+    local candidates=(
+        "/root/.mitmproxy/mitmproxy-ca-cert.cer"
+        "/root/.mitmproxy/mitmproxy-ca-cert.pem"
+        "/home/moxy/.mitmproxy/mitmproxy-ca-cert.cer"
+        "/app/.mitmproxy/mitmproxy-ca-cert.cer"
+        "/app/projects_data/mitmproxy/mitmproxy-ca-cert.cer"
+    )
+    local found=""
+    for path in "${candidates[@]}"; do
+        if docker exec moxy test -f "$path" >/dev/null 2>&1; then
+            found="$path"
+            break
+        fi
+    done
+    if [[ -z "$found" ]]; then
+        # Brute-force: scan the container for any mitmproxy-ca-cert.* file.
+        found=$(docker exec moxy sh -c 'find / -name "mitmproxy-ca-cert.*" -type f 2>/dev/null | head -1' || true)
+    fi
+    if [[ -z "$found" ]]; then
+        return 1
+    fi
+    docker cp "moxy:$found" "$dest" >/dev/null 2>&1 || return 1
+    return 0
+}
+
+start_moxy() {
+    step "starting Moxy container (MITM proxy + web UI)"
+    if ! command -v docker >/dev/null 2>&1; then
+        fail "docker not installed. Install Docker Desktop / engine and re-run."
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        fail "docker daemon not running. Start Docker and re-run."
+    fi
+
+    # Make sure the base MNEXUS_* vars are present before layering Moxy on top.
+    write_env_file_base
+
+    local ui_port="${MOXY_UI_PORT:-5000}"
+    local proxy_port="${MOXY_PROXY_PORT:-8081}"
+    local data_dir="$MNEXUS_HOME/tools/moxy/projects_data"
+    local ca_dir="$MNEXUS_HOME/tools/moxy"
+    local ca_path="$ca_dir/moxy-ca.cer"
+    mkdir -p "$data_dir" "$ca_dir"
+
+    if docker ps -a --format '{{.Names}}' | grep -qx 'moxy'; then
+        warn "existing 'moxy' container found — removing"
+        docker rm -f moxy >/dev/null 2>&1 || true
+    fi
+
+    say "docker run -d --name moxy -p ${ui_port}:5000 -p ${proxy_port}:8081 ghcr.io/matank001/moxy:latest"
+    docker run -d \
+        --name moxy \
+        -p "${ui_port}:5000" \
+        -p "${proxy_port}:8081" \
+        -v "$data_dir:/app/projects_data" \
+        ghcr.io/matank001/moxy:latest >/dev/null
+
+    say "waiting for Moxy UI to boot on port ${ui_port}"
+    if ! wait_for_moxy "$ui_port" 60; then
+        warn "Moxy didn't answer on http://localhost:${ui_port} within 60s. Check: docker logs moxy"
+        return 0
+    fi
+    ok "Moxy UI is up at http://localhost:${ui_port}"
+
+    # Give mitmproxy a beat to materialise its CA on first run.
+    sleep 2
+
+    step "extracting mitmproxy CA from the container"
+    if _extract_moxy_ca "$ca_path"; then
+        ok "CA written to $ca_path"
+    else
+        warn "couldn't find the mitmproxy CA inside the container."
+        hint "run any request through the proxy first, then re-run scripts/setup.sh --moxy"
+        ca_path=""
+    fi
+
+    # LAN IP — what the device should actually point at.
+    local lan_ip
+    lan_ip=$(_detect_lan_ip || true)
+    if [[ -n "$lan_ip" ]]; then
+        ok "LAN IP detected: $lan_ip"
+    else
+        warn "couldn't detect a LAN IP. Pick the right interface manually:"
+        hint "macOS:  ipconfig getifaddr en0"
+        hint "Linux:  ip route get 1.1.1.1"
+        lan_ip="localhost"
+    fi
+
+    # Optional: push the CA to a connected Android device.
+    local push="${MOXY_PUSH_TO_DEVICE:-1}"
+    if [[ -n "$ca_path" && "$push" == "1" ]] && command -v adb >/dev/null 2>&1; then
+        local n_devices
+        n_devices=$(adb devices 2>/dev/null | awk 'NR>1 && $2=="device"{n++} END {print n+0}')
+        if (( n_devices >= 1 )); then
+            step "pushing CA to /sdcard/Download on the connected device"
+            if adb push "$ca_path" /sdcard/Download/moxy-ca.cer >/dev/null 2>&1; then
+                ok "pushed: install via Settings → Security → Encryption & credentials → Install a certificate → CA certificate"
+            else
+                warn "adb push failed. Move the file by hand: $ca_path"
+            fi
+        else
+            hint "no adb device detected — skipping push. Plug the phone in + authorise USB debugging, then re-run."
+        fi
+    fi
+
+    # Persist what we know.
+    upsert_env_var "MNEXUS_MOXY_URL"        "http://localhost:${ui_port}"
+    upsert_env_var "MNEXUS_MOXY_PROXY_HOST" "$lan_ip"
+    upsert_env_var "MNEXUS_MOXY_PROXY_PORT" "$proxy_port"
+    [[ -n "$ca_path" ]] && upsert_env_var "MNEXUS_MOXY_CA_PATH" "$ca_path"
+
+    ok "wrote MNEXUS_MOXY_URL / _PROXY_HOST / _PROXY_PORT to $MNEXUS_ENV_FILE"
+
+    cat <<EOF
+
+  ${C_CYAN}${C_BOLD}» device-side setup${C_RESET}
+    1. Wi-Fi → long-press the SSID → Modify network → Advanced
+       proxy: ${C_ACID}Manual${C_RESET}
+       host:  ${C_ACID}${lan_ip}${C_RESET}
+       port:  ${C_ACID}${proxy_port}${C_RESET}
+    2. Settings → Security → Encryption & credentials → Install a certificate
+       → CA certificate → pick ${C_ACID}moxy-ca.cer${C_RESET} from Downloads
+    3. open ${C_CYAN}http://localhost:${ui_port}${C_RESET} on this Mac to watch traffic
+
+  ${C_MUTED}TLS-pinned apps will still fail — patch with Stheno or hook with Frida (Recipes panel: SSL / RESILIENCE).${C_RESET}
+EOF
+}
+
 # ─── burp-rest-api (vmware-archive) — Burp + Spring Boot wrapper ─────────
 # Downloads the release jar, best-effort locates burpsuite_community.jar or
 # burpsuite_pro.jar (optionally installing Burp via brew cask on macOS),
@@ -809,6 +985,8 @@ EOF
         || upsert_env_var "MNEXUS_MOBSF_URL" "http://localhost:8000"
     grep -qE '^export +MNEXUS_BURP_URL=' "$MNEXUS_ENV_FILE" \
         || upsert_env_var "MNEXUS_BURP_URL" "http://localhost:1337"
+    grep -qE '^export +MNEXUS_MOXY_URL=' "$MNEXUS_ENV_FILE" \
+        || upsert_env_var "MNEXUS_MOXY_URL" "http://localhost:5000"
 }
 
 write_env_file() {
@@ -852,6 +1030,10 @@ main() {
             ;;
         burp-rest-api)
             install_burp_rest_api
+            exit 0
+            ;;
+        moxy)
+            start_moxy
             exit 0
             ;;
         doctor)

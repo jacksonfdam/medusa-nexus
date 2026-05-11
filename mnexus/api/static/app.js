@@ -1485,7 +1485,7 @@ function view_tools() {
       </section>
       <div class="muted small">
         run <code>mnexus doctor</code> in a terminal for the same check with colored output.
-        <br>setup helpers: <code>scripts/setup.sh --mobsf</code> · <code>--burp-rest-api</code> · <code>--device</code>.
+        <br>setup helpers: <code>scripts/setup.sh --mobsf</code> · <code>--burp-rest-api</code> · <code>--moxy</code> · <code>--device</code>.
       </div>
     </div>`;
 }
