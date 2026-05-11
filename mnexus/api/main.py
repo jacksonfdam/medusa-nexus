@@ -569,6 +569,72 @@ async def playintel_scans_delete(scan_id: str) -> dict[str, Any]:
     raise HTTPException(404, f"no scan with id '{scan_id}'")
 
 
+@app.post("/v1/playintel/scans/{scan_id}/import")
+async def playintel_scans_import(scan_id: str, force: bool = Form(default=False)) -> dict[str, Any]:
+    """Ingest the APK a Play Scan ran against into a regular Project.
+
+    Resolution order for the APK on disk:
+
+      1. ``record.apk_local_path`` if it still exists. Set when the scan
+         was run as ``upload`` or ``path`` mode.
+      2. ``workspace/playintel-uploads/<apk_sha256>.apk`` — every upload
+         is cached here keyed by sha256, so we can recover the file
+         even after the original ``apk_local_path`` got cleaned up.
+      3. 410 Gone — typical for ``play`` (stream) scans which never
+         materialised a full APK; the analyst has to use a different
+         intake path (UPLOAD .APK or PULL FROM DEVICE).
+
+    Same dedup contract as /v1/apks/upload: if the SHA-256 already has
+    a Project, return that one with ``dedup=True``. ``force=true``
+    re-runs the static fan-out and creates a fresh Project record.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    record = nexus.db.get_play_scan(scan_id)
+    if record is None:
+        raise HTTPException(404, f"no scan with id '{scan_id}'")
+
+    # Resolve the APK file.
+    apk_path: Path | None = None
+    if record.apk_local_path:
+        candidate = Path(record.apk_local_path)
+        if candidate.exists():
+            apk_path = candidate
+    if apk_path is None and record.apk_sha256:
+        cached = nexus.config.workspace / "playintel-uploads" / f"{record.apk_sha256}.apk"
+        if cached.exists():
+            apk_path = cached
+    if apk_path is None:
+        raise HTTPException(
+            410,
+            "no on-disk APK for this scan — Play streaming runs don't store "
+            "a full file. Re-import via UPLOAD .APK / PULL FROM DEVICE.",
+        )
+
+    # Dedup pre-check so we can answer accurately (orchestrator returns the
+    # existing Project on hit but doesn't surface a dedup flag itself).
+    sha = record.apk_sha256 or hashlib.sha256(apk_path.read_bytes()).hexdigest()
+    existed_before = nexus.db.find_by_sha256(sha) is not None and not force
+
+    try:
+        project = await nexus.ingest_apk(
+            apk_path,
+            package_name=record.package,
+            version=record.version_name or "unknown",
+            force=force,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"ingest failed: {exc.__class__.__name__}: {exc}") from exc
+
+    return {
+        "scan_id": scan_id,
+        "project_id": project.id,
+        "package": project.package_name,
+        "version": project.version_name,
+        "apk_sha256": project.apk_sha256,
+        "dedup": existed_before,
+    }
+
+
 # ─── Play account manager ────────────────────────────────────────────────
 
 
@@ -833,6 +899,13 @@ async def _run_playintel_scan(
     # than relying on the shared-reference trick.
     try:
         from mnexus.models.play_scan import PlayScanRecord
+        # Remember where the APK lives on disk so /scans/{id}/import can
+        # re-ingest it as a regular Project without making the user re-upload.
+        # Streamed Play scans don't materialise a full APK, so this stays "".
+        local_path_str = (
+            str(local_apk_path) if (local_apk_path is not None and local_apk_path.exists())
+            else ""
+        )
         record = PlayScanRecord(
             package=package,
             version_name=version_name,
@@ -840,6 +913,7 @@ async def _run_playintel_scan(
             source=source_label.split(":", 1)[0],
             source_label=source_label,
             apk_sha256=apk_sha256,
+            apk_local_path=local_path_str,
             firebase_project_count=len(fb_configs),
             confirmed_secrets_count=len(outcome.report.confirmed_secrets()),
             suspected_secrets_count=len(outcome.report.suspected_secrets()),
