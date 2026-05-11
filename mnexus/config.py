@@ -36,7 +36,11 @@ class NexusConfig(BaseModel):
     burp_api_key: str | None = Field(default=None)
     caido_url: str = Field(default="http://localhost:8080", description="Caido (https://caido.io) REST API base URL — alternative to Burp.")
     caido_api_key: str | None = Field(default=None, description="Caido API token. Generate at Workbench → Settings → Tokens.")
-    proxy_flavor: str = Field(default="burp", description="Which intercepting proxy to drive: 'burp' (default) | 'caido'.")
+    moxy_url: str = Field(default="http://localhost:5000", description="Moxy (https://github.com/matank001/Moxy) web UI base URL.")
+    moxy_proxy_host: str = Field(default="localhost", description="Hostname the device should point at for Moxy's MITM proxy.")
+    moxy_proxy_port: int = Field(default=8081, description="Port the device should point at for Moxy's MITM proxy.")
+    moxy_ca_path: Path | None = Field(default=None, description="Path to mitmproxy CA cert extracted from the Moxy container (.cer).")
+    proxy_flavor: str = Field(default="burp", description="Which intercepting proxy to drive: 'burp' (default) | 'caido' | 'moxy'.")
 
     # ─── workspace ───
     workspace: Path = Field(default=Path.home() / ".mnexus" / "workspace")
