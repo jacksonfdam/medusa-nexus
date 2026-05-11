@@ -56,14 +56,48 @@ class FridaEngine(BaseEngine):
 
     # ─── helpers ───
 
-    def load_medusa_module(self, module_name: str) -> str:  # pragma: no cover - stub
-        """Read a Medusa recipe from disk and return its Frida script text."""
+    def load_medusa_module(self, module_name: str) -> str:
+        """Read a Medusa recipe from disk and return its Frida script text.
+
+        Accepts three slug shapes for the same on-disk file, all equivalent:
+
+          * ``encryption/cipher_1``       — fully qualified, as returned by /v1/recipes
+          * ``encryption/cipher_1.med``   — with extension
+          * ``cipher_1``                  — bare stem; resolved by recursive search
+
+        The bare-stem form is convenient but ambiguous when multiple modules
+        share a name (Medusa has, e.g., several ``init.med`` siblings).
+        We pick the first hit in deterministic order and warn via the exception
+        message when ambiguity is detected.
+        """
         if not self.config.medusa_path:
             raise FileNotFoundError("MNEXUS_MEDUSA_PATH not set. No recipes for you.")
-        module = self.config.medusa_path / "modules" / f"{module_name}.med"
-        if not module.exists():
+
+        modules_dir = self.config.medusa_path / "modules"
+        if not modules_dir.exists():
+            raise FileNotFoundError(f"medusa modules dir missing: {modules_dir}")
+
+        slug = module_name.removesuffix(".med")
+
+        # Fully-qualified path — fastest path, no traversal needed.
+        candidate = modules_dir / f"{slug}.med"
+        if candidate.exists() and candidate.is_file():
+            return candidate.read_text(encoding="utf-8", errors="replace")
+
+        # Bare stem — recursive fallback.
+        matches = sorted(modules_dir.rglob(f"{slug}.med"))
+        if not matches:
             raise FileNotFoundError(f"medusa module not found: {module_name}")
-        return module.read_text()
+        if len(matches) > 1:
+            # Surface the ambiguity but pick a deterministic winner so callers
+            # don't have to deal with the exception in the common case.
+            options = ", ".join(str(p.relative_to(modules_dir).with_suffix("")) for p in matches)
+            import logging
+            logging.getLogger(__name__).warning(
+                "medusa module '%s' is ambiguous; picking %s. Use one of: %s",
+                module_name, matches[0].relative_to(modules_dir), options,
+            )
+        return matches[0].read_text(encoding="utf-8", errors="replace")
 
     async def patch_with_stheno(self, apk_path: Path, patches: list[str]) -> Path:  # pragma: no cover - stub
         """Invoke Stheno on `apk_path` with the listed patches. Returns patched apk path."""
