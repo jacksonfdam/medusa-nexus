@@ -125,6 +125,7 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/findings [sev]",  "List findings on the active project (optional severity filter)."),
         ("/rescan",          "Re-run static fan-out on the active project."),
         ("/report [fmt]",    "Generate a report for the active project (md|json|html|pdf)."),
+        ("/export <fmt>",    "Write the API collection / deeplink probe (postman|caido|burp|moxy|deeplinks)."),
         ("/serve [port]",    "Start the FastAPI server in the background (default 8765)."),
         ("/stop",            "Stop the background server."),
         ("/open [path]",     "Open the web UI in the browser (default /#/dashboard)."),
@@ -1001,6 +1002,68 @@ def _exit(state: ReplState, args: list[str]) -> None:
     raise EOFError
 
 
+def _export(state: ReplState, args: list[str]) -> None:
+    """`/export <fmt> [--project <id>] [--out <dir>]` — write the export to disk.
+
+    Formats: postman, caido, burp, moxy, deeplinks.
+    Pulls from the active project (set via /use) unless --project is passed.
+    """
+    if not args or args[0] in ("-h", "--help"):
+        console.print(
+            "[red]usage:[/red] /export <postman|caido|burp|moxy|deeplinks> "
+            "[--project <id>] [--out <dir>]"
+        )
+        return
+
+    fmt = args[0].lower()
+    valid = {"postman", "caido", "burp", "moxy", "deeplinks", "deeplink"}
+    if fmt not in valid:
+        console.print(f"[red]unknown format:[/red] {fmt} — pick one of {sorted(valid)}")
+        return
+
+    project_id = state.active_project_id
+    out_dir = Path.cwd()
+    it = iter(args[1:])
+    for tok in it:
+        if tok in ("--project", "-p"):
+            project_id = next(it, "")
+        elif tok in ("--out", "-o"):
+            out_dir = Path(next(it, ".")).expanduser()
+    if not project_id:
+        console.print("[red]no active project.[/red] Run [bold]/use <id>[/bold] or pass [bold]--project <id>[/bold].")
+        return
+
+    project = state.nexus.db.load_project(project_id)
+    if not project:
+        console.print(f"[red]no project with id[/red] {project_id}")
+        return
+
+    from mnexus.exporters import (
+        to_burp_items,
+        to_caido,
+        to_deeplink_script,
+        to_moxy_config,
+        to_postman,
+    )
+
+    generators = {
+        "postman":   (to_postman,         "postman_collection.json"),
+        "caido":     (to_caido,           "caido.json"),
+        "burp":      (to_burp_items,      "burp-items.xml"),
+        "moxy":      (to_moxy_config,     "moxy.yml"),
+        "deeplinks": (to_deeplink_script, "deeplink-probe.sh"),
+        "deeplink":  (to_deeplink_script, "deeplink-probe.sh"),
+    }
+    gen, suffix = generators[fmt]
+    out_path = out_dir / f"{project_id}-{suffix}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    body = gen(project)
+    out_path.write_text(body, encoding="utf-8")
+    if fmt in ("deeplinks", "deeplink"):
+        out_path.chmod(0o755)
+    console.print(f"[green]✓ {fmt}[/green] · [bold]{out_path}[/bold] · {len(body)} bytes")
+
+
 # Dispatch table — first match by prefix wins on ambiguity.
 SLASH_COMMANDS = {
     "help":      _help,
@@ -1014,6 +1077,8 @@ SLASH_COMMANDS = {
     "findings":  _findings,
     "rescan":    _rescan,
     "report":    _report,
+    "export":    _export,
+    "exports":   _export,
     "serve":     _serve,
     "stop":      _stop,
     "open":      _open,
