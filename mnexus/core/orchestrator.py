@@ -30,6 +30,7 @@ from mnexus.engines import (
     IPAToolEngine,
     JADXEngine,
     MobSFEngine,
+    MoxyEngine,
     PlayIntelEngine,
     VPhoneEngine,
 )
@@ -63,6 +64,7 @@ class MedusaNexus:
             "mobsf": MobSFEngine(self.config),
             "burp": BurpEngine(self.config),
             "caido": CaidoEngine(self.config),
+            "moxy": MoxyEngine(self.config),
             "frida": FridaEngine(self.config),
             "playintel": PlayIntelEngine(self.config),
             "vphone": VPhoneEngine(self.config),
