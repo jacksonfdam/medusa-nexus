@@ -10,13 +10,14 @@ import asyncio
 import hashlib
 import json
 import shutil
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -2872,28 +2873,198 @@ async def project_native(project_id: str) -> dict[str, Any]:
     }
 
 
+async def _gather_live_evidence(
+    project_id: str,
+    package_name: str | None,
+    window_s: int = 60,
+) -> dict[str, Any]:
+    """Pool every real-time SSL/host signal we can find into one dict.
+
+    Returns::
+
+        {
+          "moxy": {host: {"hits": int, "last_status": int|None, "last_ts": str|None,
+                          "tls_intercepted": bool, "paths": {path: count}}},
+          "pin_events": {host: {"events": int, "last_outcome": str|None, "last_ts": str|None}},
+          "moxy_workspace": {"id": int, "name": str} | None,
+          "moxy_error": str | None,
+          "polled_at": iso8601,
+          "window_s": int,
+        }
+
+    Source 1 — live Moxy flows (last ``window_s`` seconds). Hosts with a
+        decoded HTTP response are proof TLS broke, so anything pinned on
+        that host has either been bypassed or wasn't really pinned.
+
+    Source 2 — dynamic_events with ``channel='ssl_pin'``. Emitted by the
+        auto-generated SSL bypass hook every time a pinning callback
+        fires — gives us per-callback granularity the proxy can't see.
+
+    Every section degrades to empty silently. We never want the SSL map
+    to 500 because one source is unreachable.
+    """
+    nexus: MedusaNexus = app.state.nexus
+    out: dict[str, Any] = {
+        "moxy": {},
+        "pin_events": {},
+        "moxy_workspace": None,
+        "moxy_error": None,
+        "polled_at": datetime.now(UTC).isoformat(),
+        "window_s": window_s,
+    }
+
+    # 1) Moxy flows.
+    moxy = nexus.engines.get("moxy")
+    if moxy is not None:
+        try:
+            picked = await moxy.pick_project(package_name)  # type: ignore[attr-defined]
+            if picked:
+                out["moxy_workspace"] = {"id": int(picked["id"]), "name": picked.get("name")}
+                flows = await moxy.fetch_flows(int(picked["id"]), limit=1000)  # type: ignore[attr-defined]
+                # Filter to the window if ts present, else accept everything.
+                cutoff = datetime.now(UTC).timestamp() - window_s
+                for f in flows:
+                    host = f.get("host") or ""
+                    if not host:
+                        continue
+                    ts = f.get("ts") or ""
+                    try:
+                        flow_t = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                        if flow_t < cutoff:
+                            continue
+                    except (TypeError, ValueError):
+                        # No parsable ts → keep the row (better to over-report).
+                        pass
+                    bucket = out["moxy"].setdefault(host, {
+                        "hits": 0, "last_status": None, "last_ts": None,
+                        "tls_intercepted": False, "paths": {},
+                    })
+                    bucket["hits"] += 1
+                    bucket["last_status"] = f.get("status")
+                    bucket["last_ts"] = ts or bucket["last_ts"]
+                    if isinstance(f.get("status"), int):
+                        bucket["tls_intercepted"] = True
+                    path = f.get("path") or "/"
+                    bucket["paths"][path] = bucket["paths"].get(path, 0) + 1
+            else:
+                out["moxy_error"] = "no Moxy workspace matched — run scripts/setup.sh --moxy"
+        except Exception as exc:  # noqa: BLE001 - never let the SSL map crash on Moxy
+            out["moxy_error"] = f"moxy fetch failed: {exc.__class__.__name__}"
+
+    # 2) dynamic_events ssl_pin channel.
+    try:
+        rows = nexus.db._conn.execute(  # noqa: SLF001
+            "SELECT ts, payload FROM dynamic_events "
+            "WHERE project_id = ? AND channel = 'ssl_pin' "
+            "ORDER BY id DESC LIMIT 500",
+            (project_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except Exception:  # noqa: BLE001
+                continue
+            host = payload.get("host") or ""
+            if not host:
+                continue
+            bucket = out["pin_events"].setdefault(host, {
+                "events": 0, "last_outcome": None, "last_ts": None, "library": None,
+            })
+            bucket["events"] += 1
+            bucket["last_outcome"] = bucket["last_outcome"] or payload.get("outcome")
+            bucket["last_ts"] = bucket["last_ts"] or row["ts"]
+            bucket["library"] = bucket["library"] or payload.get("lib")
+    except sqlite3.Error:
+        pass
+
+    return out
+
+
+def _host_status(static_pinned: bool, moxy: dict[str, Any] | None, pin: dict[str, Any] | None) -> str:
+    """Collapse three signals into one label the UI paints.
+
+    Order of precedence:
+      1. Live Frida pin event with outcome=bypassed → 'bypassed' (we see the
+         callback firing AND traffic is flowing, so pinning is neutered).
+      2. Moxy flows with decoded responses → 'intercepted' (TLS broke, no
+         pinning is preventing the proxy).
+      3. Static pinning detected AND no Moxy hits → 'blocked' (best guess:
+         pinning is doing its job).
+      4. Static pinning detected AND no live data either way → 'static-pinned'.
+      5. Nothing observed → 'unknown'.
+      6. No pinning detected statically and no live evidence → 'clear'.
+    """
+    pin_events = (pin or {}).get("events", 0)
+    pin_outcome = (pin or {}).get("last_outcome")
+    moxy_hits = (moxy or {}).get("hits", 0)
+    tls_broken = (moxy or {}).get("tls_intercepted", False)
+
+    if pin_events and pin_outcome in ("bypassed", "neutered"):
+        return "bypassed"
+    if moxy_hits and tls_broken:
+        return "intercepted"
+    if static_pinned and not moxy_hits:
+        return "blocked"
+    if static_pinned:
+        return "static-pinned"
+    if moxy_hits:
+        return "clear"
+    return "unknown"
+
+
 @app.get("/v1/projects/{project_id}/api-map")
-async def project_api_map(project_id: str) -> dict[str, Any]:
-    """Screen 15 — API endpoint tree (host → path → methods)."""
+async def project_api_map(project_id: str, window_s: int = 60) -> dict[str, Any]:
+    """Screen 15 — API endpoint tree (host → path → methods) + live hit counters.
+
+    Static tree comes from ``AttackSurface.api_endpoints`` (jadx/apktool URL
+    extraction). When Moxy is up, each (host, path) gains a ``hits`` counter
+    over the last ``window_s`` seconds so the engineer sees what the app
+    actually touched while they poked around the UI. Hosts the proxy saw but
+    the static surface never claimed land under ``discovered_hosts`` so they
+    don't get lost.
+    """
     p = _require_project(project_id)
     surface = p.attack_surface
     endpoints = surface.api_endpoints if surface else []
 
     # Group by host. Each endpoint string is a URL or "METHOD url" or "host/path".
-    tree: dict[str, dict[str, list[str]]] = {}
+    tree: dict[str, dict[str, dict[str, Any]]] = {}
     for ep in endpoints:
         method, url = _split_method_url(ep)
         host, path = _split_host_path(url)
-        tree.setdefault(host, {})
-        tree[host].setdefault(path, [])
-        if method not in tree[host][path]:
-            tree[host][path].append(method)
+        node = tree.setdefault(host, {}).setdefault(path, {"methods": [], "hits": 0, "last_status": None})
+        if method not in node["methods"]:
+            node["methods"].append(method)
+
+    live = await _gather_live_evidence(p.id, p.package_name, window_s=window_s)
+    discovered: dict[str, dict[str, int]] = {}
+    for host, info in live["moxy"].items():
+        for path, count in (info.get("paths") or {}).items():
+            if host in tree and path in tree[host]:
+                tree[host][path]["hits"] = count
+                tree[host][path]["last_status"] = info.get("last_status")
+            else:
+                # New host or path the static analysis missed.
+                discovered.setdefault(host, {})[path] = count
+
     flagged = [
         f.model_dump(mode="json")
         for f in (surface.findings if surface else [])
         if f.category is FindingCategory.NETWORK
     ]
-    return {"project_id": p.id, "tree": tree, "endpoints": endpoints, "flagged": flagged}
+    return {
+        "project_id": p.id,
+        "tree": tree,
+        "endpoints": endpoints,
+        "flagged": flagged,
+        "discovered_hosts": discovered,
+        "live": {
+            "polled_at": live["polled_at"],
+            "window_s": live["window_s"],
+            "moxy_workspace": live["moxy_workspace"],
+            "moxy_error": live["moxy_error"],
+        },
+    }
 
 
 def _split_method_url(ep: str) -> tuple[str, str]:
@@ -2915,35 +3086,78 @@ def _split_host_path(url: str) -> tuple[str, str]:
 
 
 @app.get("/v1/projects/{project_id}/ssl-map")
-async def project_ssl_map(project_id: str) -> dict[str, Any]:
-    """Screen 16 — SSL pinning map: domains × library × bypass strategy."""
+async def project_ssl_map(project_id: str, window_s: int = 60) -> dict[str, Any]:
+    """Screen 16 — SSL pinning map: domains × library × bypass strategy × LIVE.
+
+    Three signal sources, merged per host:
+
+      1. *Static* (jadx + apktool): ``ssl_pinning_detected`` flag + library
+         hint. This is what shipped in v0.
+      2. *Moxy* (passive): if Moxy is up, the engine pulls flows from the
+         last ``window_s`` seconds. A flow with a decoded HTTP response on
+         host H proves TLS was broken — either nothing was pinning that
+         host, or pinning has been bypassed.
+      3. *Frida ssl_pin events*: the auto-bypass hook emits
+         ``send({channel:'ssl_pin', host, lib, outcome})`` on every pinning
+         callback intercept. Stored under channel='ssl_pin' in
+         ``dynamic_events``; consumed here for per-callback granularity.
+
+    Each row resolves to one of: ``bypassed`` · ``intercepted`` · ``blocked``
+    · ``static-pinned`` · ``clear`` · ``unknown`` (see ``_host_status``).
+    The UI paints the badge accordingly and polls this endpoint every few
+    seconds while the screen is mounted.
+    """
     p = _require_project(project_id)
     surface = p.attack_surface
-    if not surface:
-        return {"project_id": p.id, "rows": [], "pinning_detected": False}
+    live = await _gather_live_evidence(p.id, p.package_name, window_s=window_s)
 
-    # Hosts pulled from api_endpoints.
-    hosts = sorted({_split_host_path(_split_method_url(ep)[1])[0] for ep in surface.api_endpoints})
-    library = surface.ssl_pinning_library or "unknown"
+    static_pinned = bool(surface and surface.ssl_pinning_detected)
+    library = (surface.ssl_pinning_library if surface else None) or "unknown"
     bypass = {
         "okhttp": "okhttp_certificate_pinner_bypass",
         "trustmanager": "trustmanager_neuter",
         "custom": "ssl_universal_bypass",
     }.get(library, "ssl_universal_bypass")
-    rows = [
-        {
+
+    # Union of statically-known hosts + hosts we've actually seen live.
+    static_hosts = (
+        {_split_host_path(_split_method_url(ep)[1])[0] for ep in surface.api_endpoints}
+        if surface else set()
+    )
+    live_hosts = set(live["moxy"].keys()) | set(live["pin_events"].keys())
+    all_hosts = sorted({h for h in static_hosts | live_hosts if h})
+
+    rows: list[dict[str, Any]] = []
+    for host in all_hosts:
+        moxy = live["moxy"].get(host)
+        pin = live["pin_events"].get(host)
+        status = _host_status(static_pinned, moxy, pin)
+        rows.append({
             "host": host,
-            "library": library if surface.ssl_pinning_detected else "—",
-            "pinned": surface.ssl_pinning_detected,
-            "bypass_recipe": bypass if surface.ssl_pinning_detected else None,
-        }
-        for host in hosts
-    ]
+            "library": (pin and pin.get("library")) or (library if static_pinned else "—"),
+            "pinned": static_pinned,
+            "bypass_recipe": bypass if static_pinned else None,
+            "status": status,
+            "in_static_surface": host in static_hosts,
+            "moxy_hits": (moxy or {}).get("hits", 0),
+            "moxy_last_status": (moxy or {}).get("last_status"),
+            "moxy_last_ts": (moxy or {}).get("last_ts"),
+            "pin_events": (pin or {}).get("events", 0),
+            "pin_last_outcome": (pin or {}).get("last_outcome"),
+            "pin_last_ts": (pin or {}).get("last_ts"),
+        })
     return {
         "project_id": p.id,
-        "pinning_detected": surface.ssl_pinning_detected,
+        "pinning_detected": static_pinned,
         "library": library,
         "rows": rows,
+        "live": {
+            "polled_at": live["polled_at"],
+            "window_s": live["window_s"],
+            "moxy_workspace": live["moxy_workspace"],
+            "moxy_error": live["moxy_error"],
+            "pin_event_count": sum(b["events"] for b in live["pin_events"].values()),
+        },
     }
 
 
@@ -3277,6 +3491,47 @@ async def dynamic_stop(project_id: str, session_id: str = Form(...)) -> dict[str
     sess["status"] = "detached"
     sess["log"].append({"ts": datetime.now(UTC).isoformat(), "channel": "nexus", "line": "[NEXUS] detached cleanly"})
     return sess
+
+
+@app.post("/v1/projects/{project_id}/dynamic/events")
+async def dynamic_events_ingest(project_id: str, request: Request) -> dict[str, Any]:
+    """Frida hooks POST event batches here.
+
+    Body: ``{"events": [{"channel": "ssl_pin", "payload": {...}}, …]}``
+
+    Channels we know how to read on the other side:
+      * ``ssl_pin``   — pinning-callback intercepts; powers Screen 16's
+                        live status badges.
+      * ``net``       — request/response summaries (older Frida + Burp
+                        history both feed this).
+      * ``crypto`` / ``intent`` / ``fs`` / ``clip`` — Dynamic console.
+
+    The endpoint never validates the channel name; it's free-form on
+    purpose so new hooks can introduce channels without a server-side
+    rev. Timestamps are stamped here if the event didn't carry one.
+    """
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, f"invalid JSON: {exc}") from exc
+    events = body.get("events") if isinstance(body, dict) else None
+    if not isinstance(events, list):
+        raise HTTPException(400, "missing 'events' array")
+    stamped = 0
+    now_iso = datetime.now(UTC).isoformat()
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        channel = str(ev.get("channel") or "raw")[:32]
+        ts = str(ev.get("ts") or now_iso)
+        payload = ev.get("payload") or {k: v for k, v in ev.items() if k not in ("channel", "ts")}
+        if not isinstance(payload, dict):
+            payload = {"value": payload}
+        nexus.db.append_dynamic_event(p.id, ts, channel, payload)
+        stamped += 1
+    return {"ingested": stamped, "project_id": p.id}
 
 
 @app.get("/v1/projects/{project_id}/dynamic/events")
