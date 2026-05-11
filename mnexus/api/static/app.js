@@ -1419,36 +1419,39 @@ function view_report() {
  *  SCREEN 25 — Recipes Library
  * ═══════════════════════════════════════════════════════════════════════════ */
 function view_recipes() {
-    const recipes = [
-        ["SSL", "medusa", "universal_ssl_bypass", "TrustManager + OkHttp CertificatePinner + network-security-config.", "frida≥16 · android≥8"],
-        ["ROOT", "medusa", "rootbeer_neuter", "Forces every RootBeer.is* + check* to return false. Gentle yet firm.", "rootbeer ≥ 0.0.7"],
-        ["CRYPTO", "auto", "cipher_key_leak", "Logs SecretKeySpec ctor args + Cipher.doFinal in/out. Bring popcorn.", "auto-generated from findings"],
-        ["PATCH", "stheno", "inject_frida_gadget", "Stheno patches the APK with frida-gadget. No root? No problem.", "non-rooted · re-sign required"],
-        ["IPC", "medusa", "intent_monitor", "Dumps every Intent sent or received with extras, URIs, components.", "verbose · pair with [+] filter"],
-        ["STORAGE", "medusa", "shared_prefs_watcher", "Taps SharedPreferences.Editor — hands you every put/get.", "android all"],
-    ];
+    // Empty shell — mount_recipes() fetches /v1/recipes and renders the grid
+    // from real data (built-ins + the recursive walk over ~/.mnexus/tools/medusa
+    // /modules). No hardcoded placeholder rows: if the endpoint returns
+    // nothing the empty state is honest.
     return h`
     <div class="main">
       ${sectionHeader("R", "25 // AUTOMATION", "RECIPES LIBRARY")}
-      <section class="row" style="flex-wrap:wrap;gap:8px">
+      <section class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
         <span class="muted small">platform:</span>
         <button class="btn primary" data-rplat="">[ ALL ]</button>
         <button class="btn" data-rplat="android">[ 🤖 ANDROID ]</button>
         <button class="btn" data-rplat="ios">[ 🍎 iOS ]</button>
+        <span style="width:18px"></span>
+        <span class="muted small">origin:</span>
+        <button class="btn primary" data-rorigin="">[ ANY ]</button>
+        <button class="btn" data-rorigin="builtin">[ BUILTIN ]</button>
+        <button class="btn" data-rorigin="medusa">[ MEDUSA ]</button>
+        <button class="btn" data-rorigin="stheno">[ STHENO ]</button>
         <span class="spacer"></span>
-        <div class="input" style="width:280px"><span class="prompt">&gt;</span><input id="recipes-search" placeholder="search recipes…"><span class="cursor">_</span></div>
+        <div class="input" style="width:260px">
+          <span class="prompt">&gt;</span>
+          <input id="recipes-search" placeholder="search name / category / description…">
+          <span class="cursor">_</span>
+        </div>
       </section>
-      <section class="recipes-grid">
-        ${recipes.map(([cat, origin, name, desc, compat]) => `
-          <div class="recipe-card">
-            <div class="cat-row"><span class="cat">${cat}</span><span class="grow"></span><span class="origin">${origin}</span></div>
-            <div class="name">${name}</div>
-            <div class="desc">${desc}</div>
-            <div class="foot">
-              <span class="compat">${compat}</span>
-              <button class="btn primary" style="padding:4px 10px">[ LOAD ]</button>
-            </div>
-          </div>`).join("")}
+      <section class="row" id="recipes-categories" style="flex-wrap:wrap;gap:6px;align-items:center"></section>
+      <section class="row" style="gap:12px;align-items:center">
+        <span class="muted small" id="recipes-count">scanning…</span>
+        <span class="spacer"></span>
+        <span class="muted small">tip: <b>[ PREVIEW ]</b> shows the Frida script · <b>[ LOAD ]</b> stages it for the next dynamic session</span>
+      </section>
+      <section class="recipes-grid" id="recipes-grid">
+        <div class="empty-state"><span class="muted small uppercase">scanning recipes on disk…</span></div>
       </section>
     </div>`;
 }
@@ -3847,53 +3850,120 @@ function mount_device_logcat() {
 }
 
 async function mount_recipes() {
+    const grid = $("#recipes-grid");
+    const catStrip = $("#recipes-categories");
+    const countEl = $("#recipes-count");
+    if (!grid || !catStrip) return;
+
     let allRecipes = [];
-    try { allRecipes = await getJSON("/v1/recipes"); } catch (e) { /* stay on sample */ }
-    if (!allRecipes.length) return;
-    const grid = $(".recipes-grid");
-    if (!grid) return;
+    try {
+        allRecipes = await getJSON("/v1/recipes");
+    } catch (e) {
+        grid.innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">failed to fetch /v1/recipes: ${escapeHtml(e.message || String(e))}</span></div>`;
+        return;
+    }
+
+    if (!allRecipes.length) {
+        grid.innerHTML = `
+          <div class="empty-state">
+            <div style="font-size:18px;color:var(--magenta);letter-spacing:3px">NO RECIPES</div>
+            <div class="muted small" style="margin-top:8px">
+              clone Medusa into <code>~/.mnexus/tools/medusa</code> (or run
+              <code>scripts/setup.sh</code>) — the recursive scan picks them up.
+            </div>
+          </div>`;
+        catStrip.innerHTML = "";
+        if (countEl) countEl.textContent = "0 recipes";
+        return;
+    }
+
+    // Category counts → dynamic chip strip. Sorted descending by count so
+    // the long tail of single-module categories falls to the right.
+    const counts = {};
+    for (const r of allRecipes) {
+        const c = (r.category || "MISC").toUpperCase();
+        counts[c] = (counts[c] || 0) + 1;
+    }
+    const categories = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 
     let activePlatform = "";
+    let activeOrigin = "";
+    let activeCategory = "";
     let searchTerm = "";
-    const render = () => {
+
+    const renderCategories = () => {
+        catStrip.innerHTML = [
+            `<span class="muted small">category:</span>`,
+            `<button class="btn ${activeCategory === "" ? "primary" : ""}" data-rcat="">[ ALL · ${allRecipes.length} ]</button>`,
+            ...categories.map(([c, n]) => `
+                <button class="btn ${activeCategory === c ? "primary" : ""}" data-rcat="${escapeHtml(c)}">[ ${escapeHtml(c)} · ${n} ]</button>
+            `),
+        ].join("");
+        catStrip.querySelectorAll("[data-rcat]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                activeCategory = btn.dataset.rcat;
+                renderCategories();
+                renderGrid();
+            });
+        });
+    };
+
+    const renderGrid = () => {
         const filtered = allRecipes.filter((r) => {
             if (activePlatform && (r.platform || "android") !== activePlatform && r.platform !== "both") return false;
-            if (searchTerm && !`${r.name} ${r.description} ${r.category}`.toLowerCase().includes(searchTerm)) return false;
+            if (activeOrigin && r.origin !== activeOrigin) return false;
+            if (activeCategory && (r.category || "MISC").toUpperCase() !== activeCategory) return false;
+            if (searchTerm) {
+                const hay = `${r.name} ${r.description || ""} ${r.category || ""}`.toLowerCase();
+                if (!hay.includes(searchTerm)) return false;
+            }
             return true;
         });
+        if (countEl) {
+            const suffix = filtered.length === allRecipes.length
+                ? `${allRecipes.length} recipes`
+                : `${filtered.length} of ${allRecipes.length} match`;
+            countEl.textContent = suffix;
+        }
         grid.innerHTML = filtered.length
-          ? filtered.map((r) => `
-            <div class="recipe-card">
-              <div class="cat-row">
-                <span class="cat">${r.category}</span>
-                <span class="grow"></span>
-                <span title="${r.platform || "android"}">${r.platform === "ios" ? "🍎" : r.platform === "both" ? "🤖🍎" : "🤖"}</span>
-                <span class="origin">${r.origin}</span>
-              </div>
-              <div class="name">${escapeHtml(r.name)}</div>
-              <div class="desc">${escapeHtml(r.description || "")}</div>
-              <div class="foot">
-                <span class="compat">${escapeHtml(r.compatibility || "")}</span>
-                <button class="btn" data-preview="${r.name}" style="padding:4px 10px">[ PREVIEW ]</button>
-                <button class="btn primary" data-load="${r.name}" style="padding:4px 10px">[ LOAD ]</button>
-              </div>
-            </div>`).join("")
-          : `<div class="empty-state">no recipes match the current filter</div>`;
+            ? filtered.map((r) => `
+                <div class="recipe-card">
+                  <div class="cat-row">
+                    <span class="cat">${escapeHtml(r.category || "MISC")}</span>
+                    <span class="grow"></span>
+                    <span title="${escapeHtml(r.platform || "android")}">${r.platform === "ios" ? "🍎" : r.platform === "both" ? "🤖🍎" : "🤖"}</span>
+                    <span class="origin">${escapeHtml(r.origin || "?")}</span>
+                  </div>
+                  <div class="name">${escapeHtml(r.name)}</div>
+                  <div class="desc">${escapeHtml(r.description || "")}</div>
+                  <div class="foot">
+                    <span class="compat">${escapeHtml(r.compatibility || "")}</span>
+                    <button class="btn" data-preview="${escapeHtml(r.name)}" style="padding:4px 10px">[ PREVIEW ]</button>
+                    <button class="btn primary" data-load="${escapeHtml(r.name)}" style="padding:4px 10px">[ LOAD ]</button>
+                  </div>
+                </div>`).join("")
+            : `<div class="empty-state"><span class="muted">no recipes match the current filter</span></div>`;
         bindRecipeButtons();
     };
 
     $$('[data-rplat]').forEach((btn) => btn.addEventListener("click", () => {
         activePlatform = btn.dataset.rplat;
         $$('[data-rplat]').forEach((b) => b.classList.toggle("primary", b === btn));
-        render();
+        renderGrid();
+    }));
+    $$('[data-rorigin]').forEach((btn) => btn.addEventListener("click", () => {
+        activeOrigin = btn.dataset.rorigin;
+        $$('[data-rorigin]').forEach((b) => b.classList.toggle("primary", b === btn));
+        renderGrid();
     }));
     const searchInp = $("#recipes-search");
     if (searchInp) searchInp.addEventListener("input", (e) => {
         searchTerm = e.target.value.trim().toLowerCase();
-        render();
+        renderGrid();
     });
-    render();
-    return;  // skip the original button-binding loop below
+
+    renderCategories();
+    renderGrid();
 }
 
 function bindRecipeButtons() {
