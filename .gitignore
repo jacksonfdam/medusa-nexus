@@ -79,6 +79,9 @@ frida_*.log
 *.sqlite3
 *.db
 
+# Moxy projects_data volume (created when running the container from the repo root)
+projects_data/
+
 # ─── Design tooling ───
 # Local Pencil cache & transient exports
 .pencil_cache/
