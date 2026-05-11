@@ -61,6 +61,57 @@ async function getJSON(url) {
     return r.json();
 }
 
+/* ──────────────────────────────────────────────────────────────────
+ *  Polling helper — runs `tick()` every `intervalMs` until the route
+ *  changes (hashchange) or the scope is explicitly cancelled. Used by
+ *  the SSL Map / API Map / Dynamic console screens.
+ *
+ *  Returns a `{ stop }` handle; calling stop() detaches the listener
+ *  and cancels any pending tick. The harness also re-runs `tick()`
+ *  once when the page regains visibility so a tab that was hidden
+ *  for a minute doesn't show stale data for one more interval.
+ * ────────────────────────────────────────────────────────────────── */
+function pollingScope(tick, intervalMs = 3000) {
+    let cancelled = false;
+    let timer = null;
+    let inFlight = false;
+
+    const run = async () => {
+        if (cancelled || inFlight) return;
+        inFlight = true;
+        try { await tick(); } catch (_) { /* don't break the loop on one bad tick */ }
+        inFlight = false;
+        if (!cancelled) timer = setTimeout(run, intervalMs);
+    };
+
+    const onHashChange = () => stop();
+    const onVisibilityChange = () => { if (!document.hidden) run(); };
+    const stop = () => {
+        if (cancelled) return;
+        cancelled = true;
+        if (timer) clearTimeout(timer);
+        window.removeEventListener("hashchange", onHashChange);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+
+    window.addEventListener("hashchange", onHashChange);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    // First tick immediate; subsequent ones every intervalMs.
+    run();
+    return { stop };
+}
+
+/* Relative "Xs ago / Xm ago" for live status lines. Defensive on bad input. */
+function fmtAgo(ts) {
+    if (!ts) return "—";
+    const t = Date.parse(ts);
+    if (Number.isNaN(t)) return "—";
+    const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    return `${Math.floor(s / 3600)}h ago`;
+}
+
 function classifyRisk(score) {
     if (score >= 75) return "crit";
     if (score >= 50) return "high";
@@ -2734,7 +2785,12 @@ async function mount_project_network(ctx) {
             return `
               <div style="margin-bottom:10px">
                 <div class="t-mono" style="color:var(--cyan);font-weight:700">▾ ${escapeHtml(host)}</div>
-                ${paths.slice(0, 12).map((p) => `<div class="t-mono small" style="padding-left:18px">${tree[host][p].map((m) => `<span class="chip ${m === "POST" ? "high" : "info"}" style="font-size:9px">${m}</span>`).join(" ")} ${escapeHtml(p)}</div>`).join("")}
+                ${paths.slice(0, 12).map((p) => {
+                    const node = tree[host][p];
+                    const methods = Array.isArray(node) ? node : ((node && node.methods) || []);
+                    const hits = (node && node.hits) || 0;
+                    return `<div class="t-mono small" style="padding-left:18px">${methods.map((m) => `<span class="chip ${m === "POST" ? "high" : "info"}" style="font-size:9px">${m}</span>`).join(" ")} ${escapeHtml(p)}${hits ? ` <span style="color:var(--acid)">×${hits}</span>` : ""}</div>`;
+                }).join("")}
               </div>`;
         }).join("");
     }
@@ -4675,44 +4731,85 @@ function view_project_api_map(ctx) {
 
 async function mount_project_api_map(ctx) {
     const id = ctx.params.id;
-    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/api-map`).catch(() => null);
-    if (!data) return;
-    const tree = data.tree || {};
-    const hosts = Object.keys(tree).sort();
-    $("#apimap-count").textContent = `${hosts.length} hosts · ${(data.endpoints || []).length} endpoints`;
 
-    const treeEl = $("#apimap-tree");
-    if (!hosts.length) {
-        treeEl.innerHTML = `<div class="empty-state">no endpoints discovered yet — static engines + Burp emit []. ingest an APK with network code to populate.</div>`;
-    } else {
-        treeEl.innerHTML = hosts.map((host) => {
-            const paths = Object.keys(tree[host]).sort();
-            return `
-              <div style="margin-bottom:10px">
-                <div class="t-mono" style="color:var(--cyan);font-weight:700">▾ ${host}</div>
-                ${paths.map((p) => `
-                  <div class="t-mono" style="padding-left:18px">
-                    <span class="muted small" style="margin-right:8px">${tree[host][p].map((m) => `<span class="chip ${m === "POST" ? "high" : "info"}" style="font-size:9px">${m}</span>`).join(" ")}</span>
-                    ${p}
-                  </div>`).join("")}
-              </div>`;
-        }).join("");
-    }
+    const _renderPath = (path, node) => {
+        // Node shape after the live-merge: { methods: [...], hits: N, last_status: code }
+        const methods = (node && node.methods) || [];
+        const hits = (node && node.hits) || 0;
+        const lastStatus = node && node.last_status;
+        const lastColor = (lastStatus || 0) < 300 ? "var(--acid)"
+                        : (lastStatus || 0) < 500 ? "var(--sev-high)" : "var(--sev-crit)";
+        return `
+          <div class="t-mono" style="padding-left:18px;display:flex;gap:8px;align-items:center">
+            <span class="muted small">${methods.map((m) => `<span class="chip ${m === "POST" ? "high" : "info"}" style="font-size:9px">${m}</span>`).join(" ")}</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(path)}</span>
+            ${hits ? `<span class="t-mono small" style="color:var(--acid)">×${hits}${lastStatus ? ` <span style="color:${lastColor}">${lastStatus}</span>` : ""}</span>` : ""}
+          </div>`;
+    };
 
-    const fl = $("#apimap-flagged");
-    if (!data.flagged.length) {
-        fl.innerHTML = `<div class="empty-state">no network findings flagged</div>`;
-    } else {
-        fl.innerHTML = data.flagged.map((f) => `
-          <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
-            <div class="head">${chip(f.severity)}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
-            <div class="title">${f.title}</div>
-            <div class="meta">${f.location || "—"}</div>
-          </a>`).join("");
-    }
+    const fetchOnce = async () => {
+        const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/api-map`).catch(() => null);
+        if (!data) return;
+        const tree = data.tree || {};
+        const discovered = data.discovered_hosts || {};
+        const hosts = Object.keys(tree).sort();
+        const discoveredKeys = Object.keys(discovered).sort();
+        const live = data.live || {};
+        const liveBadge = live.moxy_workspace
+            ? ` · live <span style="color:var(--acid)">${escapeHtml(live.moxy_workspace.name || "")}</span> · ${live.window_s}s window`
+            : (live.moxy_error ? ` · <span style="color:var(--magenta)">${escapeHtml(live.moxy_error)}</span>` : "");
+        $("#apimap-count").innerHTML = `${hosts.length} hosts · ${(data.endpoints || []).length} endpoints${liveBadge}`;
+
+        const treeEl = $("#apimap-tree");
+        if (!hosts.length && !discoveredKeys.length) {
+            treeEl.innerHTML = `<div class="empty-state">no endpoints discovered yet — static engines emit []. Ingest an APK with network code or start a Moxy session.</div>`;
+        } else {
+            const staticBlock = hosts.map((host) => {
+                const paths = Object.keys(tree[host]).sort();
+                const totalHits = paths.reduce((acc, p) => acc + ((tree[host][p] && tree[host][p].hits) || 0), 0);
+                return `
+                  <div style="margin-bottom:10px">
+                    <div class="t-mono" style="color:var(--cyan);font-weight:700">▾ ${escapeHtml(host)}${totalHits ? ` <span class="muted small" style="color:var(--acid)">· ${totalHits} live hit(s)</span>` : ""}</div>
+                    ${paths.map((p) => _renderPath(p, tree[host][p])).join("")}
+                  </div>`;
+            }).join("");
+            const discoveredBlock = discoveredKeys.length ? `
+              <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border)">
+                <div class="muted small uppercase" style="letter-spacing:2px;margin-bottom:8px">// discovered live — not in static surface</div>
+                ${discoveredKeys.map((host) => {
+                    const paths = Object.keys(discovered[host]).sort();
+                    return `
+                      <div style="margin-bottom:10px">
+                        <div class="t-mono" style="color:var(--magenta);font-weight:700">▾ ${escapeHtml(host)} <span class="muted small">(new)</span></div>
+                        ${paths.map((p) => `
+                          <div class="t-mono" style="padding-left:18px;display:flex;gap:8px;align-items:center">
+                            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--magenta)">${escapeHtml(p)}</span>
+                            <span class="t-mono small" style="color:var(--magenta)">×${discovered[host][p]}</span>
+                          </div>`).join("")}
+                      </div>`;
+                }).join("")}
+              </div>` : "";
+            treeEl.innerHTML = staticBlock + discoveredBlock;
+        }
+
+        const fl = $("#apimap-flagged");
+        if (!data.flagged.length) {
+            fl.innerHTML = `<div class="empty-state">no network findings flagged</div>`;
+        } else {
+            fl.innerHTML = data.flagged.map((f) => `
+              <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
+                <div class="head">${chip(f.severity)}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
+                <div class="title">${escapeHtml(f.title)}</div>
+                <div class="meta">${escapeHtml(f.location || "—")}</div>
+              </a>`).join("");
+        }
+    };
+
+    await fetchOnce();
+    pollingScope(fetchOnce, 3000);
 }
 
-/* SCREEN 16 — SSL Pinning Map */
+/* SCREEN 16 — SSL Pinning Map (live) */
 function view_project_ssl_map(ctx) {
     const id = ctx.params.id;
     return h`
@@ -4720,33 +4817,118 @@ function view_project_ssl_map(ctx) {
       ${projectChrome(id, "ssl-map")}
       ${sectionHeader("S", "16 // NETWORK", "SSL PINNING MAP")}
       <section class="panel">
-        <div class="panel-head"><span>// PINNING STATUS</span><span class="spacer"></span><span class="muted" id="ssl-summary">loading…</span></div>
-        <div class="panel-body tight" id="ssl-table">loading…</div>
+        <div class="panel-head">
+          <span>// PINNING STATUS</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="ssl-summary">loading…</span>
+          <label class="row small" style="gap:6px;cursor:pointer;color:var(--muted)">
+            <input type="checkbox" id="ssl-autorefresh" checked>
+            <span>auto-refresh</span>
+          </label>
+          <button class="btn" id="ssl-refresh" style="padding:2px 10px;font-size:10px">[ ⟳ ]</button>
+        </div>
+        <div class="panel-body tight col" style="gap:8px">
+          <div class="row small" style="padding:6px 8px;background:var(--bg-accent-panel);border:1px solid var(--border-accent);border-radius:2px;gap:14px;flex-wrap:wrap" id="ssl-live-bar">
+            <span class="muted">scanning…</span>
+          </div>
+          <div id="ssl-table">loading…</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><span>// LEGEND</span></div>
+        <div class="panel-body row small" style="gap:18px;flex-wrap:wrap;color:var(--muted)">
+          <span><span class="chip" style="background:rgba(34,222,128,0.15);color:var(--acid);border:1px solid var(--acid)">INTERCEPTED</span> TLS broke — proxy sees plaintext, no effective pinning</span>
+          <span><span class="chip" style="background:rgba(232,121,249,0.15);color:var(--magenta);border:1px solid var(--magenta)">BYPASSED</span> Frida hook fired — pinning callback neutralised</span>
+          <span><span class="chip" style="background:rgba(255,56,96,0.15);color:var(--sev-crit);border:1px solid var(--sev-crit)">BLOCKED</span> static says pinned + no Moxy hits → likely working</span>
+          <span><span class="chip" style="background:rgba(255,149,0,0.15);color:var(--sev-high);border:1px solid var(--sev-high)">STATIC-PINNED</span> code path detected but no live evidence yet</span>
+          <span><span class="chip" style="background:rgba(0,255,255,0.10);color:var(--cyan);border:1px solid var(--cyan)">CLEAR</span> no pinning detected · traffic flowing</span>
+          <span><span class="chip" style="background:rgba(255,255,255,0.05);color:var(--muted);border:1px solid var(--muted)">UNKNOWN</span> not enough data — open the app and hit the host</span>
+        </div>
       </section>
     </div>`;
 }
 
+const _SSL_STATUS_PALETTE = {
+    intercepted: { color: "var(--acid)",     bg: "rgba(34,222,128,0.15)" },
+    bypassed:    { color: "var(--magenta)",  bg: "rgba(232,121,249,0.15)" },
+    blocked:     { color: "var(--sev-crit)", bg: "rgba(255,56,96,0.15)" },
+    "static-pinned": { color: "var(--sev-high)", bg: "rgba(255,149,0,0.15)" },
+    clear:       { color: "var(--cyan)",     bg: "rgba(0,255,255,0.10)" },
+    unknown:     { color: "var(--muted)",    bg: "rgba(255,255,255,0.05)" },
+};
+
+function _ssl_status_chip(status) {
+    const p = _SSL_STATUS_PALETTE[status] || _SSL_STATUS_PALETTE.unknown;
+    return `<span class="chip" style="background:${p.bg};color:${p.color};border:1px solid ${p.color};font-size:9px;letter-spacing:1px">${(status || "?").toUpperCase()}</span>`;
+}
+
 async function mount_project_ssl_map(ctx) {
     const id = ctx.params.id;
-    const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/ssl-map`).catch(() => null);
-    if (!data) return;
-    $("#ssl-summary").textContent = data.pinning_detected ? `pinning detected · ${data.library}` : "no pinning detected";
-    const tbl = $("#ssl-table");
-    if (!data.rows.length) {
-        tbl.innerHTML = `<div class="empty-state">no hosts indexed — needs api_endpoints + ssl_pinning_detected on the AttackSurface.</div>`;
-        return;
-    }
-    tbl.innerHTML = `
-      <div class="table-hdr" style="grid-template-columns: 1fr 160px 100px 220px 120px">
-        <span>HOST</span><span>LIBRARY</span><span>PINNED</span><span>BYPASS RECIPE</span><span></span>
-      </div>` + data.rows.map((r) => `
-        <div class="table-row" style="grid-template-columns: 1fr 160px 100px 220px 120px">
-          <span class="t-mono">${r.host}</span>
-          <span class="t-muted">${r.library}</span>
-          <span class="t-mono" style="color:${r.pinned ? "var(--sev-high)" : "var(--acid)"}">${r.pinned ? "yes" : "no"}</span>
-          <span class="t-mono" style="color:var(--magenta)">${r.bypass_recipe || "—"}</span>
-          <span style="text-align:right">${r.bypass_recipe ? `<a class="btn primary" href="#/recipes" style="padding:4px 10px">[ BYPASS ]</a>` : ""}</span>
-        </div>`).join("");
+    const summaryEl = $("#ssl-summary");
+    const liveBarEl = $("#ssl-live-bar");
+    const tableEl = $("#ssl-table");
+    const autoEl = $("#ssl-autorefresh");
+    const refreshBtn = $("#ssl-refresh");
+
+    const fetchOnce = async () => {
+        const data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/ssl-map`).catch(() => null);
+        if (!data) {
+            tableEl.innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">/ssl-map fetched failed — server reload?</span></div>`;
+            return;
+        }
+        summaryEl.textContent = data.pinning_detected
+            ? `static · pinning detected · ${data.library}`
+            : "static · no pinning detected";
+
+        const live = data.live || {};
+        const workspace = live.moxy_workspace;
+        const pinEvents = live.pin_event_count || 0;
+        liveBarEl.innerHTML = `
+          <span class="t-mono" style="color:var(--cyan)">moxy:</span>
+          <span class="t-mono" style="color:${workspace ? "var(--acid)" : "var(--magenta)"}">${workspace ? escapeHtml(workspace.name || ("#" + workspace.id)) : (live.moxy_error || "offline")}</span>
+          <span class="muted">·</span>
+          <span class="t-mono" style="color:var(--cyan)">window:</span>
+          <span class="t-mono">${live.window_s || "?"}s</span>
+          <span class="muted">·</span>
+          <span class="t-mono" style="color:var(--cyan)">pin events:</span>
+          <span class="t-mono" style="color:${pinEvents ? "var(--magenta)" : "var(--muted)"}">${pinEvents}</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="ssl-polled">polled ${fmtAgo(live.polled_at)}</span>
+        `;
+
+        if (!data.rows.length) {
+            tableEl.innerHTML = `<div class="empty-state">no hosts indexed yet — static scan didn't find network code and the proxy hasn't seen anything either.</div>`;
+            return;
+        }
+        tableEl.innerHTML = `
+          <div class="table-hdr" style="grid-template-columns: 1fr 140px 110px 110px 90px 90px 110px 90px">
+            <span>HOST</span><span>LIBRARY</span><span>STATUS</span><span>STATIC</span><span>MOXY HITS</span><span>LAST</span><span>BYPASS</span><span></span>
+          </div>` + data.rows.map((r) => {
+            const lastStatusColor = (r.moxy_last_status || 0) < 300 ? "var(--acid)"
+                                 : (r.moxy_last_status || 0) < 500 ? "var(--sev-high)" : "var(--sev-crit)";
+            return `
+              <div class="table-row" style="grid-template-columns: 1fr 140px 110px 110px 90px 90px 110px 90px;${r.in_static_surface ? "" : "border-left:2px solid var(--magenta);padding-left:8px"}">
+                <span class="t-mono" title="${r.in_static_surface ? "in static api_endpoints" : "discovered live — not in static surface"}">${escapeHtml(r.host)}${r.in_static_surface ? "" : " <span class=\"muted small\">(new)</span>"}</span>
+                <span class="t-muted">${escapeHtml(r.library || "—")}</span>
+                <span>${_ssl_status_chip(r.status)}</span>
+                <span class="t-mono" style="color:${r.pinned ? "var(--sev-high)" : "var(--acid)"}">${r.pinned ? "pinned" : "—"}</span>
+                <span class="t-mono" style="color:${r.moxy_hits ? "var(--acid)" : "var(--muted)"}">${r.moxy_hits || 0}${r.moxy_last_status ? ` <span style="color:${lastStatusColor}">${r.moxy_last_status}</span>` : ""}</span>
+                <span class="t-muted small">${fmtAgo(r.moxy_last_ts || r.pin_last_ts)}</span>
+                <span class="t-mono" style="color:var(--magenta);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(r.bypass_recipe || "")}">${escapeHtml(r.bypass_recipe || "—")}</span>
+                <span style="text-align:right">${r.bypass_recipe ? `<a class="btn primary" href="#/recipes" style="padding:2px 8px;font-size:10px">[ BYPASS ]</a>` : ""}</span>
+              </div>`;
+        }).join("");
+    };
+
+    // First paint synchronously, then start polling.
+    await fetchOnce();
+    let scope = pollingScope(fetchOnce, 3000);
+
+    if (autoEl) autoEl.addEventListener("change", () => {
+        if (autoEl.checked && !scope) scope = pollingScope(fetchOnce, 3000);
+        else if (!autoEl.checked && scope) { scope.stop(); scope = null; }
+    });
+    if (refreshBtn) refreshBtn.addEventListener("click", fetchOnce);
 }
 
 /* SCREEN 17 — Attack Surface Graph */
