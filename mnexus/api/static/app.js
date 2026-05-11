@@ -370,12 +370,15 @@ function mount_scan() {
     dz.addEventListener("drop", (ev) => { ev.preventDefault(); handleUpload(ev.dataTransfer?.files?.[0]); });
     if (picker) picker.addEventListener("change", (ev) => handleUpload(ev.target.files?.[0]));
 
-    async function handleUpload(file) {
+    async function handleUpload(file, opts = {}) {
         if (!file) return;
-        status.innerHTML = `<span style="color:var(--acid)">↑ uploading <b>${file.name}</b> (${fmtBytes(file.size)}) · detecting package via apktool…</span>`;
+        const force = !!opts.force;
+        const verb = force ? "force-rescanning" : "uploading";
+        status.innerHTML = `<span style="color:var(--acid)">↑ ${verb} <b>${file.name}</b> (${fmtBytes(file.size)}) · detecting package via apktool…</span>`;
 
         const fd = new FormData();
         fd.append("file", file);
+        if (force) fd.append("force", "true");
         try {
             const r = await fetch("/v1/apks/upload", { method: "POST", body: fd });
             const payload = await r.json().catch(() => ({}));
@@ -383,8 +386,33 @@ function mount_scan() {
                 status.innerHTML = `<span style="color:var(--sev-crit)">✕ upload failed: ${payload.detail || r.statusText}</span>`;
                 return;
             }
-            status.innerHTML = `<span style="color:var(--acid)">✓ ingested as <b>${payload.project_id}</b> (${payload.package} ${payload.version}) — redirecting…</span>`;
-            setTimeout(() => { location.hash = `#/project/${encodeURIComponent(payload.project_id)}/overview`; }, 900);
+
+            const projectHref = `#/project/${encodeURIComponent(payload.project_id)}/overview`;
+
+            if (payload.dedup && !force) {
+                // Same SHA-256 already analysed — say so loudly, offer a force-rescan
+                // escape hatch, but still route the user to the existing project
+                // so they don't get stuck on the Scan page wondering what happened.
+                status.innerHTML = `
+                  <span style="color:var(--magenta)">↻ already scanned</span> ·
+                  <a href="${projectHref}" style="color:var(--acid)">open <b>${payload.project_id}</b></a>
+                  <span class="muted small">(${payload.package} ${payload.version})</span> ·
+                  <a href="#" id="dz-force" style="color:var(--cyan)">rescan anyway</a>
+                `;
+                const forceLink = document.getElementById("dz-force");
+                if (forceLink) {
+                    forceLink.addEventListener("click", (ev) => {
+                        ev.preventDefault();
+                        handleUpload(file, { force: true });
+                    });
+                }
+                // Auto-route after a beat so the analyst doesn't have to click.
+                setTimeout(() => { location.hash = projectHref; }, 1600);
+            } else {
+                const label = force ? "rescanned" : "ingested";
+                status.innerHTML = `<span style="color:var(--acid)">✓ ${label} as <b>${payload.project_id}</b> (${payload.package} ${payload.version}) — redirecting…</span>`;
+                setTimeout(() => { location.hash = projectHref; }, 900);
+            }
         } catch (e) {
             status.innerHTML = `<span style="color:var(--sev-crit)">✕ upload error: ${e.message}</span>`;
         }
