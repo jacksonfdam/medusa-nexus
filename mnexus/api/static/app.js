@@ -2930,13 +2930,13 @@ async function mount_device_pull() {
         return;
     }
     body.innerHTML = `
-        <div class="table-hdr" style="grid-template-columns: 1fr 120px">
+        <div class="table-hdr" style="grid-template-columns: 1fr 200px">
             <span>PACKAGE</span><span></span>
         </div>` +
         pkgs.slice(0, 50).map(({ package: pkg }) => `
-            <div class="table-row" style="grid-template-columns: 1fr 120px">
+            <div class="table-row" style="grid-template-columns: 1fr 200px">
                 <span class="t-mono">${pkg}</span>
-                <span style="text-align:right"><button class="btn primary" data-pull="${pkg}" style="padding:4px 10px">[ PULL ]</button></span>
+                <span style="text-align:right"><button class="btn primary" data-pull="${pkg}" style="padding:4px 10px;white-space:nowrap">[ PULL ]</button></span>
             </div>`).join("");
 
     $$("[data-pull]").forEach((btn) => btn.addEventListener("click", async () => {
@@ -2948,11 +2948,35 @@ async function mount_device_pull() {
             const r = await fetch("/v1/device/pull", { method: "POST", body: fd });
             const j = await r.json();
             if (!r.ok) throw new Error(j.detail || r.statusText);
-            btn.textContent = `[ PULLED ${j.count} ]`;
-            btn.style.color = "var(--acid)";
+
+            if (j.ingest_error) {
+                // Pulled files OK but pipeline blew up — keep the analyst informed
+                // rather than pretending it worked.
+                btn.textContent = "[ INGEST FAILED ]";
+                btn.style.color = "var(--sev-crit)";
+                btn.title = j.ingest_error;
+                return;
+            }
+            if (!j.project_id) {
+                // ingest=false escape hatch or some other reason — just file pull.
+                btn.textContent = `[ PULLED ${j.count} ]`;
+                btn.style.color = "var(--acid)";
+                return;
+            }
+
+            // Auto-route to the freshly-ingested (or deduped) project.
+            const label = j.dedup ? `[ ✓ ALREADY SCANNED — OPEN ${j.project_id} ]`
+                                  : `[ ✓ INGESTED — OPEN ${j.project_id} ]`;
+            btn.textContent = label;
+            btn.style.color = j.dedup ? "var(--magenta)" : "var(--acid)";
+            btn.disabled = false;
+            btn.onclick = () => { location.hash = `#/project/${j.project_id}`; };
+            // Short auto-route so the user doesn't have to click twice.
+            setTimeout(() => { if (location.hash.startsWith("#/device/pull")) location.hash = `#/project/${j.project_id}`; }, 1500);
         } catch (e) {
             btn.textContent = `[ FAILED ]`;
             btn.style.color = "var(--sev-crit)";
+            btn.title = e.message || String(e);
         }
     }));
 }

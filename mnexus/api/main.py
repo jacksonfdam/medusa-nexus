@@ -1111,15 +1111,72 @@ async def device_packages(filter: str = "") -> list[dict[str, Any]]:
 
 
 @app.post("/v1/device/pull")
-async def device_pull(package: str = Form(...)) -> dict[str, Any]:
-    """Pull the APK(s) for a package off the device into the workspace."""
+async def device_pull(
+    package: str = Form(...),
+    ingest: bool = Form(default=True),
+    force: bool = Form(default=False),
+) -> dict[str, Any]:
+    """Pull the APK(s) for a package off the device — and ingest by default.
+
+    Split-APK apps return multiple files (base + config splits); we pick the
+    one that's actually the base APK for ingest:
+
+      * If a ``base.apk`` is in the bundle, use it.
+      * Otherwise the largest file by size, which is reliably the base
+        because config splits ship resources only and weigh far less.
+
+    SHA-256 dedup short-circuits when the device's APK already has a
+    Project (e.g. pulled it once last week — clicking PULL again
+    routes back to the existing scan instead of cloning it).
+
+    Knobs:
+      * ``ingest=false``  pulls but skips ingest (file-only mode).
+      * ``force=true``    rescan even when the hash collides with an
+                          existing project.
+    """
     nexus: MedusaNexus = app.state.nexus
     adb = nexus.engines["adb"]
     if not await adb.is_device_connected():  # type: ignore[attr-defined]
         raise HTTPException(503, "no device connected")
     out_dir = nexus.config.workspace / "pulled" / package
     pulled = await adb.pull_apk(package, out_dir)  # type: ignore[attr-defined]
-    return {"package": package, "files": [str(p) for p in pulled], "count": len(pulled)}
+    if not pulled:
+        raise HTTPException(404, f"adb pulled 0 files for {package}")
+
+    response: dict[str, Any] = {
+        "package": package,
+        "files": [str(p) for p in pulled],
+        "count": len(pulled),
+        "project_id": None,
+        "dedup": False,
+    }
+    if not ingest:
+        return response
+
+    # Pick the base APK: explicit name first, largest file as fallback.
+    base = next((p for p in pulled if p.name == "base.apk"), None)
+    if base is None:
+        base = max(pulled, key=lambda p: p.stat().st_size)
+
+    # Hash + dedup check BEFORE we call ingest, so we know which path the
+    # orchestrator's going to take. (ingest_apk's own short-circuit returns
+    # the existing Project but doesn't tell us it deduped.)
+    sha = hashlib.sha256(base.read_bytes()).hexdigest()
+    existed_before = nexus.db.find_by_sha256(sha) is not None and not force
+
+    try:
+        project = await nexus.ingest_apk(base, package_name=package, version="unknown", force=force)
+    except Exception as exc:  # noqa: BLE001
+        # Don't lose the pulled files — the analyst can still ingest manually.
+        response["ingest_error"] = f"{exc.__class__.__name__}: {exc}"
+        return response
+
+    response["project_id"] = project.id
+    response["package"] = project.package_name  # apktool may have refined it
+    response["version"] = project.version_name
+    response["apk_sha256"] = project.apk_sha256
+    response["dedup"] = existed_before
+    return response
 
 
 @app.post("/v1/device/frida/start")
