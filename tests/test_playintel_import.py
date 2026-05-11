@@ -158,3 +158,91 @@ def test_import_unknown_scan_returns_404(play_client) -> None:
     r = client.post("/v1/playintel/scans/PSC-NOPE/import")
     assert r.status_code == 404
     assert "PSC-NOPE" in r.text
+
+
+# ─── reverse direction: from a Project, run a Play Scan ───────────────
+
+
+def test_project_play_scan_runs_on_existing_apk(play_client) -> None:
+    """An existing Project has the APK on disk — /play-scan must reuse it
+    instead of forcing the analyst to re-upload."""
+    client, _ = play_client
+    # Step 1: upload an APK as a regular Project.
+    apk_bytes = _make_apk_bytes(b"project-replay")
+    r = client.post(
+        "/v1/apks/upload",
+        files={"file": ("target.apk", io.BytesIO(apk_bytes), "application/vnd.android.package-archive")},
+        data={"package": "com.target.app", "version": "1.0"},
+    )
+    assert r.status_code == 200, r.text
+    project_id = r.json()["project_id"]
+
+    # Step 2: trigger a PlayIntel scan against that Project.
+    scan_resp = client.post(f"/v1/projects/{project_id}/play-scan")
+    assert scan_resp.status_code == 200, scan_resp.text
+    scan = scan_resp.json()
+    assert scan["package"] == "com.target.app"
+    assert scan["source"].startswith("project:")
+    assert scan["scan_id"].startswith("PSC-")
+
+
+def test_project_play_scan_410_when_apk_missing_from_workspace(play_client) -> None:
+    """If the Project's stored APK got deleted out from under us, the
+    endpoint surfaces 410 instead of crashing on the analyser."""
+    client, app = play_client
+    r = client.post(
+        "/v1/apks/upload",
+        files={"file": ("target.apk", io.BytesIO(_make_apk_bytes(b"will-delete")), "application/vnd.android.package-archive")},
+        data={"package": "com.target.app", "version": "1.0"},
+    )
+    project_id = r.json()["project_id"]
+
+    # Wipe the on-disk artefact.
+    detail = client.get(f"/v1/projects/{project_id}").json()
+    Path(detail["apk_path"]).unlink(missing_ok=True)
+
+    scan_resp = client.post(f"/v1/projects/{project_id}/play-scan")
+    assert scan_resp.status_code == 410
+    assert "APK no longer present" in scan_resp.text or "no longer present" in scan_resp.text
+
+
+def test_scans_list_filters_by_apk_sha256(play_client) -> None:
+    """The Overview panel asks /scans?apk_sha256=… to decide whether the
+    APK has any history — pinning that filter here."""
+    client, _ = play_client
+
+    # Two distinct uploads → two scans, two distinct shas.
+    sid_a, sha_a = _seed_scan_via_upload(client, marker=b"a")
+    sid_b, sha_b = _seed_scan_via_upload(client, marker=b"b")
+    assert sha_a != sha_b
+
+    only_a = client.get(f"/v1/playintel/scans?apk_sha256={sha_a}").json()
+    assert only_a["count"] == 1
+    assert only_a["scans"][0]["id"] == sid_a
+
+    only_b = client.get(f"/v1/playintel/scans?apk_sha256={sha_b}").json()
+    assert {s["id"] for s in only_b["scans"]} == {sid_b}
+
+    # Unknown sha → empty list, not 404.
+    none = client.get("/v1/playintel/scans?apk_sha256=00deadbeef").json()
+    assert none["count"] == 0
+
+
+def test_project_play_scan_then_overview_finds_it_by_sha(play_client) -> None:
+    """Round-trip the contract the UI relies on: scan a Project, then
+    query /scans?apk_sha256=<project's sha> and find the same scan."""
+    client, _ = play_client
+    apk_bytes = _make_apk_bytes(b"roundtrip")
+    sha = hashlib.sha256(apk_bytes).hexdigest()
+    r = client.post(
+        "/v1/apks/upload",
+        files={"file": ("target.apk", io.BytesIO(apk_bytes), "application/vnd.android.package-archive")},
+        data={"package": "com.target.app", "version": "1.0"},
+    )
+    project_id = r.json()["project_id"]
+
+    scan_resp = client.post(f"/v1/projects/{project_id}/play-scan").json()
+    scan_id = scan_resp["scan_id"]
+
+    history = client.get(f"/v1/playintel/scans?apk_sha256={sha}").json()
+    assert scan_id in {s["id"] for s in history["scans"]}
