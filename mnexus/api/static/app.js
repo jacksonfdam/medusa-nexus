@@ -647,6 +647,15 @@ async function mount_play_scan() {
         });
     }
     await renderPlayScanHistory();
+
+    // Auto-load a scan when arriving from /#/project/<id>/overview's
+    // PLAY-INTEL panel. sessionStorage carries the scan_id so we don't
+    // have to encode it into the route.
+    const jumpId = sessionStorage.getItem("playintel-jump");
+    if (jumpId) {
+        sessionStorage.removeItem("playintel-jump");
+        loadHistoricalScan(jumpId);
+    }
 }
 
 async function renderPlayScanHistory(packageFilter) {
@@ -2577,18 +2586,57 @@ async function mount_project_overview(ctx) {
 
     // iOS-flavored labels for the surface summary.
     const isIos = project.platform === "ios";
-    const surfaceCards = isIos
+    const exportedComponents = surface.exported_components || [];
+    const deeplinks = surface.deeplinks || [];
+    const urlSchemes = surface.url_schemes || [];
+    const universalLinks = deeplinks.filter((d) => !urlSchemes.includes(d));
+
+    // First N items, with a tail "+ X more →" link that jumps to the
+    // full list screen. We don't want the Overview to scroll forever
+    // when a target app exports 80 activities or 200 deep links.
+    const _list = (items, max, link, render) => {
+        if (!items.length) return `<div class="muted small">none discovered</div>`;
+        const head = items.slice(0, max).map(render).join("");
+        const tail = items.length > max
+            ? `<a href="${link}" class="muted small" style="display:block;margin-top:4px">+ ${items.length - max} more →</a>`
+            : "";
+        return head + tail;
+    };
+    const componentsListHtml = _list(exportedComponents, 6, `#/project/${encodeURIComponent(id)}/components`, (c) => `
+        <div class="t-mono small" style="display:flex;gap:6px;align-items:baseline">
+          <span class="chip ${c.unprotected ? "high" : "info"}" style="font-size:9px;letter-spacing:1px">${escapeHtml((c.component_type || "?").toUpperCase().slice(0, 3))}</span>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(c.name || "")}">${escapeHtml(c.name || "?")}</span>
+          ${c.unprotected ? `<span class="muted small" style="color:var(--sev-high)">unprotected</span>` : ""}
+        </div>`);
+    const deeplinksListHtml = _list(deeplinks, 6, `#/project/${encodeURIComponent(id)}/components`, (d) => `
+        <div class="t-mono small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(d)}">${escapeHtml(d)}</div>`);
+    const urlSchemesListHtml = _list(urlSchemes, 6, `#/project/${encodeURIComponent(id)}/components`, (s) => `
+        <div class="t-mono small">${escapeHtml(s)}://</div>`);
+    const universalLinksListHtml = _list(universalLinks, 6, `#/project/${encodeURIComponent(id)}/components`, (d) => `
+        <div class="t-mono small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(d)}">${escapeHtml(d)}</div>`);
+
+    // Two-column attack-surface block: each cell holds a list, not a
+    // bare count. Platform-aware so iOS gets URL SCHEMES / UNIVERSAL
+    // LINKS / FRAMEWORKS / JB DETECTION and Android gets COMPONENTS /
+    // DEEP LINKS / NATIVE LIBS / SSL PINNING.
+    const surfaceCells = isIos
         ? [
-            ["URL SCHEMES", `${(surface.url_schemes || []).length}`],
-            ["UNIVERSAL LINKS", `${(surface.deeplinks || []).filter((d) => !((surface.url_schemes || []).includes(d))).length}`],
-            ["FRAMEWORKS", `${(surface.native_libraries || []).length}`],
-            ["JB DETECTION", surface.jailbreak_detection_detected ? `detected · ${surface.jailbreak_detection_library || "?"}` : "none"],
+            { label: "URL SCHEMES",     count: urlSchemes.length,       html: urlSchemesListHtml },
+            { label: "UNIVERSAL LINKS", count: universalLinks.length,    html: universalLinksListHtml },
+            { label: "FRAMEWORKS",      count: (surface.native_libraries || []).length, html: "" },
+            { label: "JB DETECTION",    count: surface.jailbreak_detection_detected ? 1 : 0,
+              html: surface.jailbreak_detection_detected
+                  ? `<div class="t-mono small" style="color:var(--sev-high)">detected · ${escapeHtml(surface.jailbreak_detection_library || "?")}</div>`
+                  : `<div class="muted small">none</div>` },
         ]
         : [
-            ["COMPONENTS", `${(surface.exported_components || []).length} exported`],
-            ["DEEP LINKS", `${(surface.deeplinks || []).length}`],
-            ["NATIVE LIBS", `${(surface.native_libraries || []).length}`],
-            ["SSL PINNING", surface.ssl_pinning_detected ? "detected · " + (surface.ssl_pinning_library || "?") : "none"],
+            { label: "EXPORTED COMPONENTS", count: exportedComponents.length, html: componentsListHtml },
+            { label: "DEEP LINKS",          count: deeplinks.length,           html: deeplinksListHtml },
+            { label: "NATIVE LIBS",         count: (surface.native_libraries || []).length, html: "" },
+            { label: "SSL PINNING",         count: surface.ssl_pinning_detected ? 1 : 0,
+              html: surface.ssl_pinning_detected
+                  ? `<div class="t-mono small" style="color:var(--sev-high)">detected · ${escapeHtml(surface.ssl_pinning_library || "?")}</div>`
+                  : `<div class="muted small">none</div>` },
         ];
 
     main.innerHTML = h`
@@ -2622,18 +2670,138 @@ async function mount_project_overview(ctx) {
           </section>
           <section class="panel">
             <div class="panel-head">// ATTACK SURFACE</div>
-            <div class="panel-body row" style="gap:24px;flex-wrap:wrap">
-              ${surfaceCards.map(([label, value]) => `<div class="col grow" style="min-width:140px"><span class="muted small uppercase">${label}</span><span class="t-mono">${value}</span></div>`).join("")}
+            <div class="panel-body" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+              ${surfaceCells.map((cell) => `
+                <div style="background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;padding:10px">
+                  <div class="row" style="margin-bottom:6px">
+                    <span class="muted small uppercase" style="letter-spacing:2px">${escapeHtml(cell.label)}</span>
+                    <span class="spacer"></span>
+                    <span class="t-mono small" style="color:var(--cyan)">${cell.count}</span>
+                  </div>
+                  <div class="col" style="gap:3px">${cell.html}</div>
+                </div>`).join("")}
             </div>
           </section>
+          ${_play_intel_overview_panel(id, project)}
           ${_exports_panel(id)}
         </div>
       </section>`;
+    // Async-mount the PlayIntel strip after the overview HTML is in the DOM.
+    mount_play_intel_overview(id, project);
 }
 
 /* Exports panel — five one-click downloads that turn the recovered endpoints
    + deeplinks into ready-to-replay collections. Wired here on the project
    Overview, and again on the Static tab for analyst convenience. */
+/* PlayIntel panel for the project Overview.
+ *
+ *   - Async-mounts via mount_play_intel_overview() (called after the
+ *     Overview HTML is in the DOM). The shell starts as a 'scanning…'
+ *     placeholder so the page paints fast even on slow disks.
+ *   - State machine:
+ *       * no prior scan for this apk_sha256 → [ ▶ RUN PLAY-INTEL SCAN ]
+ *       * prior scan(s) exist               → counts + [ VIEW ] + [ ▶ RE-RUN ]
+ *       * scan in flight                    → [ SCANNING… ] (button disabled)
+ *   - 'Run' calls POST /v1/projects/{id}/play-scan, then routes to
+ *     /#/play-scan with the freshest scan id auto-loaded.
+ */
+function _play_intel_overview_panel(id, project) {
+    const platformOK = (project.platform || "android") !== "ios";  // PlayIntel is android-only
+    return `
+      <section class="panel" id="play-intel-panel">
+        <div class="panel-head">
+          <span>// PLAY-INTEL</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="play-intel-status">${platformOK ? "checking history…" : "android-only"}</span>
+        </div>
+        <div class="panel-body col" style="gap:8px" id="play-intel-body">
+          ${platformOK
+            ? `<div class="muted small">Firebase configs · confirmed secrets · active probes (RTDB / Firestore / Storage). Reuses the same engine as <a href="#/play-scan">/play-scan</a>.</div>
+               <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center" id="play-intel-actions">
+                 <span class="muted small">loading…</span>
+               </div>`
+            : `<div class="muted small">PlayIntel only runs against Android APKs. iOS projects don't have Firebase configs in the manifest format we extract.</div>`
+          }
+        </div>
+      </section>`;
+}
+
+async function mount_play_intel_overview(id, project) {
+    if ((project.platform || "android") === "ios") return;
+    const sha = project.apk_sha256;
+    const actions = $("#play-intel-actions");
+    const statusEl = $("#play-intel-status");
+    if (!actions) return;
+
+    const renderRunButton = (label = "[ ▶ RUN PLAY-INTEL SCAN ]") => `
+      <button class="btn primary" id="play-intel-run" style="white-space:nowrap;padding:4px 10px">${label}</button>
+      <label class="row small" style="gap:6px;align-items:center">
+        <input type="checkbox" id="play-intel-probes">
+        <span class="muted">run active probes (RTDB · Firestore · Storage)</span>
+      </label>`;
+
+    let priorScans = [];
+    try {
+        const r = await fetch(`/v1/playintel/scans?apk_sha256=${encodeURIComponent(sha || "")}&limit=20`);
+        if (r.ok) priorScans = (await r.json()).scans || [];
+    } catch (_) { /* offline DB → treat as no history */ }
+
+    const renderState = () => {
+        if (!priorScans.length) {
+            if (statusEl) statusEl.textContent = "never scanned";
+            actions.innerHTML = renderRunButton();
+        } else {
+            const latest = priorScans[0];
+            if (statusEl) statusEl.innerHTML = `<span style="color:var(--acid)">${priorScans.length}</span> prior scan(s) · latest ${escapeHtml(fmtAgo(latest.scanned_at))}`;
+            actions.innerHTML = `
+              <div class="row small" style="gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px">
+                <span><span class="muted">firebase:</span> <span class="t-mono" style="color:${latest.firebase_project_count ? "var(--acid)" : "inherit"}">${latest.firebase_project_count || 0}</span></span>
+                <span><span class="muted">secrets:</span> <span class="t-mono" style="color:${latest.confirmed_secrets_count ? "var(--sev-high)" : "inherit"}">${latest.confirmed_secrets_count || 0}</span></span>
+                <span><span class="muted">vulns:</span> <span class="t-mono" style="color:${latest.vulnerability_count ? "var(--sev-crit)" : "inherit"}">${latest.vulnerability_count || 0}</span></span>
+                <span><span class="muted">findings:</span> <span class="t-mono">${latest.findings_count || 0}</span></span>
+              </div>
+              <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+                <a class="btn primary" href="#/play-scan" style="padding:4px 10px;white-space:nowrap"
+                   data-load-scan="${escapeHtml(latest.id)}">[ VIEW LATEST ]</a>
+                ${renderRunButton("[ ▶ RE-RUN ]")}
+              </div>`;
+        }
+        const runBtn = $("#play-intel-run");
+        const probes = $("#play-intel-probes");
+        if (runBtn) runBtn.addEventListener("click", async () => {
+            runBtn.disabled = true;
+            runBtn.textContent = "[ SCANNING… ]";
+            if (statusEl) statusEl.textContent = "scanning · this can take 30–90s";
+            try {
+                const form = new FormData();
+                form.append("run_active_probes", probes && probes.checked ? "true" : "false");
+                const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/play-scan`, { method: "POST", body: form });
+                if (!r.ok) {
+                    const t = (await r.text()).slice(0, 240);
+                    throw new Error(`[${r.status}] ${t}`);
+                }
+                const body = await r.json();
+                runBtn.textContent = "[ ✓ COMPLETE — VIEW ]";
+                runBtn.style.color = "var(--acid)";
+                runBtn.disabled = false;
+                runBtn.onclick = () => { sessionStorage.setItem("playintel-jump", body.scan_id); location.hash = "#/play-scan"; };
+                setTimeout(() => {
+                    if (location.hash.startsWith("#/project/")) {
+                        sessionStorage.setItem("playintel-jump", body.scan_id);
+                        location.hash = "#/play-scan";
+                    }
+                }, 1500);
+            } catch (e) {
+                runBtn.textContent = "[ FAILED ]";
+                runBtn.style.color = "var(--sev-crit)";
+                runBtn.title = (e && e.message) || String(e);
+                runBtn.disabled = false;
+            }
+        });
+    };
+    renderState();
+}
+
 function _exports_panel(id) {
     const fmts = [
         ["postman",   "POSTMAN",  "API endpoints as a Postman v2.1 collection (any host, GET defaults)"],
