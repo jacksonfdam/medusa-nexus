@@ -2602,17 +2602,17 @@ async function mount_project_overview(ctx) {
             : "";
         return head + tail;
     };
-    const componentsListHtml = _list(exportedComponents, 6, `#/project/${encodeURIComponent(id)}/components`, (c) => `
+    const componentsListHtml = _list(exportedComponents, 6, `#/project/${encodeURIComponent(id)}/static/components`, (c) => `
         <div class="t-mono small" style="display:flex;gap:6px;align-items:baseline">
           <span class="chip ${c.unprotected ? "high" : "info"}" style="font-size:9px;letter-spacing:1px">${escapeHtml((c.component_type || "?").toUpperCase().slice(0, 3))}</span>
           <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(c.name || "")}">${escapeHtml(c.name || "?")}</span>
           ${c.unprotected ? `<span class="muted small" style="color:var(--sev-high)">unprotected</span>` : ""}
         </div>`);
-    const deeplinksListHtml = _list(deeplinks, 6, `#/project/${encodeURIComponent(id)}/components`, (d) => `
+    const deeplinksListHtml = _list(deeplinks, 6, `#/project/${encodeURIComponent(id)}/static/components`, (d) => `
         <div class="t-mono small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(d)}">${escapeHtml(d)}</div>`);
-    const urlSchemesListHtml = _list(urlSchemes, 6, `#/project/${encodeURIComponent(id)}/components`, (s) => `
+    const urlSchemesListHtml = _list(urlSchemes, 6, `#/project/${encodeURIComponent(id)}/static/components`, (s) => `
         <div class="t-mono small">${escapeHtml(s)}://</div>`);
-    const universalLinksListHtml = _list(universalLinks, 6, `#/project/${encodeURIComponent(id)}/components`, (d) => `
+    const universalLinksListHtml = _list(universalLinks, 6, `#/project/${encodeURIComponent(id)}/static/components`, (d) => `
         <div class="t-mono small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(d)}">${escapeHtml(d)}</div>`);
 
     // Two-column attack-surface block: each cell holds a list, not a
@@ -5690,6 +5690,12 @@ const ROUTES = [
     // Bare project hash → overview. location.replace keeps the back button clean
     // so users don't bounce back into the redirect target's predecessor.
     { path: "project/:id", view: (ctx) => { location.replace(`#/project/${encodeURIComponent(ctx.params.id)}/overview`); return ""; } },
+    // Common bare aliases for sub-views that actually live under /static or
+    // similar. Anything Overview tiles link to gets a forgiving redirect here
+    // so bookmarks + cross-references survive route reshuffles.
+    { path: "project/:id/components", view: (ctx) => { location.replace(`#/project/${encodeURIComponent(ctx.params.id)}/static/components`); return ""; } },
+    { path: "project/:id/secrets",    view: (ctx) => { location.replace(`#/project/${encodeURIComponent(ctx.params.id)}/static/secrets`); return ""; } },
+    { path: "project/:id/native",     view: (ctx) => { location.replace(`#/project/${encodeURIComponent(ctx.params.id)}/static/native`); return ""; } },
     { path: "project/:id/overview",             view: view_project_overview,  mount: mount_project_overview },
     { path: "project/:id/static",               view: view_project_static,    mount: mount_project_static },
     { path: "project/:id/static/secrets",       view: view_project_secrets,    mount: mount_project_secrets },
