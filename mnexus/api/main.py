@@ -3458,6 +3458,199 @@ def _impact_for(f) -> str:  # type: ignore[no-untyped-def]
     }.get(f.category, "Confidentiality / integrity loss.")
 
 
+# ─── Mango integration (ch0pin) — only the deltas Nexus doesn't already do ───────
+#
+# Anything Mango ships that Nexus already covers (pull, install, playstore,
+# proxy, logcat, search, session, screencap, …) stays where it is. The
+# endpoints below cover the three Mango commands that have no Nexus equivalent
+# yet: decodeflag, diff, deeplink (+ --poc).
+
+
+@app.post("/v1/mango/decode-flags")
+async def mango_decode_flags(request: Request) -> dict[str, Any]:
+    """Decode an Android flag integer against Intent / Receiver / PendingIntent /
+    Content-resolver namespaces — Mango's ``decodeflag``.
+
+    Body::
+        {"value": "0x10000000", "namespaces": ["intent", "receiver"]}
+
+    ``value`` accepts hex (``0x…``), decimal, or octal/binary literals (``0o…``/``0b…``).
+    ``namespaces`` is optional; default returns every interpretation so the
+    analyst sees the contextual ambiguity (``0x00000001`` is
+    ``FLAG_GRANT_READ_URI_PERMISSION`` *and* ``QUERY_SORT_DESCENDING``).
+    """
+    from mnexus.intelligence import android_flags
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be an object")
+    try:
+        value = android_flags.parse_flag_value(body.get("value"))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, f"bad value: {exc}") from exc
+
+    ns_param = body.get("namespaces")
+    namespaces: list[str] | None = None
+    if ns_param is not None:
+        if not isinstance(ns_param, list) or not all(isinstance(n, str) for n in ns_param):
+            raise HTTPException(400, "namespaces must be a list of strings")
+        unknown = [n for n in ns_param if n not in android_flags.supported_namespaces()]
+        if unknown:
+            raise HTTPException(400, f"unknown namespace(s): {unknown}")
+        namespaces = ns_param
+
+    decoded = android_flags.decode(value, namespaces)
+    return {
+        "value": value,
+        "hex": f"0x{value:X}",
+        "namespaces": namespaces or android_flags.supported_namespaces(),
+        "decoded": decoded,
+    }
+
+
+@app.get("/v1/projects/{project_id}/manifest-diff")
+async def project_manifest_diff(project_id: str, against: str | None = None) -> dict[str, Any]:
+    """Diff this project's AttackSurface against another scan of the
+    *same* package — Mango's ``diff`` command, with structured data
+    instead of plain-text manifest comparison.
+
+    Picks ``against`` automatically when omitted: the most recent prior
+    Project (different id) that shares the same ``package_name``. Returns
+    a 404-flavoured stub (``base=null``) when no prior scan exists rather
+    than a 404 so the UI can render an empty-state without flapping.
+    """
+    from mnexus.intelligence.manifest_diff import diff_surfaces
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    head_surface = p.attack_surface.model_dump(mode="json") if p.attack_surface else None
+
+    base_project: Project | None = None
+    if against:
+        base_project = nexus.db.load_project(against)
+        if base_project is None:
+            raise HTTPException(404, f"no project with id '{against}'")
+        if base_project.id == p.id:
+            raise HTTPException(400, "cannot diff a project against itself")
+    else:
+        # Most recent prior scan of the same package, excluding self.
+        # list_projects returns lightweight dicts ordered by updated_at desc;
+        # walk them in order until we find a matching package, then materialise
+        # the full Project via load_project to get the attack_surface.
+        for row in nexus.db.list_projects():
+            if row.get("id") == p.id:
+                continue
+            if (row.get("package_name") or "") != (p.package_name or ""):
+                continue
+            base_project = nexus.db.load_project(row["id"])
+            if base_project is not None:
+                break
+
+    if base_project is None:
+        return {
+            "project_id": p.id,
+            "package": p.package_name,
+            "base": None,
+            "head": {"id": p.id, "version_name": p.version_name},
+            "diff": diff_surfaces(None, head_surface),
+            "note": "no prior scan of this package — diff renders 'all added' against an empty base.",
+        }
+
+    base_surface = base_project.attack_surface.model_dump(mode="json") if base_project.attack_surface else None
+    return {
+        "project_id": p.id,
+        "package": p.package_name,
+        "base": {
+            "id": base_project.id,
+            "version_name": base_project.version_name,
+            "version_code": base_project.version_code,
+            "created_at": base_project.created_at.isoformat(),
+        },
+        "head": {
+            "id": p.id,
+            "version_name": p.version_name,
+            "version_code": p.version_code,
+            "created_at": p.created_at.isoformat(),
+        },
+        "diff": diff_surfaces(base_surface, head_surface),
+    }
+
+
+@app.post("/v1/projects/{project_id}/mango/deeplink/fire")
+async def mango_deeplink_fire(project_id: str, uri: str = Form(...)) -> dict[str, Any]:
+    """Fire a deeplink intent on the connected device — Mango's ``deeplink``.
+
+    Runs ``adb shell am start -W -a android.intent.action.VIEW -d <uri>``
+    against the bridged device. Returns the raw output + the resolved
+    activity (parsed out of ``am start``'s ``Activity:`` line). 503 when
+    no device is connected, 400 when the URI is empty.
+    """
+    if not uri.strip():
+        raise HTTPException(400, "uri is empty")
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    adb = nexus.engines["adb"]
+    if not await adb.is_device_connected():  # type: ignore[attr-defined]
+        raise HTTPException(503, "no device connected — plug a device in and authorise USB debugging")
+    out = await adb._run([  # type: ignore[attr-defined]
+        nexus.config.adb_path, "shell", "am", "start", "-W",
+        "-a", "android.intent.action.VIEW", "-d", uri,
+    ])
+    # Parse the resolved Activity line — when am can't resolve the deeplink
+    # the line is missing and the analyst gets a stronger signal than 'I dunno'.
+    activity = ""
+    for line in out.splitlines():
+        if line.startswith("Activity:"):
+            activity = line.split(":", 1)[1].strip()
+            break
+    return {
+        "project_id": p.id,
+        "uri": uri,
+        "activity": activity,
+        "raw": out.strip(),
+        "fired": activity != "",
+    }
+
+
+@app.get("/v1/projects/{project_id}/mango/deeplink/poc")
+async def mango_deeplink_poc(project_id: str, uri: str) -> Response:
+    """Generate an HTML PoC for a deeplink — Mango's ``deeplink --poc``.
+
+    Returns an ``Content-Type: text/html`` body with a single anchor
+    that fires ``uri`` when clicked. Useful for demonstrating that the
+    deeplink can be triggered from a hostile page the user lands on —
+    cross-app drive-by. The page is dumb on purpose; the value is the
+    repro, not the UI.
+    """
+    if not uri.strip():
+        raise HTTPException(400, "uri is empty")
+    p = _require_project(project_id)
+    # Escape the uri once for the href, once for the visible text. We
+    # render through html.escape rather than rolling our own so a uri
+    # with quotes or '<' doesn't break out of the attribute.
+    import html as _html
+    safe_href = _html.escape(uri, quote=True)
+    safe_text = _html.escape(uri, quote=False)
+    body = (
+        "<!doctype html>\n"
+        f"<html><head><meta charset=\"utf-8\"><title>Deeplink PoC — {_html.escape(p.package_name)}</title></head>\n"
+        "<body style=\"font-family:system-ui,sans-serif;padding:32px;background:#111;color:#0ff\">\n"
+        f"  <h1>Deeplink PoC</h1>\n"
+        f"  <p>Target package: <code>{_html.escape(p.package_name)}</code></p>\n"
+        f"  <p><a href=\"{safe_href}\" "
+        "id=\"deeplink\" "
+        "style=\"font-family:monospace;color:#0ff;font-size:18px;display:inline-block;padding:10px 16px;border:1px solid #0ff;border-radius:2px\">"
+        f"{safe_text}</a></p>\n"
+        f"  <p style=\"color:#888;font-size:12px\">Click the link from a browser running on the device — "
+        "if the targeted app handles the URI without prompting, the deeplink is exploitable from any web page.</p>\n"
+        "</body></html>\n"
+    )
+    return Response(body, media_type="text/html; charset=utf-8")
+
+
 @app.post("/v1/projects/{project_id}/runtime/script")
 async def project_runtime_script(
     project_id: str,
