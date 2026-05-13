@@ -3458,6 +3458,76 @@ def _impact_for(f) -> str:  # type: ignore[no-untyped-def]
     }.get(f.category, "Confidentiality / integrity loss.")
 
 
+@app.post("/v1/projects/{project_id}/runtime/script")
+async def project_runtime_script(
+    project_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    """Generate a Medusa-flavoured Frida script for one runtime action.
+
+    The Project's ``package_name`` is auto-bound everywhere — the analyst
+    never types it. Body shape::
+
+        {
+            "action": "enumerate_classes" | "describe_class" |
+                       "jtrace_method" | "enumerate_modules" |
+                       "spawn_log",
+            "params": { … action-specific … }
+        }
+
+    Returns::
+
+        {
+            "action":   "<echoed action>",
+            "package":  "<project's package_name>",
+            "channel":  "runtime",           # send() events land here
+            "script":   "<full frida JS>",
+            "hint":     "<one-liner of how to run it>",
+        }
+
+    The generated scripts all ``send({channel:'runtime', …})`` so the
+    existing /v1/projects/{id}/dynamic/events ingest captures their
+    output without a separate transport.
+
+    Reuses Nexus primitives instead of duplicating Medusa's REPL:
+
+      * Recipes library (built-in + ch0pin/medusa modules) is still the
+        catalogue for stable hooks — this endpoint is for ad-hoc Medusa
+        commands (`enumerate`, `describe_java_class`, `jtrace`, `libs`)
+        that don't ship as recipes.
+      * Frida-server lifecycle stays at /v1/device/frida/start.
+      * The Dynamic tab still owns the long-lived session + console;
+        this endpoint just emits the script for it to load.
+    """
+    p = _require_project(project_id)
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "expected an object body")
+    action = (body.get("action") or "").strip()
+    params = body.get("params") or {}
+    if not isinstance(params, dict):
+        raise HTTPException(400, "params must be an object")
+
+    from mnexus.intelligence.runtime_scripts import generate_runtime_script
+
+    try:
+        out = generate_runtime_script(action, p.package_name or "", params)
+    except KeyError as exc:
+        raise HTTPException(400, f"unknown action: {exc.args[0]}") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    return {
+        "project_id": p.id,
+        "package": p.package_name,
+        "action": action,
+        **out,
+    }
+
+
 @app.get("/v1/projects/{project_id}/dataflow")
 async def project_dataflow(project_id: str) -> dict[str, Any]:
     """Screen 18 — sources/sinks for the data-flow swimlanes."""
