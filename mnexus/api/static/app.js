@@ -1569,6 +1569,34 @@ function view_project_runtime(ctx) {
       </section>
 
       <section class="panel">
+        <div class="panel-head"><span>// MANGO TOOLBOX</span><span class="muted small">deeplink fire · flag decoder · manifest diff</span></div>
+        <div class="panel-body col" style="gap:12px">
+          <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:110px">deeplink:</span>
+            <select id="rt-mango-dl" class="input t-mono" style="flex:1;min-width:240px">
+              <option value="">loading deeplinks…</option>
+            </select>
+            <button class="btn primary" id="rt-mango-dl-fire" style="white-space:nowrap" title="adb shell am start -a VIEW -d <uri>">[ ▶ FIRE ON DEVICE ]</button>
+            <button class="btn" id="rt-mango-dl-poc" style="white-space:nowrap" title="download a one-click HTML page that fires this deeplink">[ HTML POC ]</button>
+          </div>
+          <div class="muted small" id="rt-mango-dl-out" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap;font-family:inherit"></div>
+
+          <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:110px">decode flag:</span>
+            <input id="rt-mango-flag" class="input t-mono" placeholder="0x10000004 · 268435460 · 0b1010" style="flex:1;min-width:200px">
+            <button class="btn primary" id="rt-mango-flag-go" style="white-space:nowrap">[ DECODE ]</button>
+          </div>
+          <div id="rt-mango-flag-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px"></div>
+
+          <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:110px">version diff:</span>
+            <a class="btn" id="rt-mango-diff-link" href="#" style="white-space:nowrap">[ → MANIFEST DIFF AGAINST PRIOR SCAN ]</a>
+            <span class="muted small">compares exported components · deeplinks · permissions · SSL pinning</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
         <div class="panel-head"><span>// REUSE WHAT NEXUS ALREADY HAS</span></div>
         <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
           <a class="btn" href="#/recipes">[ RECIPES LIBRARY ]</a>
@@ -1658,6 +1686,97 @@ async function mount_project_runtime(ctx) {
     }));
     $("#rt-life-go").addEventListener("click", () => post("spawn_log", {}));
 
+    // ── MANGO TOOLBOX ──────────────────────────────────────────────────
+    // Populate the deeplink picker from the project's surface so the
+    // analyst doesn't have to copy URIs around. Falls back to a free-text
+    // input when the project never had deeplinks recovered.
+    const surface = (project.attack_surface || {});
+    const allDeeplinks = [
+        ...(surface.deeplinks || []),
+        ...((surface.url_schemes || []).map((s) => `${s}://`)),
+    ];
+    const dlSel = $("#rt-mango-dl");
+    if (allDeeplinks.length) {
+        dlSel.innerHTML = allDeeplinks.map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join("");
+    } else {
+        // No deeplinks discovered statically → swap the select for a text
+        // input so the analyst can still test arbitrary URIs.
+        const replacement = document.createElement("input");
+        replacement.id = "rt-mango-dl";
+        replacement.className = "input t-mono";
+        replacement.placeholder = "myapp://path  ·  https://app.target.com/…";
+        replacement.style.flex = "1";
+        replacement.style.minWidth = "240px";
+        dlSel.replaceWith(replacement);
+    }
+
+    const dlOut = $("#rt-mango-dl-out");
+    $("#rt-mango-dl-fire").addEventListener("click", async () => {
+        const cur = $("#rt-mango-dl");
+        const uri = (cur && (cur.value || "")).trim();
+        if (!uri) { alert("pick or type a deeplink first"); return; }
+        dlOut.style.display = "";
+        dlOut.style.color = "var(--cyan)";
+        dlOut.textContent = `firing ${uri}…`;
+        try {
+            const form = new FormData(); form.append("uri", uri);
+            const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/mango/deeplink/fire`, { method: "POST", body: form });
+            const j = await r.json().catch(() => null);
+            if (!r.ok) throw new Error((j && j.detail) || r.statusText);
+            dlOut.style.color = j.fired ? "var(--acid)" : "var(--sev-high)";
+            dlOut.textContent = j.fired
+                ? `✓ resolved to ${j.activity}\n\n${j.raw}`
+                : `! am didn't resolve an Activity — the URI may not be exported, or the app isn't installed.\n\n${j.raw}`;
+        } catch (e) {
+            dlOut.style.color = "var(--sev-crit)";
+            dlOut.textContent = `request failed: ${e.message || e}`;
+        }
+    });
+    $("#rt-mango-dl-poc").addEventListener("click", () => {
+        const cur = $("#rt-mango-dl");
+        const uri = (cur && (cur.value || "")).trim();
+        if (!uri) { alert("pick or type a deeplink first"); return; }
+        // Open the HTML PoC in a new tab so the analyst can save / share it.
+        window.open(`/v1/projects/${encodeURIComponent(id)}/mango/deeplink/poc?uri=${encodeURIComponent(uri)}`, "_blank");
+    });
+
+    // Flag decoder
+    const flagOut = $("#rt-mango-flag-out");
+    $("#rt-mango-flag-go").addEventListener("click", async () => {
+        const value = ($("#rt-mango-flag").value || "").trim();
+        if (!value) { alert("paste a flag value first"); return; }
+        flagOut.style.display = "";
+        flagOut.textContent = "decoding…";
+        try {
+            const r = await fetch("/v1/mango/decode-flags", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ value }),
+            });
+            const j = await r.json().catch(() => null);
+            if (!r.ok) throw new Error((j && j.detail) || r.statusText);
+            const blocks = Object.entries(j.decoded).map(([ns, names]) => `
+                <div style="margin-bottom:6px">
+                  <span class="muted small uppercase">${escapeHtml(ns)}</span>
+                  ${names.length
+                    ? `<div class="t-mono small" style="color:var(--cyan);padding-left:8px">${names.map(escapeHtml).join("<br>")}</div>`
+                    : `<div class="t-mono small" style="color:var(--muted);padding-left:8px">— no flags matched —</div>`
+                  }
+                </div>`).join("");
+            flagOut.innerHTML = `<div class="t-mono small" style="color:var(--acid);margin-bottom:6px">${j.hex} · ${j.value}</div>${blocks}`;
+        } catch (e) {
+            flagOut.style.color = "var(--sev-crit)";
+            flagOut.textContent = `request failed: ${e.message || e}`;
+        }
+    });
+
+    // Manifest diff link — auto-points at /manifest-diff which the
+    // backend resolves to the latest prior scan of the same package.
+    $("#rt-mango-diff-link").addEventListener("click", (e) => {
+        e.preventDefault();
+        location.hash = `#/project/${id}/manifest-diff`;
+    });
+
     $("#rt-copy").addEventListener("click", async () => {
         try {
             await navigator.clipboard.writeText(lastScript);
@@ -1721,6 +1840,113 @@ async function mount_project_runtime(ctx) {
                     </div>`;
         }).join("");
     }, 3000);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SCREEN 13c — MANIFEST DIFF (Mango's `diff`, structured)
+ *
+ *  Mango compares raw AndroidManifest XML across stored sessions; we
+ *  compare the AttackSurface dict we already keep, which is far more
+ *  useful: per-component export/permission deltas, deeplink + permission
+ *  set diffs, SSL pinning posture change.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+function view_project_manifest_diff(ctx) {
+    const id = ctx.params.id;
+    if (!id) { location.hash = "#/projects"; return ""; }
+    return h`
+    <div class="main">
+      <div class="muted small uppercase">🔱 NEXUS / ${id} / manifest-diff</div>
+      ${projectTabs(id, "static")}
+      <section class="panel">
+        <div class="panel-head">
+          <span>// MANIFEST DIFF</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="md-summary">loading…</span>
+        </div>
+        <div class="panel-body col" style="gap:12px" id="md-body">
+          <div class="muted small">resolving prior scan of the same package…</div>
+        </div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_manifest_diff(ctx) {
+    const id = ctx.params.id;
+    let data;
+    try {
+        data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/manifest-diff`);
+    } catch (e) {
+        $("#md-body").innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">${escapeHtml(e.message || String(e))}</span></div>`;
+        return;
+    }
+    const summary = data.diff && data.diff.summary || {};
+    $("#md-summary").innerHTML = data.base
+        ? `<span class="t-mono">${escapeHtml(data.base.version_name || "?")} → ${escapeHtml(data.head.version_name || "?")}</span>`
+        : `<span style="color:var(--magenta)">no prior scan of ${escapeHtml(data.package || "?")}</span>`;
+
+    const body = $("#md-body");
+    if (data.base === null) {
+        body.innerHTML = `
+          <div class="empty-state">
+            <div style="color:var(--magenta);font-size:18px;letter-spacing:2px">NO PRIOR SCAN</div>
+            <div class="muted small">${escapeHtml(data.note || "Scan another version of this package first.")}</div>
+          </div>`;
+        return;
+    }
+
+    const _row = (cls, label, items, render) => {
+        if (!items || !items.length) return "";
+        return `
+          <div style="margin-bottom:10px">
+            <div class="muted small uppercase" style="letter-spacing:2px;margin-bottom:4px">
+              <span style="color:var(--${cls})">${escapeHtml(label)}</span> · ${items.length}
+            </div>
+            <div class="col" style="gap:3px;padding-left:8px">${items.map(render).join("")}</div>
+          </div>`;
+    };
+    const _comp = (c) => `<div class="t-mono small">
+        <span class="chip ${c.unprotected ? "high" : "info"}" style="font-size:9px;letter-spacing:1px">${escapeHtml((c.component_type || "?").toUpperCase().slice(0,3))}</span>
+        ${escapeHtml(c.name || "?")}
+        ${c.unprotected ? `<span class="muted small" style="color:var(--sev-high)">unprotected</span>` : ""}
+      </div>`;
+    const _changed = (c) => `<div class="t-mono small">
+        <span class="chip info" style="font-size:9px">${escapeHtml(c.type ? c.type.toUpperCase().slice(0,3) : "?")}</span>
+        ${escapeHtml(c.name)} <span class="muted small">${c.fields.join(", ")}</span>
+        <div style="padding-left:14px;color:var(--muted)" class="small">before: ${escapeHtml(JSON.stringify(c.before))}<br>after: ${escapeHtml(JSON.stringify(c.after))}</div>
+      </div>`;
+    const _str = (s) => `<div class="t-mono small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(s)}">${escapeHtml(s)}</div>`;
+
+    const d = data.diff || {};
+    const sections = [
+        _row("acid", "components — added", d.components && d.components.added, _comp),
+        _row("sev-crit", "components — removed", d.components && d.components.removed, _comp),
+        _row("magenta", "components — changed", d.components && d.components.changed, _changed),
+        _row("acid", "deeplinks — added", d.deeplinks && d.deeplinks.added, _str),
+        _row("sev-crit", "deeplinks — removed", d.deeplinks && d.deeplinks.removed, _str),
+        _row("acid", "permissions — added", d.permissions && d.permissions.added, _str),
+        _row("sev-crit", "permissions — removed", d.permissions && d.permissions.removed, _str),
+        _row("acid", "url schemes — added", d.url_schemes && d.url_schemes.added, _str),
+        _row("sev-crit", "url schemes — removed", d.url_schemes && d.url_schemes.removed, _str),
+    ];
+    const ssl = d.ssl_pinning || {};
+    if (summary.ssl_pinning_changed) {
+        sections.push(`
+          <div style="margin-bottom:10px">
+            <div class="muted small uppercase" style="letter-spacing:2px;margin-bottom:4px"><span style="color:var(--magenta)">ssl pinning — changed</span></div>
+            <div class="t-mono small" style="padding-left:8px">
+              before: ${ssl.detected_before ? "<span style=\"color:var(--sev-high)\">detected</span> · " + escapeHtml(ssl.library_before || "?") : "<span style=\"color:var(--acid)\">none</span>"}
+              <br>after:  ${ssl.detected_after  ? "<span style=\"color:var(--sev-high)\">detected</span> · " + escapeHtml(ssl.library_after  || "?") : "<span style=\"color:var(--acid)\">none</span>"}
+            </div>
+          </div>`);
+    }
+    body.innerHTML = `
+      <div class="row small" style="gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px">
+        <span>base: <span class="t-mono" style="color:var(--cyan)">${escapeHtml(data.base.id)}</span> · ${escapeHtml(data.base.version_name || "?")}</span>
+        <span>head: <span class="t-mono" style="color:var(--acid)">${escapeHtml(data.head.id)}</span> · ${escapeHtml(data.head.version_name || "?")}</span>
+        <span class="spacer"></span>
+        <span>${summary.any_changes ? "<span style=\"color:var(--magenta)\">changes detected</span>" : "<span style=\"color:var(--acid)\">identical</span>"}</span>
+      </div>
+      ${summary.any_changes ? sections.join("") : `<div class="empty-state">no manifest-level changes between these versions.</div>`}`;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -5976,6 +6202,7 @@ const ROUTES = [
     { path: "project/:id/static/native",        view: view_project_native,     mount: mount_project_native },
     { path: "project/:id/dynamic",              view: view_project_dynamic,   mount: mount_project_dynamic },
     { path: "project/:id/runtime",              view: view_project_runtime,   mount: mount_project_runtime },
+    { path: "project/:id/manifest-diff",        view: view_project_manifest_diff, mount: mount_project_manifest_diff },
     { path: "project/:id/tracer",               view: view_project_tracer,    mount: mount_project_tracer },
     { path: "project/:id/network",              view: view_project_network,   mount: mount_project_network },
     { path: "project/:id/api-map",              view: view_project_api_map,   mount: mount_project_api_map },
