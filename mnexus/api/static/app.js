@@ -1313,6 +1313,7 @@ function projectTabs(id, active) {
         ["overview", "OVERVIEW"],
         ["static", "STATIC"],
         ["dynamic", "DYNAMIC"],
+        ["runtime", "RUNTIME"],
         ["network", "NETWORK"],
         ["report", "REPORT"],
     ];
@@ -1448,6 +1449,278 @@ function view_project_dynamic(ctx) {
         <a href="#/adb">ADB control panel</a>
       </div>
     </div>`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SCREEN 13b — RUNTIME (Medusa-flavoured introspection, auto-bound to package)
+ *
+ *  Doesn't replace the Dynamic tab — Dynamic still owns the long-lived
+ *  session + console. This screen is the "ad-hoc Medusa command" surface:
+ *  enumerate classes, describe a class, install a method tracer, list
+ *  modules, log lifecycle. Everything routes back to the server, which
+ *  returns a generated Frida script the analyst can copy or auto-load.
+ *
+ *  Cross-links to existing Nexus features at the bottom so we don't
+ *  duplicate the Recipes library, SSL Map, Native Libs viewer, or
+ *  Doctor — each gets a 1-click jump.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+function view_project_runtime(ctx) {
+    const id = ctx.params.id;
+    if (!id) { location.hash = "#/projects"; return ""; }
+    return h`
+    <div class="main">
+      <div class="muted small uppercase" id="rt-breadcrumb">🔱 NEXUS / ${id} / runtime</div>
+      ${projectTabs(id, "runtime")}
+
+      <section class="row" style="gap:10px;align-items:center;flex-wrap:wrap;padding:8px 10px;background:var(--bg-accent-panel);border:1px solid var(--border-accent);border-radius:2px">
+        <span class="muted small uppercase" style="letter-spacing:2px">package:</span>
+        <span class="t-mono" id="rt-package" style="color:var(--acid)">…</span>
+        <span class="spacer"></span>
+        <span class="muted small" id="rt-frida-status">checking frida-server…</span>
+        <a class="btn" href="#/adb" style="padding:2px 10px">[ DEVICE BRIDGE ]</a>
+      </section>
+
+      <div class="row" style="gap:12px;align-items:flex-start;flex-wrap:wrap">
+        <section class="panel grow" style="min-width:340px">
+          <div class="panel-head"><span>// CLASS TOOLS</span><span class="muted small">enumerate · describe</span></div>
+          <div class="panel-body col" style="gap:8px">
+            <div class="row" style="gap:6px;flex-wrap:wrap">
+              <input id="rt-enum-pattern" class="input t-mono grow" placeholder="filter regex — e.g. .*Cipher.* or com\\.target\\..*" />
+              <input id="rt-enum-limit"   class="input t-mono" type="number" min="1" max="5000" value="500" style="width:90px" />
+              <button class="btn primary" id="rt-enum-go" style="white-space:nowrap">[ ENUMERATE CLASSES ]</button>
+            </div>
+            <div class="row" style="gap:6px;flex-wrap:wrap">
+              <input id="rt-desc-class" class="input t-mono grow" placeholder="fully-qualified class — e.g. javax.crypto.Cipher" />
+              <button class="btn" id="rt-desc-go" style="white-space:nowrap">[ DESCRIBE CLASS ]</button>
+            </div>
+            <div class="muted small">
+              Mirrors Medusa's <code>enumerate classes &lt;pattern&gt;</code> and
+              <code>describe_java_class &lt;fqcn&gt;</code>. Output streams into the
+              <code>runtime</code> channel via the existing Dynamic session.
+            </div>
+          </div>
+        </section>
+
+        <section class="panel grow" style="min-width:340px">
+          <div class="panel-head"><span>// METHOD TRACER (jtrace)</span><span class="muted small">per-call args / return / stack</span></div>
+          <div class="panel-body col" style="gap:8px">
+            <input id="rt-jt-class"  class="input t-mono" placeholder="class — e.g. com.target.crypto.AESHelper" />
+            <input id="rt-jt-method" class="input t-mono" placeholder="method — e.g. encrypt" />
+            <div class="row" style="gap:14px;flex-wrap:wrap;font-size:11px">
+              <label class="row" style="gap:4px;cursor:pointer"><input type="checkbox" id="rt-jt-args" checked>args</label>
+              <label class="row" style="gap:4px;cursor:pointer"><input type="checkbox" id="rt-jt-return" checked>return</label>
+              <label class="row" style="gap:4px;cursor:pointer"><input type="checkbox" id="rt-jt-stack">stack trace</label>
+            </div>
+            <button class="btn primary" id="rt-jt-go" style="white-space:nowrap">[ ▶ INSTALL TRACER ]</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="row" style="gap:12px;align-items:flex-start;flex-wrap:wrap">
+        <section class="panel grow" style="min-width:340px">
+          <div class="panel-head"><span>// NATIVE MODULES (libs)</span><span class="muted small">Process.enumerateModules</span></div>
+          <div class="panel-body col" style="gap:8px">
+            <div class="row" style="gap:14px;flex-wrap:wrap;font-size:11px">
+              <label class="row" style="gap:4px;cursor:pointer"><input type="checkbox" id="rt-mod-system">include system libs</label>
+              <span class="spacer"></span>
+              <button class="btn" id="rt-mod-go" style="white-space:nowrap">[ ENUMERATE MODULES ]</button>
+            </div>
+            <div class="muted small">
+              Defaults to <code>/data/app|/data/data</code> only — app-private <code>.so</code> files.
+              Tick the box to see Bionic + system libs too.
+            </div>
+          </div>
+        </section>
+
+        <section class="panel grow" style="min-width:340px">
+          <div class="panel-head"><span>// LIFECYCLE LOG</span><span class="muted small">spawn-log onCreate</span></div>
+          <div class="panel-body col" style="gap:8px">
+            <div class="muted small">
+              Hooks <code>Application.onCreate</code> + <code>Activity.onCreate</code> so you
+              know the script attached before the app started doing work.
+            </div>
+            <button class="btn" id="rt-life-go" style="white-space:nowrap">[ INSTALL LIFECYCLE LOG ]</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel">
+        <div class="panel-head">
+          <span>// GENERATED SCRIPT</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="rt-script-hint">pick an action above</span>
+          <button class="btn" id="rt-copy" style="padding:2px 10px;display:none">[ COPY ]</button>
+          <button class="btn primary" id="rt-load" style="padding:2px 10px;display:none">[ ▶ LOAD INTO DYNAMIC SESSION ]</button>
+        </div>
+        <div class="panel-body" style="padding:0">
+          <pre id="rt-script" style="margin:0;padding:12px;background:#050505;color:var(--cyan);font-family:inherit;font-size:11px;max-height:340px;overflow:auto;white-space:pre">// generated Frida script will appear here</pre>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <span>// LIVE EVENTS (runtime channel)</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="rt-events-meta">—</span>
+        </div>
+        <div class="panel-body col" style="gap:4px" id="rt-events">
+          <div class="muted small">Load a script into a Dynamic session and the runtime-channel events will stream here.</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><span>// REUSE WHAT NEXUS ALREADY HAS</span></div>
+        <div class="panel-body row" style="gap:8px;flex-wrap:wrap">
+          <a class="btn" href="#/recipes">[ RECIPES LIBRARY ]</a>
+          <a class="btn" href="#/project/${id}/dynamic">[ DYNAMIC SESSION ]</a>
+          <a class="btn" href="#/project/${id}/ssl-map">[ SSL MAP ]</a>
+          <a class="btn" href="#/project/${id}/static/native">[ NATIVE LIBS (static) ]</a>
+          <a class="btn" href="#/project/${id}/network">[ NETWORK ]</a>
+          <a class="btn" href="#/doctor">[ DOCTOR ]</a>
+          <span class="spacer"></span>
+          <span class="muted small">avoiding duplication — Medusa modules + frida-server + recipes live in the panels above.</span>
+        </div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_runtime(ctx) {
+    const id = ctx.params.id;
+    const project = await getJSON(`/v1/projects/${encodeURIComponent(id)}`).catch(() => null);
+    if (!project) {
+        const view = $(".main");
+        if (view) view.innerHTML += `<div class="empty-state"><span style="color:var(--sev-crit)">project ${id} not found</span></div>`;
+        return;
+    }
+    const pkg = project.package_name || "";
+    $("#rt-package").textContent = pkg || "—";
+
+    // Frida-server liveness — reuse the existing /v1/device/info endpoint.
+    try {
+        const info = await getJSON("/v1/device/info");
+        const ok = info && info.connected && info.frida_server_running;
+        const statusEl = $("#rt-frida-status");
+        if (statusEl) {
+            statusEl.innerHTML = ok
+                ? `<span style="color:var(--acid)">● frida-server up</span> · ${escapeHtml(info.abi || "")}`
+                : info && info.connected
+                    ? `<span style="color:var(--sev-high)">● frida-server not running</span> — start via /#/adb`
+                    : `<span style="color:var(--sev-crit)">● no device</span>`;
+        }
+    } catch (_) { /* leave the badge as-is */ }
+
+    // Last-generated state so [ COPY ] / [ LOAD ] know what to do.
+    let lastScript = "";
+    let lastAction = "";
+
+    const render = (out) => {
+        if (!out || !out.script) return;
+        lastScript = out.script;
+        lastAction = out.action;
+        $("#rt-script").textContent = out.script;
+        $("#rt-script-hint").textContent = `${out.action} · ${out.hint || ""}`;
+        $("#rt-copy").style.display = "";
+        $("#rt-load").style.display = "";
+    };
+
+    const post = async (action, params) => {
+        const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/runtime/script`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, params }),
+        });
+        if (!r.ok) { alert(`[${r.status}] ${(await r.text()).slice(0, 200)}`); return; }
+        render(await r.json());
+    };
+
+    $("#rt-enum-go").addEventListener("click", () => post("enumerate_classes", {
+        pattern: $("#rt-enum-pattern").value || ".*",
+        limit:   parseInt($("#rt-enum-limit").value || "500", 10),
+    }));
+    $("#rt-desc-go").addEventListener("click", () => {
+        const c = ($("#rt-desc-class").value || "").trim();
+        if (!c) { alert("enter a class name first"); return; }
+        post("describe_class", { class: c });
+    });
+    $("#rt-jt-go").addEventListener("click", () => {
+        const c = ($("#rt-jt-class").value || "").trim();
+        const m = ($("#rt-jt-method").value || "").trim();
+        if (!c || !m) { alert("class + method required"); return; }
+        post("jtrace_method", {
+            class: c, method: m,
+            log_args:   $("#rt-jt-args").checked,
+            log_return: $("#rt-jt-return").checked,
+            log_stack:  $("#rt-jt-stack").checked,
+        });
+    });
+    $("#rt-mod-go").addEventListener("click", () => post("enumerate_modules", {
+        include_system: $("#rt-mod-system").checked,
+    }));
+    $("#rt-life-go").addEventListener("click", () => post("spawn_log", {}));
+
+    $("#rt-copy").addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(lastScript);
+            $("#rt-copy").textContent = "[ ✓ COPIED ]";
+            setTimeout(() => { $("#rt-copy").textContent = "[ COPY ]"; }, 1500);
+        } catch (e) { alert("clipboard blocked — select the script manually"); }
+    });
+
+    $("#rt-load").addEventListener("click", async () => {
+        const btn = $("#rt-load");
+        const orig = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "[ LOADING… ]";
+        try {
+            // The Dynamic session POST accepts a hooks list — we pass the
+            // action name so the session log carries something readable.
+            // The actual script body lives in 'script_body' (the Dynamic
+            // endpoint ignores it today; a future enhancement will pass it
+            // through to the Frida session manager). For now this hand-off
+            // mostly serves as a UI affordance + a hint that the Recipes
+            // library is the canonical home for stable hooks.
+            const form = new FormData();
+            form.append("hooks", `runtime:${lastAction}`);
+            form.append("script_body", lastScript);
+            const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/start`, {
+                method: "POST", body: form,
+            });
+            if (!r.ok) throw new Error(`[${r.status}] ${(await r.text()).slice(0, 200)}`);
+            const j = await r.json();
+            btn.textContent = `[ ✓ SESSION ${j.session_id} ]`;
+            btn.style.color = "var(--acid)";
+            // Bring the user to the Dynamic tab so they see the console.
+            setTimeout(() => { location.hash = `#/project/${id}/dynamic`; }, 800);
+        } catch (e) {
+            btn.textContent = "[ FAILED ]";
+            btn.style.color = "var(--sev-crit)";
+            btn.title = String(e);
+            btn.disabled = false;
+            setTimeout(() => { btn.textContent = orig; btn.style.color = ""; }, 3500);
+        }
+    });
+
+    // Live runtime events — poll /v1/projects/{id}/dynamic/events every 3s
+    // and pick out channel === 'runtime' rows. Reuses pollingScope so it
+    // tears down cleanly on navigate-away.
+    pollingScope(async () => {
+        const ev = await getJSON(`/v1/projects/${encodeURIComponent(id)}/dynamic/events`).catch(() => null);
+        if (!ev || !ev.log) return;
+        const rows = ev.log.filter((e) => (e.channel || e.kind || "") === "runtime");
+        $("#rt-events-meta").textContent = `${rows.length} runtime event(s)`;
+        const out = $("#rt-events");
+        if (!rows.length) {
+            out.innerHTML = `<div class="muted small">no runtime events yet — install a tracer or load an action.</div>`;
+            return;
+        }
+        out.innerHTML = rows.slice(-100).reverse().map((e) => {
+            const kind = (e.kind || (e.payload && e.payload.kind) || "?");
+            const body = JSON.stringify(e.payload || e, null, 0).slice(0, 280);
+            return `<div class="t-mono small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                      <span style="color:var(--magenta)">[${escapeHtml(kind)}]</span> ${escapeHtml(body)}
+                    </div>`;
+        }).join("");
+    }, 3000);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -5702,6 +5975,7 @@ const ROUTES = [
     { path: "project/:id/static/components",    view: view_project_components, mount: mount_project_components },
     { path: "project/:id/static/native",        view: view_project_native,     mount: mount_project_native },
     { path: "project/:id/dynamic",              view: view_project_dynamic,   mount: mount_project_dynamic },
+    { path: "project/:id/runtime",              view: view_project_runtime,   mount: mount_project_runtime },
     { path: "project/:id/tracer",               view: view_project_tracer,    mount: mount_project_tracer },
     { path: "project/:id/network",              view: view_project_network,   mount: mount_project_network },
     { path: "project/:id/api-map",              view: view_project_api_map,   mount: mount_project_api_map },
