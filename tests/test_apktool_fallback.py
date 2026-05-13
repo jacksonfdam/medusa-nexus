@@ -211,3 +211,99 @@ def test_fallback_handles_subprocess_timeout(
 
     meta = asyncio.run(engine.parse_apk_with_fallback(apk))
     assert meta.get("package", "") == ""  # fallback gracefully gave up
+
+
+# ─── aapt2 polish path ────────────────────────────────────────────────
+
+
+def test_aapt2_polish_fills_missing_version_when_builtin_only_got_package(
+    engine: APKToolEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The built-in AXML decoder sometimes returns a manifest with the
+    package id but no versionName/versionCode (obfuscated string pools,
+    compact entries). The aapt2 polish step has to fill those in
+    without forcing the expensive apktool subprocess."""
+    apk = tmp_path / "no-version.apk"
+    with zipfile.ZipFile(apk, "w") as zf:
+        zf.writestr(
+            "AndroidManifest.xml",
+            '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+            'package="com.target.app"/>',
+        )
+
+    def fake_which(name):
+        # aapt2 is on PATH; apktool would also be picked up but the
+        # fast path should skip it since we already have a package.
+        if name in ("aapt2", "aapt"):
+            return "/fake/aapt2"
+        return "/fake/apktool"
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):  # type: ignore[no-untyped-def]
+        # Only aapt2 should be invoked — apktool would mean we wasted
+        # the JVM warm-up on a question aapt2 can answer in 50ms.
+        cmd_name = Path(args[0]).name
+        assert cmd_name in ("aapt2", "aapt"), \
+            f"unexpected subprocess: {cmd_name} (apktool should not run)"
+
+        class _Aapt2Proc:
+            returncode = 0
+
+            async def communicate(self_inner):  # type: ignore[no-untyped-def]
+                return (
+                    b"package: name='com.target.app' "
+                    b"versionCode='4212' "
+                    b"versionName='4.2.1-prod' "
+                    b"platformBuildVersionName='14'\n"
+                    b"sdkVersion:'24'\n"
+                    b"targetSdkVersion:'34'\n"
+                    b"application-label:'Target'\n",
+                    b"",
+                )
+
+            def kill(self_inner):  # type: ignore[no-untyped-def]
+                pass
+
+            async def wait(self_inner):  # type: ignore[no-untyped-def]
+                return 0
+
+        return _Aapt2Proc()
+
+    monkeypatch.setattr("shutil.which", fake_which)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    meta = asyncio.run(engine.parse_apk_with_fallback(apk))
+
+    assert meta["package"] == "com.target.app"
+    assert meta["version_name"] == "4.2.1-prod"
+    assert meta["version_code"] == "4212"
+    assert meta["min_sdk"] == "24"
+    assert meta["target_sdk"] == "34"
+    # The manifest-source crumb tells maintainers which path saved them.
+    assert "aapt2" in meta.get("_manifest_source", "")
+
+
+def test_aapt2_polish_skipped_when_version_already_known(
+    engine: APKToolEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fast path: when parse_apk already recovered both versionName and
+    versionCode, the aapt2 subprocess must NOT run."""
+    apk = tmp_path / "complete.apk"
+    with zipfile.ZipFile(apk, "w") as zf:
+        zf.writestr(
+            "AndroidManifest.xml",
+            '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+            'package="com.target.app" '
+            'android:versionName="1.0.0" '
+            'android:versionCode="1"/>',
+        )
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/fake/aapt2")
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("aapt2 should not run when versions already present")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    meta = asyncio.run(engine.parse_apk_with_fallback(apk))
+    assert meta["version_name"] == "1.0.0"
+    assert meta["version_code"] == "1"

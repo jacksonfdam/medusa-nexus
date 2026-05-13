@@ -288,40 +288,116 @@ class APKToolEngine(BaseEngine):
         }
 
     async def parse_apk_with_fallback(self, apk_path: Path) -> dict[str, Any]:
-        """``parse_apk`` + opt-in apktool-binary fallback.
+        """``parse_apk`` → apktool fallback → aapt2 fallback.
 
         The built-in :meth:`parse_apk` is best-effort — its ``_decode_axml``
         covers the typical AXML layouts but loses on a long tail of
         modern apps (Android 14+ compact entries, obfuscated string
-        pools, manifests stamped with custom plugin tags). When the
-        built-in returns a meta with no ``package`` field AND the
-        ``apktool`` binary is on PATH, we shell out to it to extract a
-        plain-XML manifest and re-merge the recovered fields.
+        pools, manifests stamped with custom plugin tags).
 
-        Costs a few seconds per fallback (apktool's first-run JVM
-        warm-up + resource decode) but only pays it when the cheap path
-        actually failed. No-ops cleanly when apktool isn't installed —
-        the analyst gets the same empty meta they'd have gotten before
-        and the rest of the pipeline still runs.
+        Resolution order:
+
+          1. Built-in AXML decoder (cheap, always tried).
+          2. ``apktool d -s -f`` to plain XML, then re-parse — recovers
+             package + every component + permissions + deeplinks.
+          3. ``aapt2 dump badging`` — last-resort scrape for
+             ``package='com.foo' versionName='1.2.3' versionCode='42'``.
+             aapt2 reads the binary AXML directly (no decode-to-disk
+             round-trip), so it catches packagings that confuse apktool
+             entirely. Doesn't extract components / deeplinks; those
+             stay empty if apktool also failed.
+
+        Each step is no-op'd cleanly when its binary isn't installed —
+        the analyst gets the best meta available without setup yelling.
+        Steps that *did* fire stamp ``_manifest_source`` so we can debug
+        which path saved the ingest.
         """
         meta = self.parse_apk(apk_path)
-        if meta.get("package"):
-            return meta
-        apktool_bin = shutil.which(self.config.apktool_path)
-        if not apktool_bin:
-            return meta
-        recovered = await self._apktool_extract_manifest(apktool_bin, apk_path)
-        if not recovered:
-            return meta
-        # Fold the recovered structured fields into meta. Native libs +
-        # zip listing came from parse_apk's zip walk and stay as is —
-        # apktool doesn't touch them. Manifest-derived fields (package,
-        # versions, sdk levels, components, deeplinks, permissions,
-        # debuggable / allow_backup / cleartext flags) get refreshed.
-        for key, value in recovered.items():
-            if value:
-                meta[key] = value
-        meta["_manifest_source"] = "apktool-fallback"
+
+        # Step 2 — apktool fallback. Only kicks in when the built-in
+        # didn't find a package; the apktool subprocess is expensive
+        # (~3-5s warm-up) so we avoid it once we have a viable meta.
+        if not meta.get("package"):
+            apktool_bin = shutil.which(self.config.apktool_path)
+            if apktool_bin:
+                recovered = await self._apktool_extract_manifest(apktool_bin, apk_path)
+                if recovered:
+                    for key, value in recovered.items():
+                        if value:
+                            meta[key] = value
+                    meta["_manifest_source"] = "apktool-fallback"
+
+        # Step 3 — aapt2 polish for version fields. Cheap (~50ms) and
+        # idempotent: fills in version_name / version_code / sdk levels
+        # if the prior steps left them empty. Does NOT overwrite values
+        # we already have, and does NOT run when we still have no
+        # package (no point — the analyst already has an ambiguous meta).
+        if meta.get("package") and not (meta.get("version_name") and meta.get("version_code")):
+            aapt2_bin = shutil.which("aapt2") or shutil.which("aapt")
+            if aapt2_bin:
+                recovered = await self._aapt_dump_badging(aapt2_bin, apk_path)
+                added = False
+                for key, value in recovered.items():
+                    if value and not meta.get(key):
+                        meta[key] = value
+                        added = True
+                if added:
+                    existing = meta.get("_manifest_source", "")
+                    meta["_manifest_source"] = (
+                        f"{existing}+aapt2" if existing else "aapt2"
+                    )
+        return meta
+
+    async def _aapt_dump_badging(self, aapt_bin: str, apk_path: Path) -> dict[str, Any]:
+        """Run ``aapt2 dump badging <apk>`` and scrape package + versions.
+
+        Output looks like::
+
+            package: name='com.example.app' versionCode='42' versionName='1.2.3' platformBuildVersionName='14'
+            sdkVersion:'24'
+            targetSdkVersion:'34'
+            application-label:'Example'
+            application-icon-320:'res/drawable-xhdpi-v4/icon.png'
+            …
+
+        We scrape just the badging line + sdk lines. Empty on any
+        non-zero exit, timeout, or unparseable output.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                aapt_bin, "dump", "badging", str(apk_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError:
+            return {}
+        try:
+            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return {}
+        if proc.returncode != 0:
+            return {}
+        text = stdout.decode("utf-8", errors="replace")
+        import re as _re
+        meta: dict[str, Any] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("package:"):
+                # name='..' versionCode='..' versionName='..'
+                for key, attr in (("package", "name"), ("version_code", "versionCode"), ("version_name", "versionName")):
+                    m = _re.search(rf"{attr}='([^']*)'", line)
+                    if m and m.group(1):
+                        meta[key] = m.group(1)
+            elif line.startswith("sdkVersion:'"):
+                m = _re.search(r"sdkVersion:'([^']*)'", line)
+                if m:
+                    meta["min_sdk"] = m.group(1)
+            elif line.startswith("targetSdkVersion:'"):
+                m = _re.search(r"targetSdkVersion:'([^']*)'", line)
+                if m:
+                    meta["target_sdk"] = m.group(1)
         return meta
 
     async def _apktool_extract_manifest(
