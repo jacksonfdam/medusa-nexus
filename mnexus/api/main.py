@@ -1782,18 +1782,27 @@ async def device_flavors() -> dict[str, Any]:
 
 @app.get("/v1/devices")
 async def list_devices() -> list[dict[str, Any]]:
-    """`adb devices -l` parsed + per-device getprop + `wm size`."""
+    """Connected devices — Android (via adb) + iOS (via Frida's
+    lockdown-based enumeration).
+
+    Each entry carries ``platform: "android" | "ios"`` so the UI can
+    filter recipes to the matching platform. Android entries also
+    include the historical fields (model / abi / android_release /
+    frida_server_running / …); iOS entries carry name / udid / version
+    / model / arch when available.
+    """
     nexus: MedusaNexus = app.state.nexus
     adb = nexus.engines["adb"]
+    devices: list[dict[str, Any]] = []
     if not shutil.which(nexus.config.adb_path):
-        return []
+        # Skip the adb half but still try iOS.
+        return await _augment_with_ios(devices)
 
     try:
         raw = await adb._run([nexus.config.adb_path, "devices", "-l"])  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
-        return []
+        return await _augment_with_ios(devices)
 
-    devices: list[dict[str, Any]] = []
     for line in raw.splitlines()[1:]:
         line = line.strip()
         if not line:
@@ -1802,7 +1811,7 @@ async def list_devices() -> list[dict[str, Any]]:
         if len(parts) < 2:
             continue
         serial, state = parts[0], parts[1]
-        info: dict[str, Any] = {"serial": serial, "state": state}
+        info: dict[str, Any] = {"serial": serial, "state": state, "platform": "android"}
         for kv in parts[2:]:
             if ":" in kv:
                 k, v = kv.split(":", 1)
@@ -1850,6 +1859,68 @@ async def list_devices() -> list[dict[str, Any]]:
             info["frida_server_running"] = False
 
         devices.append(info)
+    return await _augment_with_ios(devices)
+
+
+async def _augment_with_ios(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Append iOS devices that Frida sees via lockdownd.
+
+    Frida discovers iOS devices independently of adb; this is best-
+    effort and silent on failure (frida not installed, no usb,
+    lockdownd not happy — none of those should kill the response).
+
+    We dedupe by serial — if a device shows up in both lists (rare
+    but possible on macOS where ``cfgutil`` populates a passthrough),
+    the Android entry wins and we annotate that frida saw it too.
+    """
+    try:
+        from mnexus.runtime import FRIDA_AVAILABLE
+        if not FRIDA_AVAILABLE:
+            return devices
+        import frida  # type: ignore[import-untyped]
+    except Exception:  # noqa: BLE001
+        return devices
+
+    known_serials = {d["serial"] for d in devices}
+    try:
+        mgr = frida.get_device_manager()
+        for d in mgr.enumerate_devices():
+            # 'local' = the host, 'remote' = network, 'usb' = USB-attached.
+            if getattr(d, "type", None) != "usb":
+                continue
+            did = getattr(d, "id", "")
+            if did in known_serials:
+                # Already in the Android list — mark frida-visible and move on.
+                for existing in devices:
+                    if existing["serial"] == did:
+                        existing["frida_visible"] = True
+                        break
+                continue
+            # Frida's iOS-side ID is the device UDID — 24-or-40-char hex
+            # string, distinct from Android's 8-16 char serial. We
+            # assume usb + not-in-adb = iOS.
+            info = {
+                "serial": did,
+                "state": "device",
+                "platform": "ios",
+                "model": getattr(d, "name", "") or "iOS device",
+                "frida_visible": True,
+            }
+            # Best-effort version/arch — query_system_parameters needs the
+            # device to be paired + frida-server is irrelevant on iOS
+            # (lockdownd is the bridge). Some versions of frida don't
+            # expose this; degrade gracefully.
+            try:
+                params = d.query_system_parameters()
+                if isinstance(params, dict):
+                    info["ios_version"] = params.get("os", {}).get("version", "")
+                    info["arch"] = params.get("arch", "")
+                    info["udid"] = params.get("udid", did)
+            except Exception:  # noqa: BLE001
+                pass
+            devices.append(info)
+    except Exception:  # noqa: BLE001 — frida enumeration can throw weird errors
+        pass
     return devices
 
 
