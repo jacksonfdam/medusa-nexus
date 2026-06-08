@@ -1450,6 +1450,49 @@ function view_project_dynamic(ctx) {
           <div class="panel-body console" id="dyn-console" style="min-height:340px"></div>
         </section>
       </div>
+
+      <!-- Memory Inspector (Bloco 3) — enabled when a session is attached
+           AND its tooling script loaded. Hidden by default; mount toggles it on. -->
+      <section class="panel" id="dyn-memory" style="display:none">
+        <div class="panel-head">
+          <span>// MEMORY INSPECTOR</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="dyn-mem-status">idle</span>
+        </div>
+        <div class="panel-body col" style="gap:10px">
+          <div class="muted small">
+            Scan readable memory for a pattern, peek the bytes, write over them.
+            <strong style="color:var(--sev-high)">Writes can crash the target</strong> —
+            keep the rollback hex around.
+          </div>
+
+          <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:90px">scan:</span>
+            <input id="dyn-mem-pattern" class="input t-mono" placeholder="65 79 4a 68  (=  'eyJ…' JWT header)" style="flex:2;min-width:200px">
+            <select id="dyn-mem-module" class="input t-mono" style="min-width:160px"><option value="">(every module)</option></select>
+            <input id="dyn-mem-max" class="input t-mono" type="number" min="1" max="2000" value="100" style="width:80px">
+            <button class="btn primary" id="dyn-mem-scan-go" style="white-space:nowrap">[ SCAN ]</button>
+          </div>
+          <div id="dyn-mem-results" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;max-height:200px;overflow:auto"></div>
+
+          <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:90px">peek:</span>
+            <input id="dyn-mem-addr" class="input t-mono" placeholder="0x1234abcd" style="flex:2;min-width:180px">
+            <input id="dyn-mem-size" class="input t-mono" type="number" min="1" max="4096" value="64" style="width:80px">
+            <button class="btn" id="dyn-mem-read-go" style="white-space:nowrap">[ READ ]</button>
+          </div>
+          <div id="dyn-mem-hex" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;font-family:'Courier Prime',monospace;white-space:pre-wrap;word-break:break-all"></div>
+
+          <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:90px;color:var(--sev-high)">write:</span>
+            <input id="dyn-mem-write-addr" class="input t-mono" placeholder="0x1234abcd" style="flex:1;min-width:160px">
+            <input id="dyn-mem-write-hex" class="input t-mono" placeholder="65 79 4a 68 …" style="flex:2;min-width:200px">
+            <button class="btn" id="dyn-mem-write-go" style="white-space:nowrap;color:var(--sev-high);border-color:var(--sev-high)">[ OVERWRITE ]</button>
+          </div>
+          <div id="dyn-mem-write-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap"></div>
+        </div>
+      </section>
+
       <div class="row muted small" style="justify-content:center;gap:18px;flex-wrap:wrap">
         <a href="#/project/${id}/tracer">live method tracer →</a>
         <a href="#/recipes">+ recipes library</a>
@@ -3789,6 +3832,11 @@ async function mount_project_dynamic(ctx) {
             // Open the SSE stream right after the synchronous start
             // response so we don't miss the first batch of events.
             openStream(activeSession);
+            // Memory Inspector panel goes live too. Only when the
+            // tooling script loaded — j.tooling is false otherwise.
+            if (j.tooling) {
+                mountMemoryInspector(activeSession);
+            }
         } catch (e) {
             btn.textContent = "[ FAILED ]";
             btn.style.color = "var(--sev-crit)";
@@ -3805,6 +3853,153 @@ async function mount_project_dynamic(ctx) {
             $("#dyn-stop").textContent = "[ DETACHED ]";
             renderLogLine({ channel: "nexus", line: "[NEXUS] detached cleanly" });
             if (activeStream) { activeStream.close(); activeStream = null; }
+            // Memory Inspector panel goes back to idle.
+            const memPanel = $("#dyn-memory");
+            if (memPanel) memPanel.style.display = "none";
+        }
+    });
+}
+
+/* ── Memory Inspector wiring — Bloco 3 ──────────────────────────────
+ *
+ *  Called once a FridaSession with tooling=true comes online. Wires
+ *  the four endpoints (modules / scan / read / write) to the panel
+ *  the Dynamic view rendered hidden by default.
+ *
+ *  Token-swap workflow in the talk maps to:
+ *    1. SCAN  pattern=<JWT header bytes> → list of addresses
+ *    2. READ  address=<one of the hits> → confirm it's the right one
+ *    3. WRITE address=<that one> hex=<victim's token bytes>
+ *    The previous_hex returned by WRITE is the rollback. */
+async function mountMemoryInspector(sessionId) {
+    const panel = $("#dyn-memory");
+    if (!panel) return;
+    panel.style.display = "";
+    const statusEl = $("#dyn-mem-status");
+    statusEl.textContent = "tooling ready · loading modules…";
+
+    // Populate the module dropdown so the analyst can scope a scan.
+    try {
+        const r = await fetch(`/v1/dynamic/sessions/${encodeURIComponent(sessionId)}/memory/modules`);
+        const j = await r.json();
+        const select = $("#dyn-mem-module");
+        const opts = [`<option value="">(every module — slower)</option>`];
+        (j.modules || []).slice(0, 200).forEach((m) => {
+            opts.push(`<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)} · ${m.size}B</option>`);
+        });
+        select.innerHTML = opts.join("");
+        statusEl.textContent = `${(j.modules || []).length} module(s) · idle`;
+    } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--sev-crit)">modules failed: ${escapeHtml(e.message || String(e))}</span>`;
+    }
+
+    // Scan ─────────────────────────────
+    const resultsEl = $("#dyn-mem-results");
+    $("#dyn-mem-scan-go").addEventListener("click", async () => {
+        const pattern = ($("#dyn-mem-pattern").value || "").trim();
+        const moduleName = $("#dyn-mem-module").value || null;
+        const maxResults = parseInt($("#dyn-mem-max").value || "100", 10);
+        if (!pattern) { alert("paste a Frida pattern first ('65 79 4a 68' or 'aa ?? bb')"); return; }
+        resultsEl.style.display = "";
+        resultsEl.style.color = "var(--cyan)";
+        resultsEl.textContent = "scanning…";
+        try {
+            const r = await fetch(`/v1/dynamic/sessions/${encodeURIComponent(sessionId)}/memory/scan`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pattern, module: moduleName, max_results: maxResults }),
+            });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || r.statusText);
+            const matches = j.results || [];
+            statusEl.textContent = `${matches.length} hit(s) · scanned ${j.ranges_scanned} range(s)${j.truncated ? " (truncated)" : ""}`;
+            resultsEl.innerHTML = matches.length
+                ? matches.map((m) => `
+                    <div class="t-mono small" style="padding:2px 0;display:flex;gap:10px;align-items:center">
+                      <a href="#" data-pick-addr="${escapeHtml(m.address)}" style="color:var(--acid);text-decoration:none">${escapeHtml(m.address)}</a>
+                      <span class="muted">${m.range_protection} · ${m.range_base}+${m.range_size}B</span>
+                    </div>`).join("")
+                : `<div class="muted small">no hits — pattern absent in scanned range</div>`;
+            // Click-to-pick: shove the address into the read input so
+            // the analyst doesn't copy-paste.
+            $$('[data-pick-addr]').forEach((a) => a.addEventListener("click", (e) => {
+                e.preventDefault();
+                const addr = a.dataset.pickAddr;
+                $("#dyn-mem-addr").value = addr;
+                $("#dyn-mem-write-addr").value = addr;
+            }));
+        } catch (e) {
+            resultsEl.style.color = "var(--sev-crit)";
+            resultsEl.textContent = `scan failed: ${e.message || e}`;
+        }
+    });
+
+    // Read ─────────────────────────────
+    const hexEl = $("#dyn-mem-hex");
+    $("#dyn-mem-read-go").addEventListener("click", async () => {
+        const address = ($("#dyn-mem-addr").value || "").trim();
+        const size = parseInt($("#dyn-mem-size").value || "64", 10);
+        if (!address) { alert("address required"); return; }
+        hexEl.style.display = "";
+        hexEl.style.color = "var(--cyan)";
+        hexEl.textContent = "reading…";
+        try {
+            const r = await fetch(`/v1/dynamic/sessions/${encodeURIComponent(sessionId)}/memory/read`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ address, size }),
+            });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || r.statusText);
+            if (j.error) throw new Error(j.error);
+            // Format as 16 bytes per line + ASCII gutter, like xxd.
+            const hex = (j.hex || "").split(/\s+/);
+            const lines = [];
+            for (let i = 0; i < hex.length; i += 16) {
+                const row = hex.slice(i, i + 16);
+                const ascii = row.map((b) => {
+                    const c = parseInt(b, 16);
+                    return (c >= 0x20 && c < 0x7f) ? String.fromCharCode(c) : ".";
+                }).join("");
+                lines.push(row.join(" ").padEnd(48, " ") + "  " + ascii);
+            }
+            hexEl.style.color = "var(--cyan)";
+            hexEl.textContent = lines.join("\n");
+        } catch (e) {
+            hexEl.style.color = "var(--sev-crit)";
+            hexEl.textContent = `read failed: ${e.message || e}`;
+        }
+    });
+
+    // Write ────────────────────────────
+    const writeOutEl = $("#dyn-mem-write-out");
+    $("#dyn-mem-write-go").addEventListener("click", async () => {
+        const address = ($("#dyn-mem-write-addr").value || "").trim();
+        const hex = ($("#dyn-mem-write-hex").value || "").trim();
+        if (!address || !hex) { alert("address + hex bytes required"); return; }
+        const byteCount = hex.split(/\s+/).filter(Boolean).length;
+        if (!confirm(`Overwrite ${byteCount} byte(s) at ${address}?\n\nThis can crash the target. The previous bytes will be returned so you can roll back manually.`)) {
+            return;
+        }
+        writeOutEl.style.display = "";
+        writeOutEl.style.color = "var(--cyan)";
+        writeOutEl.textContent = "writing…";
+        try {
+            const r = await fetch(`/v1/dynamic/sessions/${encodeURIComponent(sessionId)}/memory/write`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ address, hex }),
+            });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || r.statusText);
+            if (j.error) throw new Error(j.error);
+            writeOutEl.style.color = "var(--acid)";
+            writeOutEl.textContent =
+                `✓ wrote ${j.written} byte(s) at ${j.address}\n` +
+                `rollback hex (keep this around): ${j.previous_hex || "<no prev — was unreadable>"}`;
+        } catch (e) {
+            writeOutEl.style.color = "var(--sev-crit)";
+            writeOutEl.textContent = `write failed: ${e.message || e}`;
         }
     });
 }

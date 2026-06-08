@@ -4325,6 +4325,92 @@ def _safe_put(queue: asyncio.Queue, item: Any) -> None:
             pass
 
 
+# ─── Memory Inspector (Bloco 3) ─────────────────────────────────────────
+#
+# Each endpoint is scoped to a live FridaSession by session_id. The
+# session's MemoryOps facade is None when the tooling script failed to
+# load (rare; logged at start time) — we 503 in that case so the UI
+# can render 'memory tooling unavailable' instead of a 500.
+
+
+@app.post("/v1/dynamic/sessions/{session_id}/memory/scan")
+async def memory_scan(session_id: str, request: Request) -> dict[str, Any]:
+    """Frida Memory.scanSync wrapped — pattern across readable ranges.
+
+    Body::
+        {"pattern": "65 79 4a 68",       # Frida pattern (hex w/ '??' wildcards)
+         "module": "FooBank",            # optional — scope to one module
+         "max_results": 100}
+
+    Returns ``{results: [{address, size, range_base, range_size,
+    range_protection}, …], truncated: bool, ranges_scanned: int}``.
+    """
+    from mnexus.runtime import session_registry
+    sess = session_registry.get(session_id)
+    if not sess:
+        raise HTTPException(404, f"no session {session_id}")
+    if sess.mem is None:
+        raise HTTPException(503, "memory tooling unavailable for this session")
+    body = await request.json()
+    if not isinstance(body, dict) or not body.get("pattern"):
+        raise HTTPException(400, "missing 'pattern'")
+    return await sess.mem.scan(
+        body["pattern"],
+        module=body.get("module"),
+        max_results=int(body.get("max_results") or 100),
+    )
+
+
+@app.post("/v1/dynamic/sessions/{session_id}/memory/read")
+async def memory_read(session_id: str, request: Request) -> dict[str, Any]:
+    """Read N bytes from an address. Returns a space-separated hex string."""
+    from mnexus.runtime import session_registry
+    sess = session_registry.get(session_id)
+    if not sess:
+        raise HTTPException(404, f"no session {session_id}")
+    if sess.mem is None:
+        raise HTTPException(503, "memory tooling unavailable for this session")
+    body = await request.json()
+    if not isinstance(body, dict) or not body.get("address") or not body.get("size"):
+        raise HTTPException(400, "missing 'address' or 'size'")
+    return await sess.mem.read(str(body["address"]), int(body["size"]))
+
+
+@app.post("/v1/dynamic/sessions/{session_id}/memory/write")
+async def memory_write(session_id: str, request: Request) -> dict[str, Any]:
+    """Overwrite bytes at an address. Returns the previous bytes for rollback.
+
+    Body::
+        {"address": "0x1234abcd",
+         "hex": "65 79 4a 68 …"}   # space-separated hex
+
+    Dangerous — can crash the target. The UI gates with a confirmation
+    dialog; the API itself doesn't. Pentester is in charge.
+    """
+    from mnexus.runtime import session_registry
+    sess = session_registry.get(session_id)
+    if not sess:
+        raise HTTPException(404, f"no session {session_id}")
+    if sess.mem is None:
+        raise HTTPException(503, "memory tooling unavailable for this session")
+    body = await request.json()
+    if not isinstance(body, dict) or not body.get("address") or not body.get("hex"):
+        raise HTTPException(400, "missing 'address' or 'hex'")
+    return await sess.mem.write(str(body["address"]), str(body["hex"]))
+
+
+@app.get("/v1/dynamic/sessions/{session_id}/memory/modules")
+async def memory_modules(session_id: str) -> dict[str, Any]:
+    """List loaded modules in the target process — name / base / size / path."""
+    from mnexus.runtime import session_registry
+    sess = session_registry.get(session_id)
+    if not sess:
+        raise HTTPException(404, f"no session {session_id}")
+    if sess.mem is None:
+        raise HTTPException(503, "memory tooling unavailable for this session")
+    return {"modules": await sess.mem.modules()}
+
+
 def _wrap_in_iife(recipe_name: str, source: str) -> str:
     """Wrap a recipe in an IIFE so its top-level vars don't collide with
     other recipes loaded in the same Frida session.
