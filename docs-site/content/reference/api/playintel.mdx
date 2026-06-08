@@ -1,0 +1,205 @@
+---
+title: playintel · API
+---
+
+# `playintel` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/playintel/accounts`
+
+**Playintel Accounts List**
+
+Return every stored Play account in redacted form (no AAS tokens).
+
+Shape::
+
+    \{"accounts": [\{name, email_local, email_domain, gsfid_present,
+                   locale, notes, is_default, created_at, updated_at\}, …],
+     "default": "research-1"\}
+
+**Responses:**
+- `200` — Successful Response
+
+## `POST /v1/playintel/accounts`
+
+**Playintel Accounts Create**
+
+Register a new Play identity.
+
+Body::
+
+    \{"name": "research-1",
+     "email": "me@gmail.com",
+     "aas_token": "aas_et/...",     # optional
+     "password":  "...",            # optional, exchanged for AAS via /auth
+     "notes":     "...",            # optional
+     "is_default": true\}            # optional
+
+Exactly one of ``aas_token`` / ``password`` must be present. The
+password (if given) is exchanged for an AAS token via /auth and
+discarded — never stored. Returns the redacted account on success.
+
+**Request body:** `application/json`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `DELETE /v1/playintel/accounts/{name}`
+
+**Playintel Accounts Delete**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/playintel/accounts/{name}/default`
+
+**Playintel Accounts Set Default**
+
+Promote ``\{name\}`` to the default account used by /v1/playintel/scan.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/playintel/scan`
+
+**Playintel Scan**
+
+Stream-scan an Android package via the playintel engine.
+
+JSON body::
+
+    \{"package": "com.example",
+     "apk_path": "/optional/local.apk",   # bypass Play streaming
+     "account_name": "research-1",        # stored identity to use
+     "run_active_probes": true\}
+
+When ``apk_path`` is provided and exists, the local file is the
+bytes source. Otherwise the native Play protocol client is used
+against the named account (or the default if none given); 503 if
+no accounts are stored.
+
+**Request body:** `application/json`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/playintel/scan-upload`
+
+**Playintel Scan Upload**
+
+Upload an APK and scan it locally via the playintel engine.
+
+Multipart fields:
+
+* ``file`` — the .apk / .xapk to scan (required).
+* ``package`` — optional. If omitted, the package id is parsed out
+  of ``AndroidManifest.xml`` inside the upload itself (and falls
+  back to the filename stem on parse failure).
+* ``run_active_probes`` — flip on to hit Firebase / Firestore /
+  Storage with anonymous probes once configs are recovered.
+
+The file is saved to ``\<workspace>/playintel-uploads/\<sha256>.apk``
+(deduplicated by content hash). The same hash is reused on
+subsequent uploads of the same APK so we don't bloat disk.
+
+**Request body:** `multipart/form-data`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/playintel/scans`
+
+**Playintel Scans List**
+
+List previous PlayIntel scans, recent-first.
+
+Filters:
+  * ``package``    narrows to one app's history.
+  * ``apk_sha256`` narrows to a specific APK binary — useful when the
+                   Project Overview screen wants to ask "has this APK
+                   been Play-scanned yet?" by hash rather than by
+                   package (package can drift across renamings).
+
+``limit`` is server-clamped to [1, 1000]. Returned rows carry the
+denormalised counts only — fetch ``/scans/\{id\}`` for the full payload.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `package` | query | no | — |  |
+| `apk_sha256` | query | no | — |  |
+| `limit` | query | no | integer |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `DELETE /v1/playintel/scans/{scan_id}`
+
+**Playintel Scans Delete**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `scan_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/playintel/scans/{scan_id}`
+
+**Playintel Scans Get**
+
+Full payload + summary for one historical scan.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `scan_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/playintel/scans/{scan_id}/import`
+
+**Playintel Scans Import**
+
+Ingest the APK a Play Scan ran against into a regular Project.
+
+Resolution order for the APK on disk:
+
+  1. ``record.apk_local_path`` if it still exists. Set when the scan
+     was run as ``upload`` or ``path`` mode.
+  2. ``workspace/playintel-uploads/\<apk_sha256>.apk`` — every upload
+     is cached here keyed by sha256, so we can recover the file
+     even after the original ``apk_local_path`` got cleaned up.
+  3. 410 Gone — typical for ``play`` (stream) scans which never
+     materialised a full APK; the analyst has to use a different
+     intake path (UPLOAD .APK or PULL FROM DEVICE).
+
+Same dedup contract as /v1/apks/upload: if the SHA-256 already has
+a Project, return that one with ``dedup=True``. ``force=true``
+re-runs the static fan-out and creates a fresh Project record.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `scan_id` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

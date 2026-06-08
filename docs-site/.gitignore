@@ -19,15 +19,18 @@ node_modules/
 .vscode/
 .idea/
 
-# Auto-generated reference pages.
-# These are regenerated on every `npm run dev` / `npm run build` via
-# scripts/gen_reference.py. Source of truth = the Python code in ../mnexus/.
-content/reference/cli.mdx
-content/reference/repl.mdx
-content/reference/api/*.mdx
-!content/reference/api/_meta.json
-!content/reference/api/index.mdx
+# Auto-generated reference pages are *committed* — they regenerate from
+# the Python source on every `npm run dev` / `npm run build` via
+# scripts/run_gen.sh, but we keep the last good output on disk so
+# Vercel (which doesn't have mnexus's Python deps installed) always has
+# a working reference even when the build-time regen would fail.
+#
+# When you edit a CLI flag, REPL slash command, or FastAPI endpoint:
+#   1. `cd docs-site && npm run dev`   (or `bash scripts/run_gen.sh`)
+#   2. `git add docs-site/content/reference`
+#   3. Commit alongside your code change.
 
 # Build artefacts
 *.log
 .DS_Store
+.env*

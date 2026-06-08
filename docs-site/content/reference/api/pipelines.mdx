@@ -1,0 +1,77 @@
+---
+title: pipelines · API
+---
+
+# `pipelines` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/pipelines`
+
+**List Pipelines**
+
+**Responses:**
+- `200` — Successful Response
+
+## `POST /v1/pipelines/run-yaml`
+
+**Run Pipeline Yaml**
+
+Execute an arbitrary pipeline YAML against the project.
+
+The Pipeline Editor lets analysts compose ad-hoc workflows
+without committing them as built-ins. Same return shape as the
+named-pipeline endpoint.
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/pipelines/runs/{run_id}`
+
+**Get Pipeline Run**
+
+Fetch a stored PipelineRun. 404 when the registry doesn't
+have it — runs don't survive uvicorn restarts.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `run_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/pipelines/{name}`
+
+**Get Pipeline**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/pipelines/{name}/run`
+
+**Run Pipeline**
+
+Execute the named pipeline against the project. Returns the
+completed PipelineRun including per-stage outcomes.
+
+Failures in one stage don't abort subsequent stages; the overall
+``state`` is ``failed`` if any stage failed, ``ok`` otherwise.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

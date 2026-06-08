@@ -1,0 +1,39 @@
+---
+title: REPL slash commands
+---
+
+# REPL slash commands
+
+Auto-generated from `SLASH_COMMANDS` in `mnexus/cli.py`. Launch the REPL with bare `mnexus` and type `/help` for the same table inside the terminal.
+
+| command | what it does |
+| ------- | ------------ |
+| `/help` |  |
+| `/doctor` | Run /v1/doctor with a live spinner per row. |
+| `/scan` |  |
+| `/play-account` *(aliases: `/play-accounts`)* | manage stored Play identities. |
+| `/play-scan` | stream an APK from Google Play and analyze it. |
+| `/projects` |  |
+| `/use` |  |
+| `/findings` |  |
+| `/rescan` |  |
+| `/report` |  |
+| `/export` *(aliases: `/exports`)* | write the export to disk. |
+| `/serve` |  |
+| `/stop` |  |
+| `/open` |  |
+| `/url` |  |
+| `/devices` | Quick `adb devices -l` listing. |
+| `/adb` |  |
+| `/vphone` *(aliases: `/vphones`)* | super-tart-vphone control. |
+| `/dynamic` | drive a Frida session. |
+| `/memory` | Memory Inspector. |
+| `/patch` | APKPatcher. |
+| `/decrypt` *(aliases: `/decrypt-ios`)* | `/decrypt-ios \<bundle_id> [--device \<id>] [--no-ingest] [--timeout \<s>]`. |
+| `/diff` | `/diff manifest\|findings [--against \<pid>] [--project \<id>]`. |
+| `/pipeline` | `/pipeline list` or `/pipeline run \<name> [--project \<id>]`. |
+| `/recipes` | list recipes. |
+| `/clear` |  |
+| `/exit` *(aliases: `/quit`)* |  |
+
+> Tip: prefix-matching works — `/doc` is `/doctor`, `/find` is `/findings`.

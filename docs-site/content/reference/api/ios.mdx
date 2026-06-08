@@ -1,0 +1,60 @@
+---
+title: ios · API
+---
+
+# `ios` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `POST /v1/ios/decrypt`
+
+**Ios Decrypt**
+
+Decrypt the FairPlay-protected IPA for ``bundle_id`` off a
+connected JB device, then (optionally) auto-ingest as a Project.
+
+Args:
+    bundle_id: e.g. ``com.target.bank.test``.
+    device_id: forwarded to bagbak when present; ignored by
+               frida-ios-dump (which uses the first USB device).
+    ingest:    True (default) → after decrypt, run the IPA through
+               the regular ingest pipeline. False → return only
+               the decrypted IPA path.
+    timeout_s: subprocess timeout. Big apps may need > 180s on
+               first decrypt.
+
+Errors:
+  * 503 — no IPA decryptor on PATH (bagbak / frida-ios-dump).
+  * 500 — tool ran but produced no IPA; log included in detail.
+  * 504 — subprocess hit ``timeout_s``.
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/ios/decrypt/status`
+
+**Ios Decrypt Status**
+
+Doctor-style status for the decryptor — is bagbak or
+frida-ios-dump installed?
+
+**Responses:**
+- `200` — Successful Response
+
+## `GET /v1/ios/patcher/supported`
+
+**Ios Patcher Supported**
+
+Mirror of /v1/mango/patcher/supported but for iOS — the UI uses
+it to render the patch picker without hardcoding names.
+
+Both patches accept ``offset`` (file offset, Ghidra's Offset column)
+OR ``va`` (virtual address, Ghidra's Address column). When ``va``
+is present, the patcher translates via LC_SEGMENT_64 load commands
+so the analyst can paste straight from the disassembler.
+
+**Responses:**
+- `200` — Successful Response

@@ -1,0 +1,51 @@
+---
+title: adb · API
+---
+
+# `adb` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/adb/help`
+
+**Adb Help**
+
+Catalog of supported ADB categories — drives the control panel sidebar.
+
+**Responses:**
+- `200` — Successful Response
+
+## `GET /v1/adb/log`
+
+**Adb Log**
+
+Recent adb invocations + their output — the audit trail.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `limit` | query | no | integer |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/adb/log/clear`
+
+**Adb Log Clear**
+
+**Responses:**
+- `200` — Successful Response
+
+## `POST /v1/adb/server/{action}`
+
+**Adb Server**
+
+`adb start-server`, `adb kill-server`, `adb root` — host-level toggles.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `action` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

@@ -1,0 +1,45 @@
+---
+title: findings · API
+---
+
+# `findings` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/findings/{finding_id}`
+
+**Get Finding**
+
+Walks every project for the finding. O(projects × findings).
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `finding_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/findings/{finding_id}/confirm`
+
+**Confirm Finding**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `finding_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/findings/{finding_id}/dismiss`
+
+**Dismiss Finding**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `finding_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

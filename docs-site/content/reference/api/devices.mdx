@@ -1,0 +1,520 @@
+---
+title: devices · API
+---
+
+# `devices` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/devices`
+
+**List Devices**
+
+Connected devices — Android (via adb) + iOS (via Frida's
+lockdown-based enumeration).
+
+Each entry carries ``platform: "android" | "ios"`` so the UI can
+filter recipes to the matching platform. Android entries also
+include the historical fields (model / abi / android_release /
+frida_server_running / …); iOS entries carry name / udid / version
+/ model / arch when available.
+
+**Responses:**
+- `200` — Successful Response
+
+## `POST /v1/devices/connect`
+
+**Device Connect**
+
+`adb connect \<host>:\<port>` — wireless ADB.
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/devices/flavors`
+
+**Device Flavors**
+
+**Responses:**
+- `200` — Successful Response
+
+## `POST /v1/devices/{serial}/clear`
+
+**Device Clear**
+
+`pm clear \<pkg>` — wipes app data without uninstalling.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/disconnect`
+
+**Device Disconnect**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/devices/{serial}/dumpsys/{topic}`
+
+**Device Dumpsys**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+| `topic` | path | yes | string |  |
+| `target` | query | no | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/frida-server`
+
+**Device Frida Per Device**
+
+Start frida-server on a specific device (multi-device variant of /v1/device/frida/start).
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/home`
+
+**Device Home**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/install`
+
+**Device Install**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `multipart/form-data`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/install-project`
+
+**Device Install Project**
+
+Install an already-stored Project's APK on the device — no re-upload.
+
+The user uploaded an APK once at /#/scan; the file lives in the workspace.
+From the Devices screen we just point `adb install -r` at the same path.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/intent`
+
+**Device Intent**
+
+Generic `am start|broadcast` with an action + optional data + component.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/key`
+
+**Device Key**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/devices/{serial}/logcat`
+
+**Device Logcat Per**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+| `lines` | query | no | integer |  |
+| `level` | query | no | string |  |
+| `filter` | query | no | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/logcat/clear`
+
+**Device Logcat Clear**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/monkey`
+
+**Device Monkey**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/devices/{serial}/packages`
+
+**Device Packages Per**
+
+List packages on a specific device. scope ∈ \{all,3rd,system,uninstalled,with-paths\}.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+| `scope` | query | no | string |  |
+| `filter` | query | no | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/permissions/{op}`
+
+**Device Permissions**
+
+grant / revoke / reset permissions for a package.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+| `op` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/reboot`
+
+**Device Reboot**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/devices/{serial}/screen.mjpeg`
+
+**Device Screen Mjpeg**
+
+Live screen as multipart/x-mixed-replace — point an `\<img src=…>` at it.
+
+Default 6 fps because PNG frames at 1080×2400 are ~1 MB each. The browser
+paints each frame atomically so there is no flicker. Set ?fps=12 for
+smoother motion at 2× bandwidth, or ?fps=2 for low-power preview.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+| `fps` | query | no | integer |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/devices/{serial}/screencap-debug`
+
+**Device Screencap Debug**
+
+Diagnostic JSON for the screencap path — used when the mirror stalls.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/devices/{serial}/screencap.png`
+
+**Device Screencap**
+
+Single PNG. Tries exec-out fast path first, falls back to temp-file.
+
+Validated against the PNG magic header so we never serve a half-baked stream
+to the `\<img>` tag (that was the cause of the SM-F741B "stalled" bug).
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/screenrecord/pull`
+
+**Device Screenrecord Pull**
+
+Pull the most recent recording into the workspace.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/screenrecord/start`
+
+**Device Screenrecord Start**
+
+Start `screenrecord` on-device. Caps at 180s (Android's own limit).
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/sharedprefs`
+
+**Device Sharedprefs**
+
+Hits the canonical SharedPreferences debug receiver — only works in debug
+builds that registered \<package>.sp.\{PUT,REMOVE,CLEAR\}.
+
+type ∈ \{string, boolean, float, int, long\}.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/shell`
+
+**Device Shell**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/start`
+
+**Device App Start**
+
+`am start -n \<pkg>/\<activity>` — launch the app's main activity by default.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/stop`
+
+**Device App Stop**
+
+`am force-stop \<pkg>` — terminate all processes for the package.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/swipe`
+
+**Device Swipe**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/tap`
+
+**Device Tap**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/tcpip`
+
+**Device Tcpip**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/text`
+
+**Device Text**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/uninstall`
+
+**Device Uninstall**
+
+`adb uninstall [-k] \<pkg>` — pass keep_data=yes to retain data dir.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/url`
+
+**Device Open Url**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/devices/{serial}/version`
+
+**Device Version**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/devices/{serial}/wm`
+
+**Device Wm**
+
+op ∈ \{size,size-reset,density,density-reset\}; value e.g. 1080x1920 or 320.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `serial` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

@@ -346,7 +346,16 @@ def _slug(tag: str) -> str:
 
 
 def _write_stub(name: str, title: str, exc: Exception) -> None:
-    """Last-ditch fallback so the build never explodes when mnexus can't import."""
+    """Last-ditch fallback so the build never explodes when mnexus can't import.
+
+    Crucially: we only write a stub when there's nothing already on disk.
+    A previously generated reference page is better than a freshly-broken
+    one — keeps the docs usable when the local Python env is misconfigured.
+    """
+    target = PAGES / name
+    if target.exists():
+        print(f"  skip stub for {name}: previous output preserved ({exc.__class__.__name__})")
+        return
     body = (
         f"---\ntitle: {title}\n---\n\n"
         f"# {title}\n\n"
@@ -354,7 +363,7 @@ def _write_stub(name: str, title: str, exc: Exception) -> None:
         f"> ```\n> {exc.__class__.__name__}: {exc}\n> ```\n\n"
         "Run `python3 docs-site/scripts/gen_reference.py` locally and fix the import error.\n"
     )
-    (PAGES / name).write_text(body, encoding="utf-8")
+    target.write_text(body, encoding="utf-8")
 
 
 def main() -> int:

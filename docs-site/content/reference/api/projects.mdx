@@ -1,0 +1,751 @@
+---
+title: projects · API
+---
+
+# `projects` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/projects`
+
+**List Projects**
+
+**Responses:**
+- `200` — Successful Response
+
+## `GET /v1/projects/{project_id}`
+
+**Get Project**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/api-map`
+
+**Project Api Map**
+
+Screen 15 — API endpoint tree (host → path → methods) + live hit counters.
+
+Static tree comes from ``AttackSurface.api_endpoints`` (jadx/apktool URL
+extraction). When Moxy is up, each (host, path) gains a ``hits`` counter
+over the last ``window_s`` seconds so the engineer sees what the app
+actually touched while they poked around the UI. Hosts the proxy saw but
+the static surface never claimed land under ``discovered_hosts`` so they
+don't get lost.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `window_s` | query | no | integer |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/attack-surface`
+
+**Project Attack Surface**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/attack-tree`
+
+**Project Attack Tree**
+
+Screen 19 — attack tree per high-severity finding.
+
+For every CRIT/HIGH finding we synthesize a 3-step chain:
+prerequisite → exploitation → impact. Cheap, deterministic, useful.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/components`
+
+**Project Components**
+
+Screen 10 — exported components + deeplinks.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/correlations`
+
+**Project Correlations**
+
+Run the correlator against the project's findings.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/dataflow`
+
+**Project Dataflow**
+
+Screen 18 — sources/sinks for the data-flow swimlanes.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/dynamic/events`
+
+**Dynamic Events**
+
+Poll endpoint for the live console.
+
+Back-compat shim: the SPA's new code path uses the SSE
+``/dynamic/stream`` endpoint, but the polling endpoint still works
+for CI scripts + simple consumers that can't speak EventSource.
+
+Returns the session's serialised state if ``session_id`` is given
+(matching the SSE replay log), otherwise synthesises an idle feed.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `session_id` | query | no | — |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/dynamic/events`
+
+**Dynamic Events Ingest**
+
+Frida hooks POST event batches here.
+
+Body: ``\{"events": [\{"channel": "ssl_pin", "payload": \{...\}\}, …]\}``
+
+Channels we know how to read on the other side:
+  * ``ssl_pin``   — pinning-callback intercepts; powers Screen 16's
+                    live status badges.
+  * ``net``       — request/response summaries (older Frida + Burp
+                    history both feed this).
+  * ``crypto`` / ``intent`` / ``fs`` / ``clip`` — Dynamic console.
+
+The endpoint never validates the channel name; it's free-form on
+purpose so new hooks can introduce channels without a server-side
+rev. Timestamps are stamped here if the event didn't carry one.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/dynamic/start`
+
+**Dynamic Start**
+
+Attach Frida to the project's package and load the requested hooks + recipes.
+
+Args:
+    hooks: comma-separated list of auto-hook names from
+        ``/v1/projects/\{id\}/hooks`` (generated by HookGenerator
+        from the project's attack surface).
+    recipes: comma-separated list of recipe slugs from
+        ``/v1/recipes`` — either built-ins (``android_universal_pinning``)
+        or Medusa modules (``encryption/cipher_1``). Wrapped in an
+        IIFE before loading so per-recipe globals don't collide
+        with auto-hooks loaded in the same session.
+    spawn: True (default) → ``frida.spawn`` + attach + resume. False
+        → attach to an already-running process. Spawn is required for
+        early-injection (e.g. SSL pinning bypass before OkHttp loads).
+    device: optional adb-style device id. Default uses the first USB
+        device frida sees.
+
+Errors:
+    * 503 ``frida not installed`` — the python ``frida`` extension
+      isn't on this server; ``pip install frida`` and restart.
+    * 503 ``no USB device``       — phone unplugged or unauthorised.
+    * 500 ``spawn failed``        — the package isn't installed, or
+      frida-server isn't running on the device.
+
+Returns the same shape the SPA already reads (``session_id`` +
+``state`` + ``log``) plus a ``stream_url`` the SPA can subscribe to
+via EventSource for live events.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/dynamic/stop`
+
+**Dynamic Stop**
+
+Detach the session and (when we spawned the PID) kill the app.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/dynamic/stream`
+
+**Dynamic Stream**
+
+Server-Sent Events: every event from a live Frida session, as it happens.
+
+The SPA opens an EventSource on this URL right after /dynamic/start
+succeeds; we hand it a never-ending stream of ``data: \<json>\n\n``
+frames keyed by channel (nexus / ssl_pin / crypto / intent / net /
+error). The client closes by detaching from the page; the server
+closes when the session detaches.
+
+Heartbeats every 15s keep proxies from idling the connection out.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `session_id` | query | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/export/{fmt}`
+
+**Export Project**
+
+Export the recovered endpoints + deeplinks in the chosen format.
+
+Formats:
+  - postman   — Postman v2.1 collection (JSON)
+  - caido     — Caido import bundle (JSON)
+  - burp      — Burp Suite items file (XML)
+  - moxy      — Moxy ruleset (YAML)
+  - deeplinks — bash probe script (am start loop)
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `fmt` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/findings`
+
+**Project Findings**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `severity` | query | no | — |  |
+| `engine` | query | no | — |  |
+| `category` | query | no | — |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/findings-diff`
+
+**Project Findings Diff**
+
+Diff this project's Finding set against another scan of the
+same package — the security-delta complement to /manifest-diff.
+
+Resolution rules match /manifest-diff: explicit ``?against=\<pid>``
+wins; otherwise we pick the most recent non-self Project with the
+same ``package_name``. No prior scan → ``base=null`` + an
+'everything is new' diff against an empty list.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `against` | query | no | — |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/firebase/probe`
+
+**Project Firebase Probe**
+
+Run active probes against every Firebase config recovered for
+this project — no fresh APK scan.
+
+Walks the project's most recent PlayScan record (auto-picked by
+apk_sha256), grabs the firebase_configs list, and fires one probe
+triple per unique project_id. The response is a list of per-config
+probe outcomes keyed by Firebase project id.
+
+404 when the project has no prior play-scan to source configs from.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/hooks`
+
+**Project Hooks**
+
+Auto-hooks generated from the project's static surface (platform-aware).
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/ios/patch`
+
+**Project Ios Patch**
+
+Patch the project's IPA at Mach-O byte level + re-sign.
+
+Body::
+    \{
+      "patches": [
+        \{"name": "return_zero_at_offset", "offset": "0x100123456"\},
+        \{"name": "nop_at_offset",         "offset": "0x100123458", "count": 4\}
+      ]
+    \}
+
+Supported patches mirror IPAPatcher.SUPPORTED_PATCHES:
+  * ``return_zero_at_offset`` — write ``mov x0,#0 ; ret`` (8 bytes
+    at offset). Use this on the jailbreak-check function epilogue.
+  * ``nop_at_offset`` — write N ARM64 NOPs (4 bytes each). Use on
+    call sites to anti-Frida / anti-debug probes.
+
+Returns the IPAPatchResult dump — patched_path, per-patch outcome
+(with previous_hex for rollback), signing_tool used, warnings.
+400 on unknown patches or malformed body; 410 if the IPA is gone.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/mango/deeplink/fire`
+
+**Mango Deeplink Fire**
+
+Fire a deeplink intent on the connected device — Mango's ``deeplink``.
+
+Runs ``adb shell am start -W -a android.intent.action.VIEW -d \<uri>``
+against the bridged device. Returns the raw output + the resolved
+activity (parsed out of ``am start``'s ``Activity:`` line). 503 when
+no device is connected, 400 when the URI is empty.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/mango/deeplink/poc`
+
+**Mango Deeplink Poc**
+
+Generate an HTML PoC for a deeplink — Mango's ``deeplink --poc``.
+
+Returns an ``Content-Type: text/html`` body with a single anchor
+that fires ``uri`` when clicked. Useful for demonstrating that the
+deeplink can be triggered from a hostile page the user lands on —
+cross-app drive-by. The page is dumb on purpose; the value is the
+repro, not the UI.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `uri` | query | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/manifest-diff`
+
+**Project Manifest Diff**
+
+Diff this project's AttackSurface against another scan of the
+*same* package — Mango's ``diff`` command, with structured data
+instead of plain-text manifest comparison.
+
+Picks ``against`` automatically when omitted: the most recent prior
+Project (different id) that shares the same ``package_name``. Returns
+a 404-flavoured stub (``base=null``) when no prior scan exists rather
+than a 404 so the UI can render an empty-state without flapping.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `against` | query | no | — |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/moxy-traffic`
+
+**Project Moxy Traffic**
+
+Pull live HTTP flows from a Moxy workspace and tag them for this APK.
+
+Strategy:
+  * If ``moxy_project`` is given, fetch from that workspace verbatim.
+  * Otherwise let MoxyEngine.pick_project pick by name (package_name match
+    → updated_at fallback). The picked workspace id round-trips in the
+    response so the UI can show it / let the user override.
+  * ``match_only=true`` filters server-side to flows whose host is in the
+    project's discovered API map (handy when Moxy is collecting ambient
+    traffic and you only want this APK's). Default is false so the UI can
+    show everything and just *highlight* matches.
+
+Returns the same shape as /traffic so the SPA renders both in one table.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `limit` | query | no | integer |  |
+| `moxy_project` | query | no | — |  |
+| `match_only` | query | no | boolean |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/native`
+
+**Project Native**
+
+Screen 11 — Ghidra native analysis output.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/native/analyze`
+
+**Project Native Analyze**
+
+Per-binary deep scan — runs GhidraEngine.analyze_native_lib on
+ONE native binary inside the project's APK/IPA.
+
+Args:
+    lib: zip-internal path to the binary, e.g.
+         ``lib/arm64-v8a/libcrypto.so`` or
+         ``Payload/Target.app/Frameworks/Crypto.framework/Crypto``.
+         Must match a string returned by /v1/projects/\{id\}/native
+         under ``native_libraries[*].path``.
+
+Returns the analyze_native_lib dict (format / findings / jni_exports
+/ hardcoded_urls / hardcoded_keys / crypto_operations) — same shape
+for ELF and Mach-O so the UI doesn't need a per-format renderer.
+
+404 when the binary isn't in the APK. 500 with the engine error
+when the file can't be read.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `lib` | query | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/owasp`
+
+**Project Owasp**
+
+Screen 20 — OWASP MASVS compliance matrix derived from findings.
+
+Uses the `masvs` (preferred) or `owasp_mobile` field on each Finding to
+decide which control failed. Cells without findings are PASS.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/patch`
+
+**Project Patch**
+
+Patch the project's APK with one or more manifest tweaks.
+
+``patches`` is a comma-separated list of names from APKPatcher's
+``SUPPORTED_PATCHES`` — currently:
+    * ``debuggable``         — flip android:debuggable=true.
+    * ``cleartext_traffic``  — flip android:usesCleartextTraffic=true.
+    * ``user_ca_trust``      — inject network_security_config.xml
+                               that accepts user-installed CAs.
+
+Output carries the path to the rebuilt APK + warnings + the list
+of patches that no-op'd (already applied) vs. ones that actually
+changed something. When apktool is missing on the server, the
+endpoint returns a preview-only result with ``preview=true`` so
+the UI can render 'this is what the patch would do' without an
+APK to install.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/play-scan`
+
+**Project Play Scan**
+
+Run the PlayIntel pipeline against a Project's stored APK.
+
+The Project already owns the APK on disk (``project.apk_path``),
+so we skip the upload-or-stream step entirely and feed the file
+straight into ``_run_playintel_scan``. The resulting PlayScanRecord
+is linked back to this Project by ``apk_sha256`` (and ``package_name``)
+so /v1/playintel/scans?apk_sha256=… can surface prior scans on the
+Overview screen.
+
+``run_active_probes`` opts into the same live Firebase / Firestore /
+Storage probes /v1/playintel/scan and /scan-upload expose — default
+is False so the call stays passive unless the analyst asks.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/report`
+
+**Generate Report**
+
+Generate a report and return it as a file download.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/rescan`
+
+**Rescan Project**
+
+Re-run the static fan-out on a stored project.
+
+Resolves the APK from the project record, re-executes the orchestrator
+pipeline (which rebuilds findings + attack surface in place) and writes
+the refreshed payload back over the same project id.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/runtime/script`
+
+**Project Runtime Script**
+
+Generate a Medusa-flavoured Frida script for one runtime action.
+
+The Project's ``package_name`` is auto-bound everywhere — the analyst
+never types it. Body shape::
+
+    \{
+        "action": "enumerate_classes" | "describe_class" |
+                   "jtrace_method" | "enumerate_modules" |
+                   "spawn_log",
+        "params": \{ … action-specific … \}
+    \}
+
+Returns::
+
+    \{
+        "action":   "\<echoed action>",
+        "package":  "\<project's package_name>",
+        "channel":  "runtime",           # send() events land here
+        "script":   "\<full frida JS>",
+        "hint":     "\<one-liner of how to run it>",
+    \}
+
+The generated scripts all ``send(\{channel:'runtime', …\})`` so the
+existing /v1/projects/\{id\}/dynamic/events ingest captures their
+output without a separate transport.
+
+Reuses Nexus primitives instead of duplicating Medusa's REPL:
+
+  * Recipes library (built-in + ch0pin/medusa modules) is still the
+    catalogue for stable hooks — this endpoint is for ad-hoc Medusa
+    commands (`enumerate`, `describe_java_class`, `jtrace`, `libs`)
+    that don't ship as recipes.
+  * Frida-server lifecycle stays at /v1/device/frida/start.
+  * The Dynamic tab still owns the long-lived session + console;
+    this endpoint just emits the script for it to load.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/secrets`
+
+**Project Secrets**
+
+Screen 09 — secrets + crypto audit.
+
+Returns crypto operations + storage/crypto-category findings, ready for the
+table + heatmap renderers.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/ssl-map`
+
+**Project Ssl Map**
+
+Screen 16 — SSL pinning map: domains × library × bypass strategy × LIVE.
+
+Three signal sources, merged per host:
+
+  1. *Static* (jadx + apktool): ``ssl_pinning_detected`` flag + library
+     hint. This is what shipped in v0.
+  2. *Moxy* (passive): if Moxy is up, the engine pulls flows from the
+     last ``window_s`` seconds. A flow with a decoded HTTP response on
+     host H proves TLS was broken — either nothing was pinning that
+     host, or pinning has been bypassed.
+  3. *Frida ssl_pin events*: the auto-bypass hook emits
+     ``send(\{channel:'ssl_pin', host, lib, outcome\})`` on every pinning
+     callback intercept. Stored under channel='ssl_pin' in
+     ``dynamic_events``; consumed here for per-callback granularity.
+
+Each row resolves to one of: ``bypassed`` · ``intercepted`` · ``blocked``
+· ``static-pinned`` · ``clear`` · ``unknown`` (see ``_host_status``).
+The UI paints the badge accordingly and polls this endpoint every few
+seconds while the screen is mounted.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `window_s` | query | no | integer |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/surface`
+
+**Project Surface Graph**
+
+Screen 17 — attack surface graph (nodes + edges for force-directed layout).
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/traffic`
+
+**Project Traffic**
+
+Screen 14 — captured traffic, joined with sensitive-flag findings.
+
+Reads from the dynamic_events SQLite table (channel='net') populated by the
+Frida + Burp engines. Returns sample fixtures when the project has no
+captured traffic yet so the UI has something to render.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `limit` | query | no | integer |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

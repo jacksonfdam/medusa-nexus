@@ -1,0 +1,138 @@
+---
+title: vphones · API
+---
+
+# `vphones` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/vphones`
+
+**Vphones List**
+
+List super-tart VMs. Empty list when the binary isn't configured yet.
+
+**Responses:**
+- `200` — Successful Response
+
+## `GET /v1/vphones/{name}`
+
+**Vphones Info**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/vphones/{name}/file`
+
+**Vphones File Get**
+
+Pull a file out of the VM via scp.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+| `path` | query | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/vphones/{name}/file/upload`
+
+**Vphones File Upload**
+
+Push an arbitrary file into the VM under `dest`.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Request body:** `multipart/form-data`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/vphones/{name}/install`
+
+**Vphones Install**
+
+Push an IPA into the VM, ldid-resign, register with SpringBoard.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Request body:** `multipart/form-data`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/vphones/{name}/screenshot`
+
+**Vphones Screenshot**
+
+Capture the VM's VNC screen as PNG. Returns a 501 envelope when
+no VNC client (vncsnapshot/vncdotool) is on the host PATH.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/vphones/{name}/ssh`
+
+**Vphones Ssh**
+
+Run a one-shot shell command over SSH inside the VM.
+
+No blocklist here — the user has already accepted research-mode
+posture on the host. Every command is recorded in the audit log.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/vphones/{name}/start`
+
+**Vphones Start**
+
+Start a VM in the background. `extra_args` is split on whitespace and
+forwarded as additional `tart run` flags (e.g. `--no-graphics`).
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/vphones/{name}/stop`
+
+**Vphones Stop**
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

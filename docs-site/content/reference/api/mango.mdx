@@ -1,0 +1,35 @@
+---
+title: mango · API
+---
+
+# `mango` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `POST /v1/mango/decode-flags`
+
+**Mango Decode Flags**
+
+Decode an Android flag integer against Intent / Receiver / PendingIntent /
+Content-resolver namespaces — Mango's ``decodeflag``.
+
+Body::
+    \{"value": "0x10000000", "namespaces": ["intent", "receiver"]\}
+
+``value`` accepts hex (``0x…``), decimal, or octal/binary literals (``0o…``/``0b…``).
+``namespaces`` is optional; default returns every interpretation so the
+analyst sees the contextual ambiguity (``0x00000001`` is
+``FLAG_GRANT_READ_URI_PERMISSION`` *and* ``QUERY_SORT_DESCENDING``).
+
+**Responses:**
+- `200` — Successful Response
+
+## `GET /v1/mango/patcher/supported`
+
+**Mango Patcher Supported**
+
+Surface the supported patch names + their behaviour so the UI
+can render the patch picker without hardcoding the list client-side.
+
+**Responses:**
+- `200` — Successful Response

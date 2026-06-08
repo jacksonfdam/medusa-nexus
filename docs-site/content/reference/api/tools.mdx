@@ -1,0 +1,24 @@
+---
+title: tools · API
+---
+
+# `tools` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `POST /v1/tools/run`
+
+**Run Tool**
+
+Generic trigger for the Tools page action buttons.
+
+Supported actions:
+- `frida.start`   — launch frida-server (delegates to /v1/device/frida/start)
+- `device.refresh` — re-probe device info
+- `doctor.recheck` — re-run health checks
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

@@ -1,0 +1,185 @@
+---
+title: device · API
+---
+
+# `device` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/device/file`
+
+**Device File Get**
+
+Pull a single file off the device. Streamed via local tmpfile.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `path` | query | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/device/file/delete`
+
+**Device File Delete**
+
+Delete a single file on the device. Refuses without confirm='yes'.
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/device/file/upload`
+
+**Device File Upload**
+
+Push an uploaded file to the device under `dest`.
+
+**Request body:** `multipart/form-data`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/device/files`
+
+**Device Files List**
+
+List a directory on the device. Returns parsed entries.
+
+Uses `ls -la --time-style=long-iso` so the output is parseable. Falls back
+to plain `ls -la` on toolboxes that don't support that flag.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `path` | query | no | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/device/frida/start`
+
+**Device Frida Start**
+
+Launch frida-server on the device (requires root).
+
+**Responses:**
+- `200` — Successful Response
+
+## `GET /v1/device/info`
+
+**Device Info**
+
+Which device is bridged, what's its ABI, is frida-server staged?
+
+**Responses:**
+- `200` — Successful Response
+
+## `GET /v1/device/info/full`
+
+**Device Info Full**
+
+Comprehensive device info — every label in the Bridge INFO tab.
+
+Returns key/value pairs for every entry in `_DEVICE_PROPS` plus battery,
+memory, storage and resolution probes. Empty strings on partial failures
+so the UI can still render the keys it knows about.
+
+**Responses:**
+- `200` — Successful Response
+
+## `GET /v1/device/logcat`
+
+**Device Logcat**
+
+Tail logcat: dump the last `lines` entries with optional level + grep filter.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `lines` | query | no | integer |  |
+| `filter` | query | no | string |  |
+| `level` | query | no | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/device/packages`
+
+**Device Packages**
+
+List installed packages on the connected device.
+
+Args:
+    filter: grep-style substring passed straight to ``pm list packages``.
+    scope:  ``all`` (default) · ``3rd`` (user-installed only) · ``system``
+            · ``uninstalled`` · ``with-paths``. ``3rd`` is what you almost
+            always want on a Samsung — it strips Knox / Bixby / Galaxy
+            Store / et al. so the analyst can find the target app.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `filter` | query | no | string |  |
+| `scope` | query | no | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/device/pull`
+
+**Device Pull**
+
+Pull the APK(s) for a package off the device — and ingest by default.
+
+Split-APK apps return multiple files (base + config splits); we pick the
+one that's actually the base APK for ingest:
+
+  * If a ``base.apk`` is in the bundle, use it.
+  * Otherwise the largest file by size, which is reliably the base
+    because config splits ship resources only and weigh far less.
+
+SHA-256 dedup short-circuits when the device's APK already has a
+Project (e.g. pulled it once last week — clicking PULL again
+routes back to the existing scan instead of cloning it).
+
+Knobs:
+  * ``ingest=false``  pulls but skips ingest (file-only mode).
+  * ``force=true``    rescan even when the hash collides with an
+                      existing project.
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/device/screenshot`
+
+**Device Screenshot**
+
+Capture the device screen via `screencap`. Saves the PNG into the workspace
+and returns the local path + a base64 data URL the UI can render directly.
+
+**Responses:**
+- `200` — Successful Response
+
+## `POST /v1/device/shell`
+
+**Device Shell**
+
+Run a (read-only) adb shell command and return its output.
+
+A small blocklist refuses obviously destructive commands. The web UI is
+not the right venue for `pm uninstall`; the user can drop to a terminal
+if they need that.
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

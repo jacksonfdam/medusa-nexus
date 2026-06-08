@@ -1,0 +1,119 @@
+---
+title: dynamic · API
+---
+
+# `dynamic` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/dynamic/sessions/{session_id}/memory/modules`
+
+**Memory Modules**
+
+List loaded modules in the target process — name / base / size / path.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `session_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/dynamic/sessions/{session_id}/memory/read`
+
+**Memory Read**
+
+Read N bytes from an address. Returns a space-separated hex string.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `session_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/dynamic/sessions/{session_id}/memory/scan`
+
+**Memory Scan**
+
+Frida Memory.scanSync wrapped — pattern across readable ranges.
+
+Body::
+    \{"pattern": "65 79 4a 68",       # Frida pattern (hex w/ '??' wildcards)
+     "module": "FooBank",            # optional — scope to one module
+     "max_results": 100\}
+
+Returns ``\{results: [\{address, size, range_base, range_size,
+range_protection\}, …], truncated: bool, ranges_scanned: int\}``.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `session_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `DELETE /v1/dynamic/sessions/{session_id}/memory/trace`
+
+**Memory Trace Stop**
+
+Disable the active MemoryAccessMonitor. Idempotent.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `session_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/dynamic/sessions/{session_id}/memory/trace`
+
+**Memory Trace Start**
+
+Arm a MemoryAccessMonitor over one or more ranges.
+
+Body::
+    \{"ranges": [\{"base": "0x10f234000", "size": 4096\}, …]\}
+
+First touch (read / write / execute) on any page in any range fires
+``send(\{channel: 'mem_trace', address, operation, from, range_base\})``
+— these stream out through the existing SSE channel on
+``/dynamic/stream``, no special consumer needed.
+
+The monitor is single-shot per page — once a page traps, it returns
+to normal protection and the analyst re-arms if they want more.
+Useful for 'tell me when the token is read', 'is anyone touching
+this static buffer', etc.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `session_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/dynamic/sessions/{session_id}/memory/write`
+
+**Memory Write**
+
+Overwrite bytes at an address. Returns the previous bytes for rollback.
+
+Body::
+    \{"address": "0x1234abcd",
+     "hex": "65 79 4a 68 …"\}   # space-separated hex
+
+Dangerous — can crash the target. The UI gates with a confirmation
+dialog; the API itself doesn't. Pentester is in charge.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `session_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

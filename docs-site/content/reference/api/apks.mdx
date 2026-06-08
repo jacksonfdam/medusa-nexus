@@ -1,0 +1,51 @@
+---
+title: apks · API
+---
+
+# `apks` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `POST /v1/apks/fetch`
+
+**Fetch Apk**
+
+Pull an APK from a store via apkeep, then optionally ingest it.
+
+Source ∈ \{google-play, aurora, f-droid, apkpure, huawei-appgallery\}.
+For google-play apkeep needs ~/.config/apkeep/apkeep.ini configured;
+aurora and f-droid don't require credentials.
+
+When `auto_ingest` is true (default) we run the same pipeline as
+`/v1/apks/upload` against the downloaded APK and return the new
+project_id. Otherwise we just return the file paths apkeep wrote.
+
+Dedup: if the fetched APK's SHA-256 already has a Project, we return
+that existing one (`dedup=true`) instead of re-running the pipeline.
+Set `force=True` to rescan in place.
+
+**Request body:** `application/x-www-form-urlencoded`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/apks/upload`
+
+**Upload Apk**
+
+Receive an APK or IPA, autodetect platform, run the right pipeline.
+
+Despite the path (`/apks/upload`, kept for back-compat), this endpoint
+accepts both Android APKs and iOS IPAs — we sniff the zip contents and
+route accordingly. The SPA redirects to /#/project/\{project_id\}/overview
+on success either way.
+
+Dedup: byte-identical uploads short-circuit to the existing project
+(response carries ``dedup=true``). Pass ``force=true`` to rescan in place.
+
+**Request body:** `multipart/form-data`
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error

@@ -1,0 +1,34 @@
+---
+title: firebase · API
+---
+
+# `firebase` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `POST /v1/firebase/probe`
+
+**Firebase Probe**
+
+Run RTDB / Firestore / Storage probes against an explicit
+Firebase config — no APK scan, no project context.
+
+Body shape mirrors a FirebaseConfig:
+
+::
+    \{
+      "project_id":     "myapp-prod",
+      "api_key":        "AIzaSy…",
+      "storage_bucket": "myapp-prod.appspot.com",
+      "database_url":   "https://myapp-prod-default-rtdb.firebaseio.com"
+    \}
+
+All four fields are optional; the probes skip a service when its
+inputs are missing. Each probe is idempotent + read-only — they
+never write to the target. Use it when an analyst has a config
+pulled from a different scan / a leaked github repo / a recon
+blog post and wants the same orchestration without re-running an
+APK ingest.
+
+**Responses:**
+- `200` — Successful Response

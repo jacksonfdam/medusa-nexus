@@ -1,0 +1,185 @@
+---
+title: CLI reference
+---
+
+# CLI reference
+
+Auto-generated from the live Click command tree at build time. If a flag isn't listed here it doesn't exist — either add it to the source or stop looking. To verify locally:
+
+```bash
+mnexus --help
+```
+
+## `mnexus`
+
+🔱 MEDUSA NEXUS — unified mobile threat analysis. Run with no args for the interactive REPL.
+
+```bash
+mnexus <subcommand>
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--version` | BOOLEAN | `False` | Show the version and exit. |
+
+### `mnexus dev`
+
+Dev mode: install deps if needed, start server with reload, stream status.
+
+```bash
+mnexus dev
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--host` | TEXT | `127.0.0.1` |  |
+| `--port` | INTEGER | `8765` |  |
+
+### `mnexus doctor`
+
+Verify every engine is installed, reachable, and not lying about its version.
+
+```bash
+mnexus doctor
+```
+
+### `mnexus mcp-serve`
+
+Run as an MCP (Model Context Protocol) stdio server — wire MedusaNexus into Claude Desktop / Cursor / Zed.
+
+```bash
+mnexus mcp-serve
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--api-base` | TEXT | — | Override the local Nexus API base URL (default: http://127.0.0.1:8765 or $MNEXUS_API_BASE). |
+
+### `mnexus play-account`
+
+Manage stored Play identities (the account manager that backs `play-scan`).
+
+```bash
+mnexus play-account <subcommand>
+```
+
+#### `mnexus play-account add`
+
+Register a Play identity. Pass --password to mint the AAS token from email+password.
+
+```bash
+mnexus play-account add
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--name` / `-n` | TEXT | `Sentinel.UNSET` | Short handle for this identity (alphanumeric / - / _ only). |
+| `--email` / `-e` | TEXT | `Sentinel.UNSET` | Gmail address tied to the account. |
+| `--aas` / `-a` | TEXT | — | AAS master token. Omit to use --password mode. |
+| `--password` / `-p` | TEXT | — | Password / app password; minted to AAS via /auth and not stored. |
+| `--notes` | TEXT | — | Free-form note (e.g. 'qa rig', 'research-2026-q2'). |
+| `--default` | BOOLEAN | `False` | Mark this account as the default for /play-scan. |
+
+#### `mnexus play-account delete`
+
+Remove a stored account by name.
+
+```bash
+mnexus play-account delete <name>
+```
+
+#### `mnexus play-account list`
+
+Show stored Play identities (no token values are echoed).
+
+```bash
+mnexus play-account list
+```
+
+#### `mnexus play-account show`
+
+Show one account's metadata (token is redacted).
+
+```bash
+mnexus play-account show <name>
+```
+
+#### `mnexus play-account use`
+
+Mark \<name> as the default account for /play-scan.
+
+```bash
+mnexus play-account use <name>
+```
+
+### `mnexus play-scan`
+
+Stream an APK from Google Play and scan for Firebase / credential leaks.
+
+```bash
+mnexus play-scan <package>
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--apk` | PATH | — | Local APK file to scan instead of fetching from Play. |
+| `--account` / `-A` | TEXT | — | Stored Play identity to scan as (default: the one flagged default). |
+| `--no-probes` | BOOLEAN | `False` | Skip the active Firebase / Firestore / Storage probes (offline mode). |
+
+### `mnexus repl`
+
+Open the interactive REPL (default when run with no args).
+
+```bash
+mnexus repl
+```
+
+### `mnexus report`
+
+Generate a report — every template ships a Mitigation Playbook.
+
+```bash
+mnexus report
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--project` | TEXT | `Sentinel.UNSET` |  |
+| `--template` | CHOICE | `technical` |  |
+| `--format` | CHOICE | `markdown` |  |
+| `--output` | PATH | `Sentinel.UNSET` |  |
+
+### `mnexus scan`
+
+Static scan: ingest an APK, run every static engine, build the attack surface.
+
+```bash
+mnexus scan <apk_path>
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--package` | TEXT | — | Target package name (auto-detected if omitted). |
+| `--version` | TEXT | — | Version name (auto-detected if omitted). |
+
+### `mnexus serve`
+
+Start the FastAPI backend + serve the web UI. Local-first by default.
+
+```bash
+mnexus serve
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--host` | TEXT | `127.0.0.1` |  |
+| `--port` | INTEGER | `8765` |  |
+| `--reload` | BOOLEAN | `False` | Auto-reload on file changes (dev only). |
+
+### `mnexus vphone`
+
+super-tart-vphone control (research-only).
+
+```bash
+mnexus vphone <verb> <rest>
+```

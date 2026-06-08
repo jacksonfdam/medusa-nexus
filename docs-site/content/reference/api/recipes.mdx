@@ -1,0 +1,39 @@
+---
+title: recipes · API
+---
+
+# `recipes` endpoints
+
+Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
+
+## `GET /v1/recipes`
+
+**List Recipes**
+
+Enumerate built-in + Medusa/Stheno recipes on disk.
+
+`platform` filters to "android" / "ios" / "both" — defaults to all.
+Built-ins always carry a `platform` field; Medusa modules default to
+"android" since that's where Medusa originated.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `platform` | query | no | — |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/recipes/{name}/script`
+
+**Recipe Script**
+
+Return the Frida script text for a recipe (unevaluated).
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `name` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
