@@ -388,6 +388,41 @@ trigger.
   RTDB write+cleanup, Firestore listCollectionIds, Storage listObjects),
   bounded by `httpx.Client(timeout=10s)`.
 
+## Active probe orchestration (standalone)
+
+Two endpoints fire probes outside the full ingest pipeline — useful
+when you already have a Firebase config and just want the
+RTDB/Firestore/Storage readout:
+
+```http
+POST /v1/firebase/probe
+Content-Type: application/json
+
+{"project_id": "myapp-prod",
+ "api_key": "AIza…",
+ "storage_bucket": "myapp-prod.appspot.com",
+ "database_url": "https://myapp-prod-default-rtdb.firebaseio.com"}
+```
+
+All four fields are optional individually; probes skip a service
+when its inputs are missing. Returns `{rtdb, firestore, storage,
+vulnerable}` with one block per service that ran.
+
+```http
+POST /v1/projects/{id}/firebase/probe
+```
+
+Walks the project's most recent PlayScanRecord, finds every
+recovered Firebase config, runs all three probes per unique
+`project_id`. 404 when no prior play-scan exists for the project
+(run `/v1/projects/{id}/play-scan` first to recover configs from
+the APK).
+
+Both endpoints make read-only requests against the target services
+— they never write. The `vulnerable` flag in the per-service block
+mirrors the same semantics the in-flow analyser uses (public read on
+RTDB / public read on Firestore documents / public listing on Storage).
+
 ## Files of interest
 
 * `mnexus/playintel/arsc.py` — resources.arsc parser; references AOSP

@@ -4396,6 +4396,170 @@ def _safe_put(queue: asyncio.Queue, item: Any) -> None:
             pass
 
 
+# ─── Active Firebase probes (item 16) ────────────────────────────────────
+
+
+@app.post("/v1/firebase/probe")
+async def firebase_probe(request: Request) -> dict[str, Any]:
+    """Run RTDB / Firestore / Storage probes against an explicit
+    Firebase config — no APK scan, no project context.
+
+    Body shape mirrors a FirebaseConfig:
+
+    ::
+        {
+          "project_id":     "myapp-prod",
+          "api_key":        "AIzaSy…",
+          "storage_bucket": "myapp-prod.appspot.com",
+          "database_url":   "https://myapp-prod-default-rtdb.firebaseio.com"
+        }
+
+    All four fields are optional; the probes skip a service when its
+    inputs are missing. Each probe is idempotent + read-only — they
+    never write to the target. Use it when an analyst has a config
+    pulled from a different scan / a leaked github repo / a recon
+    blog post and wants the same orchestration without re-running an
+    APK ingest.
+    """
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be an object")
+    project_id_raw = (body.get("project_id") or "").strip()
+    api_key = (body.get("api_key") or "").strip() or None
+    storage_bucket = (body.get("storage_bucket") or "").strip() or None
+    database_url = (body.get("database_url") or "").strip() or None
+    if not project_id_raw and not database_url and not storage_bucket:
+        raise HTTPException(400, "at least one of project_id, storage_bucket, database_url required")
+
+    from mnexus.playintel.firebase_probes import (
+        check_firestore,
+        check_realtime_db,
+        check_storage_bucket,
+    )
+
+    out: dict[str, Any] = {
+        "project_id": project_id_raw,
+        "rtdb": None,
+        "firestore": None,
+        "storage": None,
+    }
+
+    if database_url:
+        r = check_realtime_db(database_url)
+        out["rtdb"] = {
+            "db_url": r.db_url,
+            "public_read": r.public_read,
+            "public_write": r.public_write,
+            "vulnerable": getattr(r, "vulnerable", False),
+            "error": r.error,
+        }
+
+    if project_id_raw:
+        fs = check_firestore(project_id_raw, api_key=api_key)
+        out["firestore"] = {
+            "project_id": fs.project_id,
+            "public_read": fs.public_read,
+            "sample_document_count": fs.sample_document_count,
+            "vulnerable": getattr(fs, "vulnerable", False),
+            "error": fs.error,
+        }
+
+    if storage_bucket:
+        st = check_storage_bucket(storage_bucket)
+        out["storage"] = {
+            "bucket": st.bucket,
+            "public_listing": st.public_listing,
+            "object_count": st.object_count,
+            "vulnerable": getattr(st, "vulnerable", False),
+            "error": st.error,
+        }
+
+    # Headline summary — easier for the UI than re-walking the tree.
+    out["vulnerable"] = any(
+        (out[k] or {}).get("vulnerable") for k in ("rtdb", "firestore", "storage")
+    )
+    return out
+
+
+@app.post("/v1/projects/{project_id}/firebase/probe")
+async def project_firebase_probe(project_id: str) -> dict[str, Any]:
+    """Run active probes against every Firebase config recovered for
+    this project — no fresh APK scan.
+
+    Walks the project's most recent PlayScan record (auto-picked by
+    apk_sha256), grabs the firebase_configs list, and fires one probe
+    triple per unique project_id. The response is a list of per-config
+    probe outcomes keyed by Firebase project id.
+
+    404 when the project has no prior play-scan to source configs from.
+    """
+    from mnexus.playintel.firebase_probes import (
+        check_firestore,
+        check_realtime_db,
+        check_storage_bucket,
+    )
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    sha = p.apk_sha256 or ""
+    scans = nexus.db.list_play_scans(limit=100)
+    matching = [s for s in scans if (s.apk_sha256 or "").lower() == sha.lower()]
+    if not matching:
+        raise HTTPException(
+            404,
+            f"no prior play-scan for {p.id} (sha {sha[:8] or '?'}…) — run /play-scan first to recover Firebase configs.",
+        )
+    latest = matching[0]
+    fb_configs = (latest.payload or {}).get("firebase_configs") or []
+    if not fb_configs:
+        return {"project_id": p.id, "scan_id": latest.id, "configs": [], "note": "no firebase configs in the most recent scan"}
+
+    outcomes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for cfg in fb_configs:
+        pid = (cfg.get("project_id") or "").strip()
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        block: dict[str, Any] = {"project_id": pid, "rtdb": None, "firestore": None, "storage": None}
+        db_url = cfg.get("database_url")
+        if db_url:
+            r = check_realtime_db(db_url)
+            block["rtdb"] = {
+                "db_url": r.db_url, "public_read": r.public_read,
+                "public_write": r.public_write,
+                "vulnerable": getattr(r, "vulnerable", False), "error": r.error,
+            }
+        fs = check_firestore(pid, api_key=cfg.get("api_key"))
+        block["firestore"] = {
+            "project_id": fs.project_id, "public_read": fs.public_read,
+            "sample_document_count": fs.sample_document_count,
+            "vulnerable": getattr(fs, "vulnerable", False), "error": fs.error,
+        }
+        bucket = cfg.get("storage_bucket")
+        if bucket:
+            st = check_storage_bucket(bucket)
+            block["storage"] = {
+                "bucket": st.bucket, "public_listing": st.public_listing,
+                "object_count": st.object_count,
+                "vulnerable": getattr(st, "vulnerable", False), "error": st.error,
+            }
+        outcomes.append(block)
+
+    return {
+        "project_id": p.id,
+        "scan_id": latest.id,
+        "configs": outcomes,
+        "any_vulnerable": any(
+            any((o.get(k) or {}).get("vulnerable") for k in ("rtdb", "firestore", "storage"))
+            for o in outcomes
+        ),
+    }
+
+
 # ─── IPA Patcher (Bloco 1) ───────────────────────────────────────────────
 
 
