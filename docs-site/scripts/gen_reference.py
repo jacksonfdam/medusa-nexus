@@ -38,13 +38,27 @@ sys.path.insert(0, str(ROOT))
 
 
 def _safe(value: Any) -> str:
-    """MDX-safe rendering — escape pipes inside table cells and braces."""
+    """MDX-safe rendering for table cells — collapses newlines, escapes pipes + braces."""
+    return _mdx_escape(str(value)).replace("|", "\\|").replace("\n", " ")
+
+
+def _mdx_escape(text: str) -> str:
+    """Escape characters MDX treats as JSX/expression syntax.
+
+    Docstrings on FastAPI routes routinely contain `{"json": "blobs"}`
+    and `{all,3rd,system}`-style braces. MDX 3 sees those as JSX
+    expressions and hands them to acorn, which then explodes on the
+    first non-JS character. Escape both braces and bare `<` so we
+    can ship arbitrary prose without sanitising the source.
+    """
     return (
-        str(value)
-        .replace("|", "\\|")
+        str(text)
         .replace("{", "\\{")
         .replace("}", "\\}")
-        .replace("\n", " ")
+        # Bare `<` is MDX's open-tag sigil. Escape unless it's clearly
+        # part of `<= ` / `<- ` / `< 3` (still safe to escape there,
+        # acorn doesn't care).
+        .replace("<", "\\<")
     )
 
 
@@ -88,7 +102,7 @@ def gen_cli() -> None:
         lines.append(f"{'#' * depth} {heading}")
         lines.append("")
         if cmd.help:
-            lines.append(cmd.help.strip())
+            lines.append(_mdx_escape(cmd.help.strip()))
             lines.append("")
 
         # Synopsis
@@ -287,10 +301,10 @@ def gen_api() -> None:
             summary = op.get("summary") or ""
             desc = op.get("description") or ""
             if summary:
-                out.append(f"**{summary}**")
+                out.append(f"**{_mdx_escape(summary)}**")
                 out.append("")
             if desc:
-                out.append(desc.strip())
+                out.append(_mdx_escape(desc.strip()))
                 out.append("")
             params = op.get("parameters") or []
             if params:

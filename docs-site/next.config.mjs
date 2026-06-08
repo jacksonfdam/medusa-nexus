@@ -22,7 +22,6 @@ const withNextra = nextra({
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
-  output: 'standalone',
 };
 
 export default withNextra(config);

@@ -2,7 +2,7 @@
 title: MedusaNexus — unified mobile threat analysis
 ---
 
-import { Cards, Card, Callout } from 'nextra/components';
+import { Cards, Callout } from 'nextra/components';
 
 # 🔱 MedusaNexus
 
@@ -21,38 +21,22 @@ The API still shifts week to week; pin to commits in CI.
 ## Get up and running
 
 <Cards>
-  <Card
-    icon="🚀"
-    title="60-second tour"
-    href="/getting-started/sixty-second-tour"
-  >
+  <Cards.Card icon="🚀" title="60-second tour"      href="/getting-started/sixty-second-tour">
     From `git clone` to the first finding panel — what every screen and
     command does, with no detours.
-  </Card>
-  <Card
-    icon="🧰"
-    title="Install MedusaNexus"
-    href="/getting-started/installation"
-  >
+  </Cards.Card>
+  <Cards.Card icon="🧰" title="Install MedusaNexus" href="/getting-started/installation">
     macOS / Linux / Apple Silicon. Walks through `scripts/setup.sh`, the
     `--ios-tools` and `--moxy` flags, and what `~/.mnexus/env.sh` writes.
-  </Card>
-  <Card
-    icon="🎯"
-    title="Your first scan"
-    href="/getting-started/first-scan"
-  >
+  </Cards.Card>
+  <Cards.Card icon="🎯" title="Your first scan"     href="/getting-started/first-scan">
     `mnexus scan target.apk` → `/findings` → `/report`. Every step
     annotated, including why the risk score landed where it did.
-  </Card>
-  <Card
-    icon="🧬"
-    title="Architecture map"
-    href="/reference/architecture"
-  >
+  </Cards.Card>
+  <Cards.Card icon="🧬" title="Architecture map"    href="/reference/architecture">
     How engines, runtime, intelligence and reporting fit together —
     one diagram, one paragraph per layer.
-  </Card>
+  </Cards.Card>
 </Cards>
 
 ## What it does
@@ -78,14 +62,14 @@ The API still shifts week to week; pin to commits in CI.
 ## Pick your surface
 
 <Cards>
-  <Card icon="🤖" title="Android workflow"   href="/workflows/android-static" />
-  <Card icon="🍎" title="iOS workflow"       href="/workflows/ios" />
-  <Card icon="🎭" title="Dynamic + Frida"    href="/workflows/dynamic" />
-  <Card icon="🧠" title="Memory Inspector"   href="/workflows/memory-inspector" />
-  <Card icon="🛰️" title="PlayIntel"          href="/workflows/playintel" />
-  <Card icon="📊" title="Reporting"          href="/workflows/reporting" />
-  <Card icon="🔌" title="MCP for assistants" href="/integrations/mcp" />
-  <Card icon="📚" title="CLI / REPL / API"   href="/reference/cli" />
+  <Cards.Card icon="🤖" title="Android workflow"   href="/workflows/android-static" />
+  <Cards.Card icon="🍎" title="iOS workflow"       href="/workflows/ios" />
+  <Cards.Card icon="🎭" title="Dynamic + Frida"    href="/workflows/dynamic" />
+  <Cards.Card icon="🧠" title="Memory Inspector"   href="/workflows/memory-inspector" />
+  <Cards.Card icon="🛰️" title="PlayIntel"          href="/workflows/playintel" />
+  <Cards.Card icon="📊" title="Reporting"          href="/workflows/reporting" />
+  <Cards.Card icon="🔌" title="MCP for assistants" href="/integrations/mcp" />
+  <Cards.Card icon="📚" title="CLI / REPL / API"   href="/reference/cli" />
 </Cards>
 
 ## How the docs are organised
@@ -99,6 +83,6 @@ The API still shifts week to week; pin to commits in CI.
 | **Design** | Architecture, internal models, the product spec, and the visual language deck. |
 
 Source of truth is the markdown next to the code in
-[`docs-site/pages/`](https://github.com/jackson-mafra/MedusaNexus/tree/main/docs-site/pages).
+[`docs-site/content/`](https://github.com/jackson-mafra/MedusaNexus/tree/main/docs-site/content).
 Every page renders byte-identically in your editor and on this site — so when
 an AI assistant reads the repo, it sees the same words you do.

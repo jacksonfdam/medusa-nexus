@@ -4,6 +4,7 @@
   "private": true,
   "description": "Vercel-hosted documentation site for MedusaNexus. Nextra (Next.js + MDX). Markdown is source of truth.",
   "scripts": {
+    "postinstall": "patch-package",
     "prebuild": "python3 scripts/gen_reference.py",
     "predev": "python3 scripts/gen_reference.py",
     "dev": "next dev --port 3030",
@@ -21,6 +22,7 @@
   "devDependencies": {
     "@types/node": "^25.9.2",
     "@types/react": "^19.2.17",
+    "patch-package": "^8.0.1",
     "typescript": "^6.0.3"
   },
   "engines": {
