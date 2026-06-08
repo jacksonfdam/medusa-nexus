@@ -1,0 +1,15 @@
+{
+  "index": "Overview",
+  "android-static": "Android static scan",
+  "ios": "iOS workflow",
+  "dynamic": "Dynamic + Frida",
+  "memory-inspector": "Memory Inspector",
+  "playintel": "PlayIntel",
+  "diff": "Diff reports",
+  "pipelines": "Pipelines",
+  "reporting": "Reporting",
+  "quickstart": {
+    "title": "Quickstart",
+    "display": "hidden"
+  }
+}

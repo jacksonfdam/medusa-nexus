@@ -1,0 +1,12 @@
+{
+  "index": "Overview",
+  "installation": "Installation",
+  "requirements": "Requirements",
+  "environment": "Environment variables",
+  "first-scan": "Your first scan",
+  "sixty-second-tour": "60-second tour",
+  "quickstart": {
+    "title": "Quickstart (legacy)",
+    "display": "hidden"
+  }
+}
