@@ -380,6 +380,7 @@ function view_scan() {
           <button class="btn primary" onclick="document.getElementById('dz-picker').click()">[ BROWSE ]</button>
           <a class="btn" href="#/device/pull">[ PULL FROM DEVICE ]</a>
           <a class="btn" href="#/device/bridge">[ DEVICE BRIDGE ]</a>
+          <a class="btn" href="#/ios/decrypt">[ DECRYPT IPA (iOS) ]</a>
         </div>
         <div id="dz-status" class="muted small" style="min-height:18px;margin-top:6px"></div>
       </section>
@@ -1268,6 +1269,137 @@ async function fillDeviceStatusStrip() {
     }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SCREEN 03b — Decrypt IPA (iOS)
+ *
+ *  FairPlay-encrypted IPAs need a JB device + bagbak / frida-ios-dump
+ *  to land as analysable Mach-O. This screen drives /v1/ios/decrypt,
+ *  auto-ingests the result, and links straight to the new project.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+function view_ios_decrypt() {
+    return h`
+    <div class="main">
+      ${sectionHeader("D", "03b // iOS INTAKE", "DECRYPT IPA FROM JB DEVICE")}
+      <section class="panel">
+        <div class="panel-head">
+          <span>// DECRYPTOR STATUS</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="ios-dec-status">checking…</span>
+        </div>
+        <div class="panel-body col" style="gap:10px">
+          <div class="muted small">
+            Wraps <code>bagbak</code> (preferred) or <code>frida-ios-dump</code>.
+            Spawn the target on a jailbroken iPhone, wait for the kernel to
+            decrypt <code>__TEXT</code>/<code>__DATA</code> segments, dump
+            them, fix up <code>LC_ENCRYPTION_INFO.cryptid</code>, repack.
+          </div>
+          <div class="muted small">
+            <a href="#/help" onclick="event.preventDefault();window.open('/docs#/v1/ios/decrypt','_blank')">API reference</a>
+            · <a href="https://github.com/jacksonmafra-umain/medusa-nexus/blob/main/docs/IOS.md" target="_blank">full iOS workflow doc</a>
+          </div>
+
+          <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:120px">bundle id:</span>
+            <input id="ios-dec-bundle" class="input t-mono" placeholder="com.target.bank.test" style="flex:1;min-width:240px">
+          </div>
+          <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:120px">device id:</span>
+            <input id="ios-dec-device" class="input t-mono" placeholder="(first USB by default)" style="flex:1;min-width:240px">
+            <span class="muted small uppercase" style="letter-spacing:2px">timeout:</span>
+            <input id="ios-dec-timeout" class="input t-mono" type="number" min="30" max="900" value="180" style="width:90px">
+          </div>
+          <div class="row" style="gap:8px;align-items:center">
+            <label class="row small" style="gap:6px;align-items:center;cursor:pointer">
+              <input type="checkbox" id="ios-dec-ingest" checked>
+              <span>auto-ingest after decrypt (recommended)</span>
+            </label>
+            <span class="spacer"></span>
+            <button class="btn primary" id="ios-dec-go" style="white-space:nowrap">[ ▶ DECRYPT ]</button>
+          </div>
+          <div id="ios-dec-out" class="muted small" style="display:none;padding:8px 10px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap;font-family:'Courier Prime',monospace;max-height:220px;overflow:auto"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><span>// HOW TO FIND THE BUNDLE ID</span></div>
+        <div class="panel-body col" style="gap:6px;color:var(--muted)">
+          <div class="small">On the connected JB device, over SSH:</div>
+          <div class="t-mono small" style="padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px">ssh root@iphone "ls /var/containers/Bundle/Application/*/*.app/Info.plist | xargs grep -l -A1 'CFBundleIdentifier'"</div>
+          <div class="small">Or pull the apps list from frida directly:</div>
+          <div class="t-mono small" style="padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px">frida-ps -Uai</div>
+        </div>
+      </section>
+    </div>`;
+}
+
+async function mount_ios_decrypt() {
+    const statusEl = $("#ios-dec-status");
+    try {
+        const status = await getJSON("/v1/ios/decrypt/status");
+        if (status.available) {
+            statusEl.innerHTML = `<span style="color:var(--acid)">✓ ${escapeHtml(status.tool)} ready</span> · <span class="t-mono">${escapeHtml(status.path || "")}</span>`;
+        } else {
+            statusEl.innerHTML = `<span style="color:var(--sev-crit)">no decryptor installed</span> · <code>${escapeHtml(status.install_hint || "scripts/setup.sh --ios-tools")}</code>`;
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--sev-crit)">status check failed: ${escapeHtml(e.message || String(e))}</span>`;
+    }
+
+    const outEl = $("#ios-dec-out");
+    $("#ios-dec-go").addEventListener("click", async () => {
+        const bundle = ($("#ios-dec-bundle").value || "").trim();
+        if (!bundle) { alert("bundle id required"); return; }
+        const device = ($("#ios-dec-device").value || "").trim();
+        const timeout = parseInt($("#ios-dec-timeout").value || "180", 10);
+        const ingest = $("#ios-dec-ingest").checked;
+        const btn = $("#ios-dec-go");
+        const orig = btn.textContent;
+        btn.textContent = "[ DECRYPTING… ]";
+        btn.disabled = true;
+        outEl.style.display = "";
+        outEl.style.color = "var(--cyan)";
+        outEl.textContent = `decrypting ${bundle}… (can take 30–180s)`;
+        try {
+            const fd = new FormData();
+            fd.append("bundle_id", bundle);
+            if (device) fd.append("device_id", device);
+            fd.append("ingest", ingest ? "true" : "false");
+            fd.append("timeout_s", String(timeout));
+            const r = await fetch("/v1/ios/decrypt", { method: "POST", body: fd });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || r.statusText);
+            const lines = [
+                `✓ decrypted via ${j.tool} in ${j.duration_ms}ms`,
+                `  IPA → ${j.ipa_path}`,
+            ];
+            (j.warnings || []).forEach((w) => lines.push(`  warn: ${w}`));
+            if (j.project_id) {
+                lines.push(`  ingested → ${j.project_id}`);
+            }
+            outEl.style.color = "var(--acid)";
+            outEl.textContent = lines.join("\n");
+            btn.textContent = j.project_id ? `[ ✓ OPEN ${j.project_id} ]` : "[ ✓ DONE ]";
+            btn.style.color = "var(--acid)";
+            btn.disabled = false;
+            if (j.project_id) {
+                btn.onclick = () => { location.hash = `#/project/${j.project_id}/overview`; };
+                setTimeout(() => {
+                    if (location.hash.startsWith("#/ios/decrypt")) {
+                        location.hash = `#/project/${j.project_id}/overview`;
+                    }
+                }, 1500);
+            }
+        } catch (e) {
+            outEl.style.color = "var(--sev-crit)";
+            outEl.textContent = `decrypt failed: ${e.message || e}`;
+            btn.textContent = "[ FAILED ]";
+            btn.style.color = "var(--sev-crit)";
+            btn.disabled = false;
+            setTimeout(() => { if (btn.textContent === "[ FAILED ]") { btn.textContent = orig; btn.style.color = ""; } }, 6000);
+        }
+    });
+}
+
 function view_device_bridge() {
     return h`
     <div class="main">
@@ -1664,6 +1796,32 @@ function view_project_runtime(ctx) {
             <button class="btn primary" id="rt-mango-patch-go" style="white-space:nowrap" title="apktool + apksigner under the hood; produces a re-signed APK in the workspace">[ ▶ PATCH APK ]</button>
           </div>
           <div id="rt-mango-patch-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap"></div>
+
+          <!-- IPA patch panel — only mounted for iOS projects (toggled by mount fn) -->
+          <div id="rt-mango-ipa-block" style="display:none">
+            <div class="row" style="gap:8px;align-items:flex-start;flex-wrap:wrap">
+              <span class="muted small uppercase" style="letter-spacing:2px;width:110px;padding-top:6px;color:var(--magenta)">patch ipa:</span>
+              <div class="col" style="gap:6px;flex:1;min-width:280px">
+                <div class="muted small">
+                  Mach-O byte patcher. Reads the file offset from your disassembler
+                  (Ghidra's Offset column / Hopper's File offset) and overwrites bytes.
+                  See <a href="https://github.com/jacksonmafra-umain/medusa-nexus/blob/main/docs/IOS.md" target="_blank">docs/IOS.md</a> for the workflow.
+                </div>
+                <div class="row small" style="gap:6px;align-items:center">
+                  <select id="rt-ipa-patch-kind" class="input t-mono" style="min-width:240px">
+                    <option value="return_zero_at_offset">return_zero_at_offset (mov x0,#0; ret)</option>
+                    <option value="nop_at_offset">nop_at_offset (NOPs × count)</option>
+                  </select>
+                  <input id="rt-ipa-patch-offset" class="input t-mono" placeholder="0x100123456" style="flex:1;min-width:140px">
+                  <input id="rt-ipa-patch-count" class="input t-mono" type="number" min="1" max="64" value="1" title="NOP count (return_zero ignores)" style="width:80px">
+                  <button class="btn" id="rt-ipa-patch-add" style="white-space:nowrap">[ + ADD ]</button>
+                </div>
+                <div id="rt-ipa-patch-queue" class="col" style="gap:3px;font-size:11px;color:var(--muted)"></div>
+              </div>
+              <button class="btn primary" id="rt-ipa-patch-go" style="white-space:nowrap;border-color:var(--magenta)" title="ldid -S preferred; codesign --force --sign - as fallback">[ ▶ PATCH IPA ]</button>
+            </div>
+            <div id="rt-ipa-patch-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap;font-family:'Courier Prime',monospace;max-height:200px;overflow:auto"></div>
+          </div>
         </div>
       </section>
 
@@ -1904,6 +2062,99 @@ async function mount_project_runtime(ctx) {
             btn.disabled = false;
         }
     });
+
+    // IPA patch panel — only visible for iOS projects. Mounts a small
+    // queue editor (one patch entry per row) + dispatch to /ios/patch.
+    if ((project && project.platform) === "ios") {
+        const block = $("#rt-mango-ipa-block");
+        if (block) {
+            block.style.display = "";
+            // Swap the manifest-diff label on iOS so the analyst doesn't
+            // think the surface diff is the iOS Mach-O patch.
+            const queue = [];  // [{name, offset, count?}]
+            const queueEl = $("#rt-ipa-patch-queue");
+            const renderQueue = () => {
+                if (!queue.length) {
+                    queueEl.innerHTML = `<span class="muted small">no patches queued — add one above</span>`;
+                    return;
+                }
+                queueEl.innerHTML = queue.map((p, i) => `
+                    <div class="row small" style="gap:6px;align-items:center;padding:2px 0">
+                      <span class="t-mono" style="color:var(--cyan);flex:1">${escapeHtml(p.name)} @ ${escapeHtml(p.offset)}${p.count ? " ×" + p.count : ""}</span>
+                      <a href="#" data-rm="${i}" class="muted small">[ × ]</a>
+                    </div>`).join("");
+                $$('[data-rm]').forEach((a) => a.addEventListener("click", (e) => {
+                    e.preventDefault();
+                    queue.splice(parseInt(a.dataset.rm, 10), 1);
+                    renderQueue();
+                }));
+            };
+            renderQueue();
+
+            $("#rt-ipa-patch-add").addEventListener("click", () => {
+                const kind = $("#rt-ipa-patch-kind").value;
+                const offset = ($("#rt-ipa-patch-offset").value || "").trim();
+                const count = parseInt($("#rt-ipa-patch-count").value || "1", 10);
+                if (!offset) { alert("offset required (hex like 0x100123456 or decimal)"); return; }
+                const entry = { name: kind, offset };
+                if (kind === "nop_at_offset") entry.count = count;
+                queue.push(entry);
+                $("#rt-ipa-patch-offset").value = "";
+                renderQueue();
+            });
+
+            const ipaOut = $("#rt-ipa-patch-out");
+            $("#rt-ipa-patch-go").addEventListener("click", async () => {
+                if (!queue.length) { alert("add at least one patch first"); return; }
+                if (!confirm(`Patch ${queue.length} byte location(s) and re-sign the IPA?\nMistakes can crash the app — keep the previous_hex echoes for rollback.`)) return;
+                const btn2 = $("#rt-ipa-patch-go");
+                const orig2 = btn2.textContent;
+                btn2.textContent = "[ PATCHING… ]";
+                btn2.disabled = true;
+                ipaOut.style.display = "";
+                ipaOut.style.color = "var(--cyan)";
+                ipaOut.textContent = `patching ${queue.length} location(s)…`;
+                try {
+                    const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/ios/patch`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ patches: queue }),
+                    });
+                    const j = await r.json();
+                    if (!r.ok) throw new Error((j && j.detail) || r.statusText);
+                    const lines = [];
+                    if (j.patched_path) lines.push(`✓ patched IPA · ${j.patched_path}`);
+                    if (j.signing_tool) lines.push(`  signed with ${j.signing_tool}`);
+                    if (j.patches_applied && j.patches_applied.length) {
+                        lines.push("applied:");
+                        j.patches_applied.forEach((p) => lines.push(
+                            `  · ${p.name}@${p.offset} · ${p.bytes_written}B · rollback: ${p.previous_hex || "<unreadable>"}`
+                        ));
+                    }
+                    if (j.patches_skipped && j.patches_skipped.length) {
+                        lines.push("skipped:");
+                        j.patches_skipped.forEach((s) => lines.push(`  · ${s.name}@${s.offset} · ${s.reason}`));
+                    }
+                    (j.warnings || []).forEach((w) => lines.push("  warn: " + w));
+                    ipaOut.style.color = "var(--acid)";
+                    ipaOut.textContent = lines.join("\n");
+                    btn2.textContent = "[ ✓ DONE ]";
+                    btn2.style.color = "var(--acid)";
+                    btn2.disabled = false;
+                    setTimeout(() => { btn2.textContent = orig2; btn2.style.color = ""; }, 6000);
+                    // Clear the queue so a second click doesn't re-patch.
+                    queue.length = 0;
+                    renderQueue();
+                } catch (e) {
+                    ipaOut.style.color = "var(--sev-crit)";
+                    ipaOut.textContent = `patch failed: ${e.message || e}`;
+                    btn2.textContent = "[ FAILED ]";
+                    btn2.style.color = "var(--sev-crit)";
+                    btn2.disabled = false;
+                }
+            });
+        }
+    }
 
     $("#rt-copy").addEventListener("click", async () => {
         try {
@@ -6730,6 +6981,7 @@ const ROUTES = [
     { path: "adb",                              view: view_devices,           mount: mount_devices },  // alias of /devices
     { path: "device/pull",                      view: view_device_pull,       mount: mount_device_pull },
     { path: "device/bridge",                    view: view_device_bridge,     mount: mount_device_bridge },
+    { path: "ios/decrypt",                      view: view_ios_decrypt,       mount: mount_ios_decrypt },
     { path: "device/shell",                     view: view_device_shell,      mount: mount_device_shell },
     { path: "device/files",                     view: view_device_files,      mount: mount_device_files },
     { path: "device/screen",                    view: view_device_screen,     mount: mount_device_screen },
