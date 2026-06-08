@@ -63,6 +63,7 @@ for arg in "$@"; do
         --burp)    MODE="burp" ;;
         --burp-rest-api) MODE="burp-rest-api" ;;
         --moxy)    MODE="moxy" ;;
+        --ios-tools) MODE="ios-tools" ;;
         --help|-h)
             cat <<'HELP'
 MEDUSA NEXUS — installer. Opinionated. Idempotent.
@@ -75,6 +76,7 @@ Usage:
   scripts/setup.sh --burp       verify Burp Pro REST API + write MNEXUS_BURP_URL / _API_KEY to env
   scripts/setup.sh --burp-rest-api   install vmware-archive/burp-rest-api (jar + run.sh wrapper)
   scripts/setup.sh --moxy       start Moxy in Docker, extract the mitmproxy CA, push to attached device
+  scripts/setup.sh --ios-tools  install bagbak + ldid + frida-ios-dump (iOS pentesting toolkit)
   scripts/setup.sh --doctor     only run `mnexus doctor`
   scripts/setup.sh --help
 
@@ -723,6 +725,102 @@ _find_burp_suite_jar() {
     [[ -n "$found" ]] && echo "$found"
 }
 
+# ─── iOS pentesting toolkit — bagbak + ldid + frida-ios-dump ────────────
+#
+# All three install paths handle 'already installed' as a no-op + log it.
+# Failures are surfaced as warnings, not fatal — an analyst on Linux can
+# still get frida-ios-dump even if ldid (a macOS brew formula) can't be
+# installed; an analyst on macOS without npm can still get ldid + the
+# python clone.
+install_ios_tools() {
+    step "installing iOS pentesting toolkit (bagbak · ldid · frida-ios-dump)"
+
+    # bagbak — npm global. Preferred decryptor.
+    if command -v bagbak >/dev/null 2>&1; then
+        ok "bagbak already installed"
+    elif command -v npm >/dev/null 2>&1; then
+        say "npm install -g bagbak"
+        if npm install -g bagbak >/dev/null 2>&1; then
+            ok "bagbak installed"
+        else
+            warn "npm install -g bagbak failed (permissions? Try sudo or set npm prefix)."
+        fi
+    else
+        warn "npm not found — skip bagbak. Install Node.js + npm and re-run --ios-tools."
+        hint "macOS:  brew install node"
+        hint "Linux:  apt-get install -y nodejs npm  (or use nvm)"
+    fi
+
+    # ldid — Saurik's signer. brew on macOS; apt on Debian; cargo from source as a fallback.
+    if command -v ldid >/dev/null 2>&1; then
+        ok "ldid already installed"
+    elif [[ "$PLATFORM" == "darwin" ]] && command -v brew >/dev/null 2>&1; then
+        say "brew install ldid"
+        if brew install ldid >/dev/null 2>&1; then
+            ok "ldid installed"
+        else
+            warn "brew install ldid failed."
+        fi
+    elif [[ "$PLATFORM" == "linux" ]] && command -v apt-get >/dev/null 2>&1; then
+        say "sudo apt-get install -y ldid"
+        if sudo apt-get install -y ldid >/dev/null 2>&1; then
+            ok "ldid installed"
+        else
+            warn "apt-get install ldid failed. Build from https://github.com/ProcursusTeam/ldid"
+        fi
+    else
+        warn "no package manager for ldid on this platform."
+        hint "Build from source: https://github.com/ProcursusTeam/ldid"
+    fi
+
+    # frida-ios-dump — git clone + pip install requirements. Fallback when bagbak
+    # isn't available or the analyst prefers AloneMonkey's tool.
+    local fid_dir="$MNEXUS_TOOLS/frida-ios-dump"
+    if [[ -d "$fid_dir/.git" ]]; then
+        say "frida-ios-dump already cloned at $fid_dir — pulling latest"
+        if git -C "$fid_dir" pull --quiet; then
+            ok "frida-ios-dump up to date"
+        else
+            warn "git pull failed; using existing checkout."
+        fi
+    else
+        mkdir -p "$MNEXUS_TOOLS"
+        say "git clone AloneMonkey/frida-ios-dump → $fid_dir"
+        if git clone --quiet https://github.com/AloneMonkey/frida-ios-dump.git "$fid_dir"; then
+            ok "frida-ios-dump cloned"
+        else
+            warn "git clone frida-ios-dump failed."
+        fi
+    fi
+
+    if [[ -f "$fid_dir/requirements.txt" ]]; then
+        if [[ -x "$VENV_DIR/bin/pip" ]]; then
+            say "installing frida-ios-dump requirements into the project venv"
+            "$VENV_DIR/bin/pip" install --quiet -r "$fid_dir/requirements.txt" \
+                && ok "frida-ios-dump requirements installed" \
+                || warn "pip install of frida-ios-dump requirements failed"
+        else
+            hint "venv not found — run scripts/setup.sh first, then re-run --ios-tools"
+        fi
+    fi
+
+    # Report what landed so the analyst can paste this into a setup log.
+    step "iOS toolkit summary"
+    command -v bagbak >/dev/null 2>&1 \
+        && ok "bagbak: $(command -v bagbak) ($(bagbak --version 2>&1 | head -1 || echo 'unversioned'))" \
+        || warn "bagbak: NOT installed"
+    command -v ldid >/dev/null 2>&1 \
+        && ok "ldid:   $(command -v ldid)" \
+        || warn "ldid:   NOT installed"
+    [[ -f "$fid_dir/dump.py" ]] \
+        && ok "frida-ios-dump: $fid_dir/dump.py" \
+        || warn "frida-ios-dump: NOT installed"
+
+    hint "wire it up: source $MNEXUS_ENV_FILE && mnexus doctor"
+    hint "first decrypt: mnexus then /decrypt-ios <bundle_id>"
+}
+
+
 install_burp_rest_api() {
     step "installing burp-rest-api (vmware-archive)"
 
@@ -1034,6 +1132,10 @@ main() {
             ;;
         moxy)
             start_moxy
+            exit 0
+            ;;
+        ios-tools)
+            install_ios_tools
             exit 0
             ;;
         doctor)
