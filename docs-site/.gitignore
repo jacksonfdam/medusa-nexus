@@ -22,11 +22,11 @@ node_modules/
 # Auto-generated reference pages.
 # These are regenerated on every `npm run dev` / `npm run build` via
 # scripts/gen_reference.py. Source of truth = the Python code in ../mnexus/.
-pages/reference/cli.mdx
-pages/reference/repl.mdx
-pages/reference/api/*.mdx
-!pages/reference/api/_meta.json
-!pages/reference/api/index.mdx
+content/reference/cli.mdx
+content/reference/repl.mdx
+content/reference/api/*.mdx
+!content/reference/api/_meta.json
+!content/reference/api/index.mdx
 
 # Build artefacts
 *.log

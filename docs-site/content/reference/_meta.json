@@ -1,0 +1,7 @@
+{
+  "architecture": "Architecture",
+  "env-vars": "Environment variables",
+  "cli": "CLI",
+  "repl": "REPL slash commands",
+  "api": "HTTP API"
+}

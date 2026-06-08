@@ -1,0 +1,22 @@
+{
+  "index": "Overview",
+  "adb": "adb",
+  "apks": "apks",
+  "device": "device",
+  "devices": "devices",
+  "doctor": "doctor",
+  "dynamic": "dynamic",
+  "findings": "findings",
+  "firebase": "firebase",
+  "health": "health",
+  "ios": "ios",
+  "ipas": "ipas",
+  "mango": "mango",
+  "pipelines": "pipelines",
+  "playintel": "playintel",
+  "projects": "projects",
+  "recipes": "recipes",
+  "settings": "settings",
+  "tools": "tools",
+  "vphones": "vphones"
+}
