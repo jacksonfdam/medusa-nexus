@@ -1,7 +1,7 @@
 # MedusaNexus docs site
 
 Nextra 4 + Next.js 16 + MDX, hosted on Vercel at
-**[medusanexus.dev](https://medusanexus.dev)**.
+**[mnexus.vercel.app](https://mnexus.vercel.app)**.
 
 The site is a thin presentation layer over the MDX files in
 `content/`. The CLI / REPL / API reference pages are *generated from
@@ -65,7 +65,7 @@ The site is configured to deploy from `docs-site/` on every push to
    * `PYTHON_VERSION=3.11` (or 3.12 — Vercel's Node runtime ships
      Python 3.x for the `predev` / `prebuild` hooks).
 6. **Domain:** point a CNAME at the Vercel project. The expected canon
-   is `medusanexus.dev`.
+   is `mnexus.vercel.app`.
 
 If the build step ever fails to run Python, the previously generated
 reference MDX is committed to the deploy preview — pages stay

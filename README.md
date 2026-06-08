@@ -21,7 +21,7 @@
 
 ## Docs
 
-📚 **Full documentation lives at [medusanexus.dev](https://medusanexus.dev)**
+📚 **Full documentation lives at [mnexus.vercel.app](https://mnexus.vercel.app)**
 (Vercel deploy of [`docs-site/`](docs-site/) — Nextra 4 + auto-generated
 CLI / REPL / API reference at build time).
 
@@ -31,7 +31,6 @@ CLI / REPL / API reference at build time).
 | [Workflows](docs-site/content/workflows/index.mdx) — Android static, iOS, dynamic Frida, Memory Inspector, PlayIntel, diff, pipelines, reporting | "I want to do X" — analyst stories. |
 | [Integrations](docs-site/content/integrations/index.mdx) — Burp, Caido, Moxy, super-tart-vphone, MCP | Per-tool wiring + auth + pitfalls. |
 | [Reference](docs-site/content/reference/index.mdx) — architecture, env vars, CLI, REPL, HTTP API (136+ endpoints) | The matrix when you need a flag or a route. |
-| [Design](docs-site/content/design/index.mdx) — full spec, visual design language, iOS workflow plan | Background on why things are shaped the way they are. |
 
 All markdown lives in [`docs-site/content/`](docs-site/content/) so an
 AI assistant reading the repo sees byte-identical content as this site.
@@ -449,7 +448,7 @@ Key API endpoints (full list at `/docs`):
 adb shell su -c '/data/local/tmp/frida-server &'
 
 # On a non-rooted device, patch the APK instead of running frida-server:
-# (handled by the Stheno engine; see docs-site/content/design/spec.mdx § 3.3)
+# (handled by the Stheno engine; see workflows/dynamic for the wiring)
 ```
 
 ## Development
@@ -492,8 +491,7 @@ python -m mnexus.cli dev             # serve with reload
 | `mnexus/` | Python package — models, engines, orchestrator, intelligence, reporting, CLI, API. |
 | `tests/` | Pytest suite — mitigation invariant + report generator coverage. |
 | `scripts/setup.sh` | One-shot installer (macOS + Linux). |
-| `docs-site/content/design/spec.mdx` | Full product specification. |
-| `docs-site/content/design/design-language.mdx` | Visual tokens, typography, motion effects. |
+| `docs-site/` | Vercel-deployed documentation site (Nextra 4 + MDX). |
 | `design/medusanexus.pen` | Pencil source file (31 screens + design system). |
 | `design/screens/` | Per-screen PNG exports, grouped. |
 | `design/INDEX.md` | Screen catalog with fidelity levels. |

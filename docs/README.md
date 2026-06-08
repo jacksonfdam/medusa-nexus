@@ -4,7 +4,7 @@ The docs now live as a deployable Vercel site under
 [`../docs-site/`](../docs-site/), authored in MDX, with auto-generated
 CLI / REPL / API reference at build time.
 
-**Hosted site (when deployed):** https://medusanexus.dev
+**Hosted site:** [https://mnexus.vercel.app](https://mnexus.vercel.app)
 
 **Source of truth (markdown):** [`docs-site/content/`](../docs-site/content/)
 
@@ -12,18 +12,16 @@ CLI / REPL / API reference at build time.
 
 | Old path | New page |
 | -------- | -------- |
-| `docs/SPEC.md`           | [`design/spec`](../docs-site/content/design/spec.mdx) |
 | `docs/QUICKSTART.md`     | [`getting-started/quickstart`](../docs-site/content/getting-started/quickstart.mdx) |
 | `docs/RUNTIME.md`        | [`workflows/dynamic`](../docs-site/content/workflows/dynamic.mdx) |
 | `docs/IOS.md`            | [`workflows/ios`](../docs-site/content/workflows/ios.mdx) |
-| `docs/IOS_PLAN.md`       | [`design/ios-plan`](../docs-site/content/design/ios-plan.mdx) |
 | `docs/PIPELINES.md`      | [`workflows/pipelines`](../docs-site/content/workflows/pipelines.mdx) |
 | `docs/REPORTING.md`      | [`workflows/reporting`](../docs-site/content/workflows/reporting.mdx) |
 | `docs/PLAYINTEL.md`      | [`workflows/playintel`](../docs-site/content/workflows/playintel.mdx) |
 | `docs/MOXY.md`           | [`integrations/moxy`](../docs-site/content/integrations/moxy.mdx) |
 | `docs/VPHONE_PLAN.md`    | [`integrations/vphone`](../docs-site/content/integrations/vphone.mdx) |
 | `docs/MCP.md`            | [`integrations/mcp`](../docs-site/content/integrations/mcp.mdx) |
-| `docs/DESIGN_LANGUAGE.md` | [`design/design-language`](../docs-site/content/design/design-language.mdx) |
+| `docs/SPEC.md` / `IOS_PLAN.md` / `DESIGN_LANGUAGE.md` | Internal-only — removed from the public docs. Read them via `git log` if you need historical context. |
 
 ## Why move
 

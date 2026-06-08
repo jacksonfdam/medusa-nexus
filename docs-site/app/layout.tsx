@@ -18,7 +18,7 @@ import '../styles/globals.css';
 const REPO = 'https://github.com/jacksonfdam/medusa-nexus';
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://medusanexus.dev'),
+  metadataBase: new URL('https://mnexus.vercel.app'),
   title: {
     default: 'MedusaNexus — unified mobile threat analysis',
     template: '%s · MedusaNexus docs',
