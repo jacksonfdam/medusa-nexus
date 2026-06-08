@@ -207,12 +207,115 @@ class ReportGenerator:
             json.dump(payload, fh, indent=2, default=str)
         return output_path
 
-    def _render_html(self, data: ReportData, template: ReportTemplate, output_path: str) -> str:  # pragma: no cover - stub
-        """HTML rendering lives in Jinja templates. Stubbed until templates land."""
-        _ = data, template
-        raise NotImplementedError("html renderer pending — see mnexus/reporting/templates/")
+    # ─── HTML + PDF renderers ────────────────────────────────────────
 
-    def _render_pdf(self, data: ReportData, template: ReportTemplate, output_path: str) -> str:  # pragma: no cover - stub
-        """PDF = HTML → headless Chromium. Stubbed until the HTML path exists."""
-        _ = data, template
-        raise NotImplementedError("pdf renderer pending — built on top of html renderer")
+    def _render_html(self, data: ReportData, template: ReportTemplate, output_path: str) -> str:
+        """Render the report through the single Jinja2 template.
+
+        The template lives at ``mnexus/reporting/templates/report.html.j2``;
+        we keep it as one file with inline CSS so the resulting HTML
+        works as a standalone download (no external assets to host).
+        Severity classes for chip colours come from
+        ``_sev_chip_class`` exposed as a template global.
+        """
+        rendered = self._render_to_string(data, template)
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write(rendered)
+        return output_path
+
+    def _render_pdf(self, data: ReportData, template: ReportTemplate, output_path: str) -> str:
+        """HTML → PDF via WeasyPrint when it's installed; fall back to a
+        printable HTML file otherwise.
+
+        WeasyPrint is heavy (pulls cairo + pango) and we don't want to
+        force every install to carry it. When it's missing, this writes
+        the rendered HTML to ``output_path`` and surfaces a warning in
+        the file's first comment so the analyst can open it in a
+        browser and print-to-PDF themselves.
+        """
+        rendered = self._render_to_string(data, template)
+        try:
+            from weasyprint import HTML  # type: ignore[import-untyped]
+        except ImportError:
+            fallback = output_path
+            if fallback.endswith(".pdf"):
+                fallback = fallback[:-4] + ".html"
+            with open(fallback, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "<!-- weasyprint not installed; saved as HTML. "
+                    "pip install weasyprint to enable real PDF output. -->\n"
+                )
+                fh.write(rendered)
+            return fallback
+        HTML(string=rendered).write_pdf(output_path)
+        return output_path
+
+    def _render_to_string(self, data: ReportData, template: ReportTemplate) -> str:
+        """Shared Jinja render — both HTML and PDF paths funnel through here."""
+        from datetime import UTC, datetime
+
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+        templates_dir = (
+            __import__("pathlib").Path(__file__).resolve().parent / "templates"
+        )
+        env = Environment(
+            loader=FileSystemLoader(str(templates_dir)),
+            autoescape=select_autoescape(["html", "xml", "j2"]),
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
+        env.globals["sev_chip_class"] = _sev_chip_class
+
+        tpl = env.get_template("report.html.j2")
+        return tpl.render(
+            template=template.value,
+            template_label=_template_label(template),
+            project=data.project,
+            risk_score=data.risk_score,
+            executive_summary=data.executive_summary,
+            findings_by_severity=data.findings_by_severity,
+            findings_by_category=data.findings_by_category,
+            mitigation_playbook=data.mitigation_playbook,
+            all_findings=data.all_findings,
+            stats=data.stats,
+            masvs_matrix=_build_masvs_matrix(data.all_findings),
+            generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        )
+
+
+def _sev_chip_class(severity) -> str:  # type: ignore[no-untyped-def]
+    """Map a Severity (or str) to the CSS chip class — short names so
+    the inline CSS in the template stays compact."""
+    value = severity.value if hasattr(severity, "value") else str(severity)
+    return {
+        "critical": "crit",
+        "high":     "high",
+        "medium":   "med",
+        "low":      "low",
+        "info":     "info",
+    }.get(value, "info")
+
+
+def _template_label(template: ReportTemplate) -> str:
+    return {
+        ReportTemplate.EXECUTIVE:    "EXECUTIVE",
+        ReportTemplate.TECHNICAL:    "TECHNICAL",
+        ReportTemplate.OWASP_MATRIX: "OWASP MASVS MATRIX",
+        ReportTemplate.DIFF:         "DIFF",
+    }.get(template, template.value.upper())
+
+
+def _build_masvs_matrix(findings: list[Finding]) -> list[dict]:
+    """Aggregate findings by MASVS tag for the matrix template."""
+    by_tag: dict[str, list[Finding]] = {}
+    for f in findings:
+        if not f.masvs:
+            continue
+        by_tag.setdefault(f.masvs, []).append(f)
+    order = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO]
+    rows: list[dict] = []
+    for tag, fs in sorted(by_tag.items()):
+        highest = min(fs, key=lambda f: order.index(f.severity)).severity.value
+        rows.append({"tag": tag, "count": len(fs), "highest": highest})
+    return rows

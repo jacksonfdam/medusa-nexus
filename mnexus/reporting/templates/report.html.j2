@@ -1,0 +1,175 @@
+{# MEDUSA NEXUS report template — single file, inline CSS so the
+   rendered HTML works as a standalone download (no external assets).
+   Used for both HTML and (via WeasyPrint) PDF output. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>MEDUSA NEXUS — {{ template_label }} — {{ project.name }}</title>
+<style>
+  :root {
+    --bg: #060809;
+    --bg-panel: #0a1417;
+    --bg-accent: rgba(5, 46, 22, 0.25);
+    --border: #00ffff44;
+    --border-accent: #22de8055;
+    --cyan: #00ffff;
+    --acid: #22de80;
+    --magenta: #e879f9;
+    --muted: #6c8590;
+    --sev-crit: #ff3860;
+    --sev-high: #ff9500;
+    --sev-med: #f1c40f;
+    --sev-low: #22de80;
+    --sev-info: #00ffff99;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Courier Prime", "Courier New", monospace;
+    background: var(--bg);
+    color: var(--cyan);
+    margin: 0; padding: 28px;
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  h1, h2, h3 { letter-spacing: 2px; color: var(--cyan); margin: 24px 0 8px; }
+  h1 { font-size: 28px; border-bottom: 1px solid var(--cyan); padding-bottom: 8px; }
+  h2 { font-size: 18px; color: var(--magenta); border-bottom: 1px dashed var(--border); padding-bottom: 4px; }
+  h3 { font-size: 14px; color: var(--cyan); }
+  .meta {
+    display: grid; grid-template-columns: max-content 1fr;
+    gap: 4px 14px; margin-bottom: 16px;
+    background: var(--bg-panel); border: 1px solid var(--border);
+    padding: 10px 14px;
+  }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; color: var(--cyan); }
+  .panel {
+    background: var(--bg-panel); border: 1px solid var(--border);
+    padding: 12px 16px; margin: 12px 0;
+  }
+  .panel-accent { border-color: var(--border-accent); background: var(--bg-accent); }
+  .severity-row { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+  .chip {
+    display: inline-block; padding: 1px 8px; font-size: 10px;
+    letter-spacing: 1px; border-radius: 2px; font-weight: bold;
+  }
+  .chip-crit { color: var(--sev-crit); border: 1px solid var(--sev-crit); }
+  .chip-high { color: var(--sev-high); border: 1px solid var(--sev-high); }
+  .chip-med  { color: var(--sev-med);  border: 1px solid var(--sev-med); }
+  .chip-low  { color: var(--sev-low);  border: 1px solid var(--sev-low); }
+  .chip-info { color: var(--sev-info); border: 1px solid var(--sev-info); }
+  .finding { margin-bottom: 16px; padding: 10px 14px; background: var(--bg-panel); border: 1px solid var(--border); }
+  .finding-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .finding-id { color: var(--muted); font-size: 10px; }
+  .finding-title { color: var(--cyan); font-weight: bold; flex: 1; }
+  .finding-tags { color: var(--muted); font-size: 10px; }
+  .finding-evidence { margin-top: 6px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+  .mitigation {
+    margin-top: 8px; padding: 8px 12px;
+    background: var(--bg-accent); border: 1px solid var(--border-accent);
+    border-left-width: 3px; color: var(--acid); white-space: pre-wrap;
+  }
+  .mitigation::before {
+    content: "MITIGATION";
+    display: block; font-size: 10px; letter-spacing: 2px;
+    color: var(--magenta); margin-bottom: 4px;
+  }
+  .footer { color: var(--muted); font-size: 10px; margin-top: 32px; text-align: center; border-top: 1px dashed var(--border); padding-top: 12px; }
+  .matrix { width: 100%; border-collapse: collapse; }
+  .matrix th, .matrix td { padding: 6px 8px; border: 1px solid var(--border); font-size: 11px; text-align: left; }
+  .matrix th { background: var(--bg-accent); color: var(--magenta); letter-spacing: 1px; }
+  @media print { body { background: white; color: #111; } h2 { color: #555; } .panel, .finding { background: #fafafa; border-color: #ccc; } }
+</style>
+</head>
+<body>
+
+<h1>🔱 MEDUSA NEXUS — {{ template_label }}</h1>
+
+<dl class="meta">
+  <dt>project</dt>     <dd>{{ project.name }}</dd>
+  <dt>package</dt>     <dd>{{ project.package_name }}</dd>
+  <dt>version</dt>     <dd>{{ project.version_name }}</dd>
+  <dt>sha-256</dt>     <dd>{{ project.apk_sha256 }}</dd>
+  <dt>risk score</dt>  <dd><strong>{{ risk_score }} / 100</strong></dd>
+  <dt>generated</dt>   <dd>{{ generated_at }}</dd>
+</dl>
+
+<h2>// Executive summary</h2>
+<div class="panel">{{ executive_summary }}</div>
+
+<h2>// Findings by severity</h2>
+<div class="panel">
+  {% for sev, n in findings_by_severity.items() %}
+    <div class="severity-row">
+      <span class="chip chip-{{ sev_chip_class(sev) }}">{{ sev|upper }}</span>
+      <span style="color: var(--muted)">×</span>
+      <span>{{ n }}</span>
+    </div>
+  {% endfor %}
+</div>
+
+{# OWASP MASVS matrix only renders for the matrix template #}
+{% if template == "owasp-matrix" %}
+<h2>// OWASP MASVS coverage</h2>
+<div class="panel">
+  {% if not masvs_matrix %}
+    <div style="color: var(--muted)">no MASVS-tagged findings — nothing to plot.</div>
+  {% else %}
+    <table class="matrix">
+      <thead><tr><th>MASVS</th><th>findings</th><th>highest severity</th></tr></thead>
+      <tbody>
+        {% for row in masvs_matrix %}
+        <tr>
+          <td>{{ row.tag }}</td>
+          <td>{{ row.count }}</td>
+          <td><span class="chip chip-{{ sev_chip_class(row.highest) }}">{{ row.highest|upper }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>
+{% endif %}
+
+<h2>// Mitigation Playbook</h2>
+<div class="panel">
+  Every finding ships with remediation. If a block below is empty, the build is broken.
+</div>
+
+{% for entry in mitigation_playbook %}
+<div class="finding">
+  <div class="finding-head">
+    <span class="chip chip-{{ sev_chip_class(entry.severity) }}">{{ entry.severity|upper }}</span>
+    <span class="finding-id">{{ entry.finding_id }}</span>
+    <span class="finding-title">{{ entry.title }}</span>
+    <span class="finding-tags">{{ entry.category }}</span>
+  </div>
+  <div class="mitigation">{{ entry.remediation }}</div>
+</div>
+{% endfor %}
+
+{# Full findings dump only in technical + diff #}
+{% if template in ("technical", "diff") %}
+<h2>// Findings</h2>
+{% for f in all_findings %}
+<div class="finding">
+  <div class="finding-head">
+    <span class="chip chip-{{ sev_chip_class(f.severity) }}">{{ f.severity|upper }}</span>
+    <span class="finding-id">{{ f.id }}</span>
+    <span class="finding-title">{{ f.title }}</span>
+    <span class="finding-tags">[{{ f.source_engine }}] · {{ f.category }}{% if f.cwe_id %} · {{ f.cwe_id }}{% endif %}{% if f.masvs %} · {{ f.masvs }}{% endif %}</span>
+  </div>
+  {% if f.description %}<div style="margin-top: 4px;">{{ f.description }}</div>{% endif %}
+  {% if f.evidence %}<pre class="finding-evidence">{{ f.evidence }}</pre>{% endif %}
+  {% if f.remediation %}<div class="mitigation">{{ f.remediation }}</div>{% endif %}
+</div>
+{% endfor %}
+{% endif %}
+
+<div class="footer">
+  generated by MEDUSA NEXUS · template={{ template }} · {{ stats.total }} finding(s) · every head sees a different angle
+</div>
+
+</body>
+</html>
