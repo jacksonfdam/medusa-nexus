@@ -12,8 +12,8 @@ it twice never breaks anything.
 ## TL;DR
 
 ```bash
-git clone https://github.com/jackson-mafra/MedusaNexus.git
-cd MedusaNexus
+git clone https://github.com/jacksonfdam/medusa-nexus.git
+cd medusa-nexus
 scripts/setup.sh
 source ~/.mnexus/env.sh
 mnexus doctor    # confirms every engine landed
@@ -65,8 +65,8 @@ xcode-select --install
 brew install python@3.13 docker openjdk@17 adb
 
 # 2. Clone + run the installer.
-git clone https://github.com/jackson-mafra/MedusaNexus.git
-cd MedusaNexus
+git clone https://github.com/jacksonfdam/medusa-nexus.git
+cd medusa-nexus
 scripts/setup.sh
 
 # 3. Wire env vars into your shell rc (the installer prints the line).
@@ -88,8 +88,8 @@ sudo apt install -y python3.11 python3.11-venv python3-pip \
                     docker.io openjdk-17-jdk adb git curl
 
 # 2. Clone + run the installer.
-git clone https://github.com/jackson-mafra/MedusaNexus.git
-cd MedusaNexus
+git clone https://github.com/jacksonfdam/medusa-nexus.git
+cd medusa-nexus
 scripts/setup.sh
 
 # 3. Wire env vars.
@@ -167,7 +167,7 @@ export MNEXUS_CAIDO_API_KEY=cai_…
 ## Updating
 
 ```bash
-cd MedusaNexus
+cd medusa-nexus
 git pull
 scripts/setup.sh        # idempotent — only re-installs what changed
 ```

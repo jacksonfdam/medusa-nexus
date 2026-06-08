@@ -168,7 +168,7 @@ def to_caido(project: Project) -> str:
                     "method": "GET",
                     "url": url,
                     "headers": [
-                        {"name": "User-Agent", "value": "MedusaNexus/0.1 (+https://github.com/jacksonmafra-umain/medusa-nexus)"},
+                        {"name": "User-Agent", "value": "MedusaNexus/0.1 (+https://github.com/jacksonfdam/medusa-nexus)"},
                         {"name": "X-Mnexus-Project", "value": project.id},
                     ],
                     "body": None,

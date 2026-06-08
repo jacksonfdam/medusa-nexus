@@ -89,7 +89,7 @@ Code:
 The shortest path:
 
 ```bash
-git clone https://github.com/jacksonmafra-umain/medusa-nexus.git
+git clone https://github.com/jacksonfdam/medusa-nexus.git
 cd medusa-nexus
 ./scripts/dev.sh             # bootstrap → doctor → server (auto-reload + browser open)
 ```

@@ -67,8 +67,8 @@ dev = [
 mnexus = "mnexus.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jacksonmafra-umain/medusa-nexus"
-Issues = "https://github.com/jacksonmafra-umain/medusa-nexus/issues"
+Homepage = "https://github.com/jacksonfdam/medusa-nexus"
+Issues = "https://github.com/jacksonfdam/medusa-nexus/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mnexus"]

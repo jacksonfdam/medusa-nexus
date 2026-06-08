@@ -1295,7 +1295,7 @@ function view_ios_decrypt() {
           </div>
           <div class="muted small">
             <a href="#/help" onclick="event.preventDefault();window.open('/docs#/v1/ios/decrypt','_blank')">API reference</a>
-            · <a href="https://github.com/jacksonmafra-umain/medusa-nexus/blob/main/docs/IOS.md" target="_blank">full iOS workflow doc</a>
+            · <a href="https://github.com/jacksonfdam/medusa-nexus/blob/main/docs/IOS.md" target="_blank">full iOS workflow doc</a>
           </div>
 
           <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
@@ -1814,7 +1814,7 @@ function view_project_runtime(ctx) {
                 <div class="muted small">
                   Mach-O byte patcher. Reads the file offset from your disassembler
                   (Ghidra's Offset column / Hopper's File offset) and overwrites bytes.
-                  See <a href="https://github.com/jacksonmafra-umain/medusa-nexus/blob/main/docs/IOS.md" target="_blank">docs/IOS.md</a> for the workflow.
+                  See <a href="https://github.com/jacksonfdam/medusa-nexus/blob/main/docs/IOS.md" target="_blank">docs/IOS.md</a> for the workflow.
                 </div>
                 <div class="row small" style="gap:6px;align-items:center">
                   <select id="rt-ipa-patch-kind" class="input t-mono" style="min-width:240px">

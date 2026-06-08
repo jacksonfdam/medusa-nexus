@@ -15,7 +15,7 @@ import { getPageMap } from 'nextra/page-map';
 import 'nextra-theme-docs/style.css';
 import '../styles/globals.css';
 
-const REPO = 'https://github.com/jackson-mafra/MedusaNexus';
+const REPO = 'https://github.com/jacksonfdam/medusa-nexus';
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://medusanexus.dev'),
