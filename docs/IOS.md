@@ -40,7 +40,15 @@ curl -s http://localhost:8765/v1/ios/decrypt/status
 
 ## Step 1 — Decrypt the IPA off a JB device
 
-Use the REPL:
+Three ways to drive it:
+
+**Web UI** — open `/#/ios/decrypt` (linked from the main Intake screen).
+Status badge at the top reports which decryptor is installed (bagbak
+preferred); form fields for bundle_id / device_id / timeout / ingest;
+result strip shows the IPA path + warnings + auto-routes to the new
+project's Overview when ingest=true.
+
+**REPL**:
 
 ```
 mnexus> /decrypt-ios com.target.bank.test
@@ -50,7 +58,7 @@ mnexus> /decrypt-ios com.target.bank.test
   → ingested as PRJ-3F8B2A91
 ```
 
-…or hit the endpoint directly:
+**Direct API**:
 
 ```http
 POST /v1/ios/decrypt
@@ -137,11 +145,22 @@ the JB verdict — usually called something like `_isJailbroken`,
 `-[BankSecurity isCompromised]`, `-[RootCheck check]`. Read off the
 **file offset** (Ghidra's Offset column, not the virtual address).
 
+Three ways:
+
+**Web UI** — open the project's Runtime tab. For iOS projects the
+"PATCH IPA" panel appears below the APK patcher. Pick patch kind from
+the dropdown, paste the offset, click `[ + ADD ]` to queue more, then
+`[ ▶ PATCH IPA ]` dispatches all queued patches in one call. The
+output strip prints `previous_hex` per applied patch — keep those
+as your rollback artefacts.
+
+**REPL**:
+
 ```
 mnexus> /patch ipa return_zero_at_offset:0x100123456
 ```
 
-Or via API:
+**Direct API**:
 
 ```http
 POST /v1/projects/PRJ-3F8B2A91/ios/patch
