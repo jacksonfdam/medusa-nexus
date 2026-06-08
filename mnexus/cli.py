@@ -1946,6 +1946,22 @@ def dev_cmd(ctx: click.Context, host: str, port: int) -> None:
         console.print("\n[dim]bye 🔱[/dim]")
 
 
+@cli.command(name="mcp-serve",
+             help="Run as an MCP (Model Context Protocol) stdio server — wire MedusaNexus into Claude Desktop / Cursor / Zed.")
+@click.option("--api-base", default="", help="Override the local Nexus API base URL (default: http://127.0.0.1:8765 or $MNEXUS_API_BASE).")
+def mcp_serve_cmd(api_base: str) -> None:
+    """Speak JSON-RPC 2.0 over stdio so an AI assistant can drive Nexus.
+
+    Tools exposed: list_projects · get_project · list_findings · get_finding ·
+    list_recipes · decode_android_flag · manifest_diff · findings_diff ·
+    firebase_probe · doctor. See docs/MCP.md for the full wire-up.
+    """
+    if api_base:
+        os.environ["MNEXUS_API_BASE"] = api_base
+    from mnexus.mcp_server import serve_stdio
+    sys.exit(serve_stdio())
+
+
 @cli.command(name="vphone", help="super-tart-vphone control (research-only).",
              context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 @click.argument("verb", required=False, default="list",
