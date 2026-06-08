@@ -111,6 +111,10 @@ class FridaSession:
     _loop: asyncio.AbstractEventLoop | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
+    # MemoryOps facade — populated after _attach_sync loads the tooling
+    # script. None when tooling failed to load (rare; we log + continue).
+    mem: Any = None
+
     # ─── public API ──────────────────────────────────────────────────
 
     @classmethod
@@ -206,7 +210,13 @@ class FridaSession:
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe summary the API returns on start/stop + the
-        polling /dynamic/events endpoint."""
+        polling /dynamic/events endpoint.
+
+        ``scripts`` excludes the internal Memory Inspector tooling
+        script — that's infra, not a recipe the analyst loaded. The
+        ``tooling`` field reports whether ``session.mem`` is wired so
+        the UI can disable the Memory Inspector panel when it isn't.
+        """
         return {
             "session_id": self.session_id,
             "project_id": self.project_id,
@@ -216,7 +226,8 @@ class FridaSession:
             "started_at": self.started_at,
             "pid": self.pid,
             "device": self.device_id,
-            "scripts": [s.name for s in self.scripts],
+            "scripts": [s.name for s in self.scripts if s.name != "__nexus_tooling__"],
+            "tooling": self.mem is not None,
             "error": self.error,
             "log": list(self.log[-100:]),  # cap so the response stays bounded
         }
@@ -274,6 +285,26 @@ class FridaSession:
             handle.load()
             self.scripts.append(LoadedScript(name=name, source=source, handle=handle))
             self._stamp(channel="nexus", line=f"[NEXUS] loaded script · {name}")
+
+        # Tooling script — exposes rpc.exports for Memory Inspector
+        # operations. NOT wrapped in IIFE (rpc.exports must be at module
+        # scope). Failure to load doesn't break the session — the
+        # Memory Inspector panel will surface 'tooling unavailable'.
+        try:
+            from mnexus.runtime.memory_ops import MemoryOps, TOOLING_SCRIPT_SOURCE
+            tooling_handle = self._session.create_script(TOOLING_SCRIPT_SOURCE)
+            tooling_handle.on("message", self._make_on_message("__nexus_tooling__"))
+            tooling_handle.load()
+            self.scripts.append(LoadedScript(
+                name="__nexus_tooling__",
+                source=TOOLING_SCRIPT_SOURCE,
+                handle=tooling_handle,
+            ))
+            self.mem = MemoryOps(tooling_handle)
+            self._stamp(channel="nexus", line="[NEXUS] memory tooling online — rpc.exports ready")
+        except Exception as exc:  # noqa: BLE001 — tooling is best-effort
+            log.warning("memory tooling failed to load: %s", exc)
+            self._stamp(channel="nexus", line=f"[NEXUS][WARN] memory tooling unavailable: {exc}")
 
         if self._own_pid:
             self._device.resume(self.pid)

@@ -149,9 +149,12 @@ async def test_session_start_spawns_attaches_loads_and_resumes(fake_frida) -> No
     assert device.spawned == ["com.target.app"]
     assert device.attached == [12345]
     assert device.resumed == [12345]
-    # The single script was loaded.
-    assert len(sess.scripts) == 1
-    assert sess.scripts[0].handle.loaded is True
+    # The single user script was loaded — plus the internal Memory
+    # Inspector tooling script (filtered out of the public 'scripts'
+    # list in to_dict, but present in sess.scripts).
+    user_scripts = [s for s in sess.scripts if s.name != "__nexus_tooling__"]
+    assert len(user_scripts) == 1
+    assert user_scripts[0].handle.loaded is True
     # And the session is in the registry.
     assert fs.session_registry[sess.session_id] is sess
 
