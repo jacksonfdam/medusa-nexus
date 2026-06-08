@@ -4325,6 +4325,96 @@ def _safe_put(queue: asyncio.Queue, item: Any) -> None:
             pass
 
 
+# ─── IPA Decryptor (Bloco 2) ─────────────────────────────────────────────
+
+
+@app.post("/v1/ios/decrypt")
+async def ios_decrypt(
+    bundle_id: str = Form(...),
+    device_id: str | None = Form(default=None),
+    ingest: bool = Form(default=True),
+    timeout_s: int = Form(default=180),
+) -> dict[str, Any]:
+    """Decrypt the FairPlay-protected IPA for ``bundle_id`` off a
+    connected JB device, then (optionally) auto-ingest as a Project.
+
+    Args:
+        bundle_id: e.g. ``com.target.bank.test``.
+        device_id: forwarded to bagbak when present; ignored by
+                   frida-ios-dump (which uses the first USB device).
+        ingest:    True (default) → after decrypt, run the IPA through
+                   the regular ingest pipeline. False → return only
+                   the decrypted IPA path.
+        timeout_s: subprocess timeout. Big apps may need > 180s on
+                   first decrypt.
+
+    Errors:
+      * 503 — no IPA decryptor on PATH (bagbak / frida-ios-dump).
+      * 500 — tool ran but produced no IPA; log included in detail.
+      * 504 — subprocess hit ``timeout_s``.
+    """
+    from mnexus.runtime.ipa_decryptor import (
+        IPADecryptor,
+        IPADecryptorError,
+        IPADecryptorMissing,
+    )
+
+    nexus: MedusaNexus = app.state.nexus
+    decryptor = IPADecryptor(nexus.config)
+    try:
+        result = await decryptor.decrypt(
+            bundle_id, device_id=device_id, timeout_s=timeout_s,
+        )
+    except IPADecryptorMissing as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except asyncio.TimeoutError as exc:  # rare — IPADecryptor turns it into IPADecryptorError
+        raise HTTPException(504, str(exc)) from exc
+    except IPADecryptorError as exc:
+        # Surface a 504 specifically when the message mentions the timeout,
+        # so the UI can render a 'retry with a higher budget' hint.
+        if "past" in str(exc) and "budget" in str(exc):
+            raise HTTPException(504, str(exc)) from exc
+        raise HTTPException(500, str(exc)) from exc
+
+    response: dict[str, Any] = result.model_dump()
+    if not ingest:
+        return response
+
+    # Auto-ingest the decrypted IPA as a Project. Reuses the existing
+    # _ingest_upload logic by feeding the file through ingest_apk's
+    # iOS sibling.
+    try:
+        project = await nexus._ingest_ipa(  # noqa: SLF001 — same call upload_ipa makes
+            result.ipa_path,
+            package_name=bundle_id,
+            version="unknown",
+        )
+        response["project_id"] = project.id
+        response["package"] = project.package_name
+        response["version"] = project.version_name
+    except Exception as exc:  # noqa: BLE001
+        response["ingest_error"] = f"{exc.__class__.__name__}: {exc}"
+    return response
+
+
+@app.get("/v1/ios/decrypt/status")
+async def ios_decrypt_status() -> dict[str, Any]:
+    """Doctor-style status for the decryptor — is bagbak or
+    frida-ios-dump installed?"""
+    from mnexus.runtime.ipa_decryptor import IPADecryptor
+    nexus: MedusaNexus = app.state.nexus
+    tool = IPADecryptor(nexus.config).detect()
+    return {
+        "available": tool is not None,
+        "tool": tool[0] if tool else None,
+        "path": tool[1] if tool else None,
+        "install_hint": (
+            "npm install -g bagbak  (preferred)"
+            if tool is None else None
+        ),
+    }
+
+
 # ─── Memory Inspector (Bloco 3) ─────────────────────────────────────────
 #
 # Each endpoint is scoped to a live FridaSession by session_id. The
