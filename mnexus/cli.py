@@ -105,6 +105,10 @@ class ReplState:
         self.config = config
         self.nexus = MedusaNexus(config)
         self.active_project_id: str | None = None
+        # Frida session bound by /dynamic start; cleared by /dynamic stop.
+        # The Memory Inspector commands read this to address the right
+        # session.
+        self.active_session_id: str | None = None
         self.server_proc: subprocess.Popen[bytes] | None = None
         self.server_host = "127.0.0.1"
         self.server_port = 8765
@@ -133,6 +137,13 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/devices",         "List ADB-connected devices."),
         ("/adb <args>",      "Run a one-shot adb command (recorded in the audit log)."),
         ("/vphone <verb>",   "super-tart-vphone: list · info · start · stop · ssh · install · status."),
+        ("/dynamic <verb>",  "Frida session: start · stop · status · stream (auto-uses active project)."),
+        ("/memory <verb>",   "Live memory: scan · read · write · modules (needs an active session)."),
+        ("/patch apk|ipa",   "Byte-patch the active project's APK/IPA + re-sign."),
+        ("/decrypt-ios <id>","Decrypt App Store IPA via bagbak / frida-ios-dump + auto-ingest."),
+        ("/diff manifest|findings", "Diff the active project against the latest prior scan."),
+        ("/pipeline list|run", "List built-in pipelines or run one against the active project."),
+        ("/recipes [filter]","Browse /v1/recipes catalogue (built-ins + Medusa modules)."),
         ("/clear",           "Clear the screen."),
         ("/exit, /quit",     "Leave the REPL."),
     ]
@@ -1002,6 +1013,514 @@ def _exit(state: ReplState, args: list[str]) -> None:
     raise EOFError
 
 
+# ─── HTTP helpers — REPL ↔ local server ────────────────────────────────
+
+def _api_url(state: ReplState, path: str) -> str:
+    return f"http://{state.server_host}:{state.server_port}{path}"
+
+
+def _api_request(state: ReplState, method: str, path: str, *, body: dict | None = None, form: dict | None = None) -> tuple[int, dict | str]:
+    """Hit the local server over urllib (no httpx dep in cli.py).
+
+    Returns ``(status_code, parsed_json_or_text)``. Errors land as
+    ``(0, error_message)`` so callers can branch on status==0.
+    """
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    headers = {"Accept": "application/json"}
+    data: bytes | None = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    elif form is not None:
+        data = urllib.parse.urlencode(form).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+
+    req = urllib.request.Request(_api_url(state, path), data=data, headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            payload = r.read().decode("utf-8", errors="replace")
+            try:
+                return r.status, json.loads(payload)
+            except json.JSONDecodeError:
+                return r.status, payload
+    except urllib.error.HTTPError as exc:
+        payload = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        try:
+            return exc.code, json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            return exc.code, payload or str(exc)
+    except urllib.error.URLError as exc:
+        return 0, f"server not reachable on {state.server_host}:{state.server_port} — run /serve first ({exc})"
+
+
+def _require_server(state: ReplState) -> bool:
+    """REPL commands that need the API server check this first."""
+    if state.server_proc is None or state.server_proc.poll() is not None:
+        # The server may have been started outside the REPL — try a probe.
+        status, _ = _api_request(state, "GET", "/v1/health")
+        if status != 200:
+            console.print(
+                "[red]no server running[/red] — start it first with "
+                "[bold]/serve[/bold] or [bold]mnexus serve[/bold]"
+            )
+            return False
+    return True
+
+
+# ─── /dynamic — Frida session control ──────────────────────────────────
+
+def _dynamic(state: ReplState, args: list[str]) -> None:
+    """`/dynamic start|stop|stream|status [hooks=…] [recipes=…]` — drive a Frida session.
+
+    The session lives in the running server; the REPL is a thin client.
+    Project context comes from /use; pass --project to override.
+    """
+    if not args or args[0] in ("-h", "--help"):
+        console.print(
+            "[red]usage:[/red] /dynamic <start|stop|stream|status> "
+            "[--project <id>] [--hooks <csv>] [--recipes <csv>] [--no-spawn]"
+        )
+        return
+    verb = args[0]
+    project_id = state.active_project_id
+    hooks = ""
+    recipes = ""
+    spawn = True
+    it = iter(args[1:])
+    for tok in it:
+        if tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--hooks":
+            hooks = next(it, "") or ""
+        elif tok == "--recipes":
+            recipes = next(it, "") or ""
+        elif tok == "--no-spawn":
+            spawn = False
+
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project.")
+        return
+    if not _require_server(state):
+        return
+
+    if verb == "start":
+        status, body = _api_request(
+            state, "POST", f"/v1/projects/{project_id}/dynamic/start",
+            form={"hooks": hooks, "recipes": recipes, "spawn": "true" if spawn else "false"},
+        )
+        if status != 200:
+            console.print(f"[red]start failed[/red] [{status}] {body}")
+            return
+        sid = body.get("session_id")
+        state.active_session_id = sid
+        console.print(
+            f"[green]✓ attached[/green] · session [bold cyan]{sid}[/bold cyan] · "
+            f"pid {body.get('pid', '?')} · {len(body.get('scripts', []))} script(s) · "
+            f"tooling {'on' if body.get('tooling') else 'off'}"
+        )
+        console.print(f"[dim]stream URL: {_api_url(state, body.get('stream_url', ''))}[/dim]")
+
+    elif verb == "stop":
+        sid = state.active_session_id
+        if not sid:
+            console.print("[red]no active session[/red] — /dynamic start first")
+            return
+        status, body = _api_request(state, "POST", f"/v1/projects/{project_id}/dynamic/stop", form={"session_id": sid})
+        if status != 200:
+            console.print(f"[red]stop failed[/red] [{status}] {body}")
+            return
+        state.active_session_id = None
+        console.print(f"[yellow]✓ detached[/yellow] · session {sid}")
+
+    elif verb == "status":
+        sid = state.active_session_id
+        if not sid:
+            console.print("[dim]no active session — /dynamic start first[/dim]")
+            return
+        status, body = _api_request(state, "GET", f"/v1/projects/{project_id}/dynamic/events?session_id={sid}")
+        if status != 200:
+            console.print(f"[red]status failed[/red] [{status}] {body}")
+            return
+        console.print(
+            f"[cyan]state[/cyan]={body.get('state')} · "
+            f"[cyan]pid[/cyan]={body.get('pid')} · "
+            f"[cyan]scripts[/cyan]={len(body.get('scripts', []))} · "
+            f"[cyan]log lines[/cyan]={len(body.get('log', []))}"
+        )
+
+    elif verb == "stream":
+        sid = state.active_session_id
+        if not sid:
+            console.print("[red]no active session[/red] — /dynamic start first")
+            return
+        url = _api_url(state, f"/v1/projects/{project_id}/dynamic/stream?session_id={sid}")
+        console.print(f"[dim]curl -N '{url}'[/dim]")
+        console.print("[yellow]REPL doesn't stream SSE; use curl/EventSource (URL above) or the web UI Dynamic tab.[/yellow]")
+
+    else:
+        console.print(f"[red]unknown verb:[/red] {verb} — try start|stop|stream|status")
+
+
+# ─── /memory — live scan/read/write of an attached session ─────────────
+
+def _memory(state: ReplState, args: list[str]) -> None:
+    """`/memory scan|read|write|modules <args…>` — Memory Inspector.
+
+    Needs an active dynamic session (/dynamic start). Identifies the
+    session via state.active_session_id.
+    """
+    if not args or args[0] in ("-h", "--help"):
+        console.print(
+            "[red]usage:[/red]\n"
+            "  /memory modules\n"
+            "  /memory scan <pattern> [--module <name>] [--max <N>]\n"
+            "  /memory read <address> [<size=64>]\n"
+            "  /memory write <address> <hex bytes>"
+        )
+        return
+    if not _require_server(state):
+        return
+    sid = state.active_session_id
+    if not sid:
+        console.print("[red]no active session[/red] — /dynamic start first")
+        return
+    verb = args[0]
+    base = f"/v1/dynamic/sessions/{sid}/memory"
+
+    if verb == "modules":
+        status, body = _api_request(state, "GET", f"{base}/modules")
+        if status != 200:
+            console.print(f"[red]modules failed[/red] [{status}] {body}"); return
+        for m in (body.get("modules") or [])[:50]:
+            console.print(f"  [cyan]{m['name']:<32}[/cyan] {m['base']}  +{m['size']}B")
+        if len(body.get("modules") or []) > 50:
+            console.print(f"[dim]…+{len(body['modules']) - 50} more (use /v1/dynamic/sessions/{sid}/memory/modules)[/dim]")
+
+    elif verb == "scan":
+        if len(args) < 2:
+            console.print("[red]usage:[/red] /memory scan <pattern> [--module <name>] [--max <N>]")
+            return
+        pattern = args[1]
+        module: str | None = None
+        max_results = 100
+        it = iter(args[2:])
+        for tok in it:
+            if tok == "--module":
+                module = next(it, "")
+            elif tok == "--max":
+                try: max_results = int(next(it, "100"))
+                except ValueError: pass
+        status, body = _api_request(
+            state, "POST", f"{base}/scan",
+            body={"pattern": pattern, "module": module, "max_results": max_results},
+        )
+        if status != 200:
+            console.print(f"[red]scan failed[/red] [{status}] {body}"); return
+        results = body.get("results", [])
+        console.print(f"[cyan]{len(results)} hit(s)[/cyan] · scanned {body.get('ranges_scanned')} range(s){' (truncated)' if body.get('truncated') else ''}")
+        for r in results[:25]:
+            console.print(f"  [green]{r['address']}[/green]  {r['range_protection']}  {r['range_base']}+{r['range_size']}B")
+
+    elif verb == "read":
+        if len(args) < 2:
+            console.print("[red]usage:[/red] /memory read <address> [<size=64>]")
+            return
+        address = args[1]
+        size = int(args[2]) if len(args) > 2 else 64
+        status, body = _api_request(state, "POST", f"{base}/read", body={"address": address, "size": size})
+        if status != 200:
+            console.print(f"[red]read failed[/red] [{status}] {body}"); return
+        hex_str = body.get("hex", "")
+        # xxd-style 16 bytes per row with ASCII gutter.
+        rows = []
+        bytes_per_row = 16
+        toks = hex_str.split()
+        for i in range(0, len(toks), bytes_per_row):
+            row = toks[i:i + bytes_per_row]
+            ascii_gutter = "".join(
+                (chr(int(b, 16)) if 0x20 <= int(b, 16) < 0x7f else ".")
+                for b in row
+            )
+            rows.append(f"  {' '.join(row).ljust(bytes_per_row * 3)}  {ascii_gutter}")
+        console.print(f"[cyan]{address}[/cyan] · {size}B")
+        for r in rows:
+            console.print(r)
+
+    elif verb == "write":
+        if len(args) < 3:
+            console.print("[red]usage:[/red] /memory write <address> <hex>  (space-separated bytes)")
+            return
+        address = args[1]
+        hex_bytes = " ".join(args[2:])
+        confirm = Prompt.ask(
+            f"[yellow]overwrite {len(hex_bytes.split())} byte(s) at {address}?[/yellow] this can crash the target",
+            choices=["y", "n"], default="n",
+        )
+        if confirm != "y":
+            console.print("[dim]aborted[/dim]"); return
+        status, body = _api_request(state, "POST", f"{base}/write", body={"address": address, "hex": hex_bytes})
+        if status != 200:
+            console.print(f"[red]write failed[/red] [{status}] {body}"); return
+        console.print(
+            f"[green]✓ wrote {body.get('written')} byte(s)[/green] at {address}\n"
+            f"  [dim]rollback: {body.get('previous_hex', '?')}[/dim]"
+        )
+
+    else:
+        console.print(f"[red]unknown verb:[/red] {verb} — try modules|scan|read|write")
+
+
+# ─── /patch — APK / IPA byte patcher ──────────────────────────────────
+
+def _patch(state: ReplState, args: list[str]) -> None:
+    """`/patch apk <names…> [--project <id>]` — APKPatcher.
+    `/patch ipa <name>:<offset> [<name>:<offset> …] [--project <id>]` — IPAPatcher.
+
+    APK patches: debuggable | cleartext_traffic | user_ca_trust.
+    IPA patches: return_zero_at_offset:<offset> | nop_at_offset:<offset>[:<count>]
+    """
+    if not args or args[0] in ("-h", "--help"):
+        console.print(
+            "[red]usage:[/red]\n"
+            "  /patch apk <patch>[,<patch>] [--project <id>] [--force]\n"
+            "  /patch ipa <name>:<offset>[:<count>] [<more>…] [--project <id>]\n"
+            "  apk patches: debuggable, cleartext_traffic, user_ca_trust\n"
+            "  ipa patches: return_zero_at_offset:<offset>, nop_at_offset:<offset>:<count>"
+        )
+        return
+    kind = args[0]
+    project_id = state.active_project_id
+    force = False
+    payload_args: list[str] = []
+    it = iter(args[1:])
+    for tok in it:
+        if tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--force":
+            force = True
+        else:
+            payload_args.append(tok)
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+    if not _require_server(state):
+        return
+
+    if kind == "apk":
+        if not payload_args:
+            console.print("[red]usage:[/red] /patch apk <debuggable,user_ca_trust,…>"); return
+        patches = payload_args[0]
+        status, body = _api_request(
+            state, "POST", f"/v1/projects/{project_id}/patch",
+            form={"patches": patches, "force": "true" if force else "false"},
+        )
+        if status != 200:
+            console.print(f"[red]patch failed[/red] [{status}] {body}"); return
+        console.print(f"[green]✓ applied[/green] {body.get('patches_applied')}")
+        if body.get("patches_skipped"):
+            console.print(f"[yellow]skipped[/yellow] {body['patches_skipped']}")
+        if body.get("patched_path"):
+            console.print(f"[bold]{body['patched_path']}[/bold]")
+        for w in body.get("warnings", []):
+            console.print(f"[dim]· {w}[/dim]")
+
+    elif kind == "ipa":
+        if not payload_args:
+            console.print("[red]usage:[/red] /patch ipa <name>:<offset>[:<count>] …"); return
+        patches: list[dict] = []
+        for raw in payload_args:
+            parts = raw.split(":")
+            if len(parts) < 2:
+                console.print(f"[red]bad patch spec:[/red] {raw} — expected <name>:<offset>[:<count>]"); return
+            entry = {"name": parts[0], "offset": parts[1]}
+            if len(parts) > 2:
+                try:
+                    entry["count"] = int(parts[2])
+                except ValueError:
+                    console.print(f"[red]bad count:[/red] {parts[2]}"); return
+            patches.append(entry)
+        status, body = _api_request(
+            state, "POST", f"/v1/projects/{project_id}/ios/patch",
+            body={"patches": patches},
+        )
+        if status != 200:
+            console.print(f"[red]patch failed[/red] [{status}] {body}"); return
+        console.print(f"[green]✓ applied[/green] {len(body.get('patches_applied', []))} patch(es)")
+        if body.get("patched_path"):
+            console.print(f"[bold]{body['patched_path']}[/bold]")
+        for p in body.get("patches_applied", []):
+            console.print(f"  [cyan]{p['name']}[/cyan]@{p.get('offset')} · prev: [dim]{p.get('previous_hex')}[/dim]")
+        for s in body.get("patches_skipped", []):
+            console.print(f"  [yellow]skipped[/yellow] {s['name']}@{s.get('offset')} · {s.get('reason')}")
+        for w in body.get("warnings", []):
+            console.print(f"[dim]· {w}[/dim]")
+    else:
+        console.print(f"[red]unknown patcher:[/red] {kind} — try apk|ipa")
+
+
+# ─── /decrypt-ios — IPADecryptor wrapper ───────────────────────────────
+
+def _decrypt_ios(state: ReplState, args: list[str]) -> None:
+    """`/decrypt-ios <bundle_id> [--device <id>] [--no-ingest] [--timeout <s>]`.
+
+    Drives bagbak / frida-ios-dump against a connected JB device. When
+    ingest=true (default), the decrypted IPA goes through the iOS
+    ingest pipeline so it shows up under /projects.
+    """
+    if not args or args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /decrypt-ios <bundle_id> [--device <id>] [--no-ingest] [--timeout <s>]")
+        return
+    bundle_id = args[0]
+    device_id = ""
+    ingest = True
+    timeout_s = 180
+    it = iter(args[1:])
+    for tok in it:
+        if tok == "--device":
+            device_id = next(it, "") or ""
+        elif tok == "--no-ingest":
+            ingest = False
+        elif tok == "--timeout":
+            try: timeout_s = int(next(it, "180"))
+            except ValueError: pass
+    if not _require_server(state):
+        return
+
+    form = {"bundle_id": bundle_id, "ingest": "true" if ingest else "false", "timeout_s": str(timeout_s)}
+    if device_id:
+        form["device_id"] = device_id
+    console.print(f"[cyan]decrypting {bundle_id}…[/cyan] (this can take 30–180s)")
+    status, body = _api_request(state, "POST", "/v1/ios/decrypt", form=form)
+    if status == 503:
+        console.print(f"[red]no decryptor installed[/red] · {body}"); return
+    if status == 504:
+        console.print(f"[red]timeout[/red] · {body}"); return
+    if status != 200:
+        console.print(f"[red]decrypt failed[/red] [{status}] {body}"); return
+    console.print(f"[green]✓ decrypted via {body.get('tool')}[/green] · {body.get('duration_ms')}ms")
+    console.print(f"  [bold]{body.get('ipa_path')}[/bold]")
+    if body.get("project_id"):
+        console.print(f"  → ingested as [bold cyan]{body['project_id']}[/bold cyan]")
+    for w in body.get("warnings", []):
+        console.print(f"[dim]· {w}[/dim]")
+
+
+# ─── /diff — manifest / findings diff between two project versions ───
+
+def _diff(state: ReplState, args: list[str]) -> None:
+    """`/diff manifest|findings [--against <pid>] [--project <id>]`.
+
+    Both kinds auto-pick the most recent prior scan of the same
+    package when ``--against`` isn't given.
+    """
+    if not args or args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /diff <manifest|findings> [--against <pid>] [--project <id>]")
+        return
+    kind = args[0]
+    if kind not in ("manifest", "findings"):
+        console.print(f"[red]unknown diff kind:[/red] {kind} — try manifest|findings"); return
+    project_id = state.active_project_id
+    against = ""
+    it = iter(args[1:])
+    for tok in it:
+        if tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--against":
+            against = next(it, "") or ""
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+    if not _require_server(state):
+        return
+    path = f"/v1/projects/{project_id}/{'manifest-diff' if kind == 'manifest' else 'findings-diff'}"
+    if against:
+        path += f"?against={against}"
+    status, body = _api_request(state, "GET", path)
+    if status != 200:
+        console.print(f"[red]diff failed[/red] [{status}] {body}"); return
+    if not body.get("base"):
+        console.print(f"[yellow]no prior scan of {body.get('package', '?')}[/yellow]"); return
+    summary = (body.get("diff") or {}).get("summary") or {}
+    console.print(
+        f"[cyan]{body['base']['version_name']}[/cyan] → [acid]{body['head']['version_name']}[/acid] · "
+        + (" · ".join(f"{k}={v}" for k, v in summary.items() if isinstance(v, int) and v))
+        + ("  [green](no changes)[/green]" if not summary.get("any_changes") else "")
+    )
+
+
+# ─── /pipeline — run a built-in pipeline ──────────────────────────────
+
+def _pipeline(state: ReplState, args: list[str]) -> None:
+    """`/pipeline list` or `/pipeline run <name> [--project <id>]`."""
+    if not args or args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /pipeline list  |  /pipeline run <name> [--project <id>]")
+        return
+    if not _require_server(state):
+        return
+    if args[0] == "list":
+        status, body = _api_request(state, "GET", "/v1/pipelines")
+        if status != 200:
+            console.print(f"[red]list failed[/red] [{status}] {body}"); return
+        for p in body:
+            console.print(f"  [cyan]{p['name']:<22}[/cyan] {p.get('title') or p.get('description', '')}")
+        return
+    if args[0] == "run":
+        if len(args) < 2:
+            console.print("[red]usage:[/red] /pipeline run <name> [--project <id>]"); return
+        name = args[1]
+        project_id = state.active_project_id
+        it = iter(args[2:])
+        for tok in it:
+            if tok == "--project":
+                project_id = next(it, "") or project_id
+        if not project_id:
+            console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+        console.print(f"[cyan]running pipeline {name} against {project_id}…[/cyan]")
+        status, body = _api_request(state, "POST", f"/v1/pipelines/{name}/run", form={"project_id": project_id})
+        if status != 200:
+            console.print(f"[red]pipeline failed[/red] [{status}] {body}"); return
+        console.print(f"[green]✓ run {body.get('run_id')}[/green] · state {body.get('state')} · {len(body.get('stages', []))} stage(s)")
+        for s in body.get("stages", []):
+            color = {"ok": "green", "skipped": "dim", "failed": "red", "running": "yellow"}.get(s["status"], "white")
+            console.print(f"  [{color}]{s['status']:<8}[/{color}] {s['name']:<24} {s['engine']}/{s['action']}  {s.get('duration_ms', '?')}ms"
+                          + (f"  [dim]{s.get('error', '')}[/dim]" if s.get('error') else ""))
+        return
+    console.print(f"[red]unknown verb:[/red] {args[0]} — try list|run")
+
+
+# ─── /recipes — list /v1/recipes catalogue ────────────────────────────
+
+def _recipes(state: ReplState, args: list[str]) -> None:
+    """`/recipes [filter] [--platform android|ios|both]` — list recipes."""
+    if not _require_server(state):
+        return
+    filt = ""
+    platform = ""
+    it = iter(args)
+    for tok in it:
+        if tok == "--platform":
+            platform = next(it, "") or ""
+        elif tok.startswith("--"):
+            pass
+        else:
+            filt = tok
+    status, body = _api_request(state, "GET", "/v1/recipes")
+    if status != 200:
+        console.print(f"[red]recipes failed[/red] [{status}] {body}"); return
+    rows = body if isinstance(body, list) else []
+    if filt:
+        f = filt.lower()
+        rows = [r for r in rows if f in (r.get("name") or "").lower() or f in (r.get("category") or "").lower() or f in (r.get("description") or "").lower()]
+    if platform:
+        rows = [r for r in rows if r.get("platform") in (platform, "both")]
+    for r in rows[:80]:
+        console.print(f"  [cyan]{(r.get('name') or '?'):<48}[/cyan] [dim]{(r.get('origin') or '?')}[/dim] {(r.get('category') or '').lower()}")
+    if len(rows) > 80:
+        console.print(f"[dim]+{len(rows) - 80} more — use /recipes <filter> to narrow[/dim]")
+
+
 def _export(state: ReplState, args: list[str]) -> None:
     """`/export <fmt> [--project <id>] [--out <dir>]` — write the export to disk.
 
@@ -1087,6 +1606,17 @@ SLASH_COMMANDS = {
     "adb":       _adb,
     "vphone":    _vphone,
     "vphones":   _vphone,
+    # Dynamic + Frida-driven workflows (tasks 1, 8, 9)
+    "dynamic":   _dynamic,
+    "memory":    _memory,
+    # Patchers (tasks 3, 11) + iOS decrypt (task 10)
+    "patch":     _patch,
+    "decrypt-ios": _decrypt_ios,
+    "decrypt":   _decrypt_ios,
+    # Diff (task 6) + pipeline (task 7) + recipes browser
+    "diff":      _diff,
+    "pipeline":  _pipeline,
+    "recipes":   _recipes,
     "clear":     _clear,
     "exit":      _exit,
     "quit":      _exit,
