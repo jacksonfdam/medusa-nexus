@@ -205,10 +205,12 @@ in the start response). Exposes four RPC methods that drive the
 endpoints below:
 
 ```http
-GET  /v1/dynamic/sessions/{sid}/memory/modules
-POST /v1/dynamic/sessions/{sid}/memory/scan      {pattern, module?, max_results?}
-POST /v1/dynamic/sessions/{sid}/memory/read      {address, size}
-POST /v1/dynamic/sessions/{sid}/memory/write     {address, hex}
+GET    /v1/dynamic/sessions/{sid}/memory/modules
+POST   /v1/dynamic/sessions/{sid}/memory/scan      {pattern, module?, max_results?}
+POST   /v1/dynamic/sessions/{sid}/memory/read      {address, size}
+POST   /v1/dynamic/sessions/{sid}/memory/write     {address, hex}
+POST   /v1/dynamic/sessions/{sid}/memory/trace     {ranges: [{base, size}, …]}
+DELETE /v1/dynamic/sessions/{sid}/memory/trace
 ```
 
 ### Token-swap workflow (the talk's recipe)
@@ -243,6 +245,34 @@ Source: [Frida `Memory.scan` docs](https://frida.re/docs/javascript-api/#memory)
 Memory writes can crash the target — the API does NOT gate. The UI
 runs a confirmation dialog before the request; the REPL prompts
 `overwrite N byte(s) at <addr>? [y/N]`. Pentester is in charge.
+
+### Trace (MemoryAccessMonitor)
+
+Single-shot per page detection — useful when the question is "when
+does the app touch this byte range?" rather than "what's in it now?".
+Each first read/write/execute on a guarded page fires a
+`mem_trace` event on the SSE stream:
+
+```json
+{"channel": "mem_trace", "operation": "read",
+ "address": "0x10f234020", "from": "0x10009ab10",
+ "range_base": "0x10f234000", "range_index": 0,
+ "pages_total": 1, "pages_completed": 1}
+```
+
+Once a page traps, its protection is restored — the monitor isn't
+continuous logging, it's "tell me the FIRST time this is touched".
+Re-arm via another POST if you want another shot.
+
+```http
+POST   /v1/dynamic/sessions/{sid}/memory/trace
+{"ranges": [{"base": "0x10f234000", "size": 4096}]}
+
+DELETE /v1/dynamic/sessions/{sid}/memory/trace
+```
+
+The Dynamic console renders `mem_trace` lines in the same stream as
+ssl_pin / nexus events, no separate viewer needed.
 
 ---
 

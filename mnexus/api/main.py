@@ -4570,6 +4570,47 @@ async def memory_write(session_id: str, request: Request) -> dict[str, Any]:
     return await sess.mem.write(str(body["address"]), str(body["hex"]))
 
 
+@app.post("/v1/dynamic/sessions/{session_id}/memory/trace")
+async def memory_trace_start(session_id: str, request: Request) -> dict[str, Any]:
+    """Arm a MemoryAccessMonitor over one or more ranges.
+
+    Body::
+        {"ranges": [{"base": "0x10f234000", "size": 4096}, …]}
+
+    First touch (read / write / execute) on any page in any range fires
+    ``send({channel: 'mem_trace', address, operation, from, range_base})``
+    — these stream out through the existing SSE channel on
+    ``/dynamic/stream``, no special consumer needed.
+
+    The monitor is single-shot per page — once a page traps, it returns
+    to normal protection and the analyst re-arms if they want more.
+    Useful for 'tell me when the token is read', 'is anyone touching
+    this static buffer', etc.
+    """
+    from mnexus.runtime import session_registry
+    sess = session_registry.get(session_id)
+    if not sess:
+        raise HTTPException(404, f"no session {session_id}")
+    if sess.mem is None:
+        raise HTTPException(503, "memory tooling unavailable for this session")
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("ranges"), list) or not body["ranges"]:
+        raise HTTPException(400, "missing 'ranges' array")
+    return await sess.mem.trace_start(body["ranges"])
+
+
+@app.delete("/v1/dynamic/sessions/{session_id}/memory/trace")
+async def memory_trace_stop(session_id: str) -> dict[str, Any]:
+    """Disable the active MemoryAccessMonitor. Idempotent."""
+    from mnexus.runtime import session_registry
+    sess = session_registry.get(session_id)
+    if not sess:
+        raise HTTPException(404, f"no session {session_id}")
+    if sess.mem is None:
+        raise HTTPException(503, "memory tooling unavailable for this session")
+    return await sess.mem.trace_stop()
+
+
 @app.get("/v1/dynamic/sessions/{session_id}/memory/modules")
 async def memory_modules(session_id: str) -> dict[str, Any]:
     """List loaded modules in the target process — name / base / size / path."""

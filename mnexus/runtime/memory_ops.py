@@ -130,6 +130,56 @@ rpc.exports = {
         return { address: address, size: size, hex: _hex_of(blob) };
     },
 
+    // Start a MemoryAccessMonitor on one or more ranges. Each first-
+    // touch (read / write / execute) fires send({channel:'mem_trace',
+    // address, operation, from, range_base}). Single-shot per page —
+    // once a page traps, the page becomes regularly accessible again
+    // and the analyst re-arms if they want more.
+    //
+    // ranges: [{base:'0x123…', size: 256}, …]
+    memTraceStart: function (ranges) {
+        if (!ranges || !ranges.length) {
+            return { error: 'ranges array is empty' };
+        }
+        var normalized = [];
+        for (var i = 0; i < ranges.length; i++) {
+            var r = ranges[i];
+            normalized.push({ base: ptr(r.base), size: r.size | 0 });
+        }
+        try {
+            MemoryAccessMonitor.enable(normalized, {
+                onAccess: function (details) {
+                    try {
+                        send({
+                            channel: 'mem_trace',
+                            address: details.address.toString(),
+                            operation: details.operation,
+                            from: details.from ? details.from.toString() : null,
+                            range_base: details.range ? details.range.base.toString() : null,
+                            range_index: details.rangeIndex,
+                            pages_total: details.pagesTotal,
+                            pages_completed: details.pagesCompleted
+                        });
+                    } catch (_) { /* socket dead — swallow */ }
+                }
+            });
+        } catch (e) {
+            return { error: 'enable failed: ' + (e && e.message ? e.message : String(e)) };
+        }
+        return { started: true, ranges: normalized.length };
+    },
+
+    // Tear down the current MemoryAccessMonitor. Idempotent — calling
+    // when nothing's armed is a no-op.
+    memTraceStop: function () {
+        try {
+            MemoryAccessMonitor.disable();
+        } catch (e) {
+            return { error: 'disable failed: ' + (e && e.message ? e.message : String(e)) };
+        }
+        return { stopped: true };
+    },
+
     // Overwrite at an address with raw bytes (space-separated hex).
     // Returns the previous bytes so the analyst can roll back.
     memWrite: function (address, hex) {
@@ -194,3 +244,19 @@ class MemoryOps:
         return await asyncio.to_thread(
             self._handle.exports_sync.mem_write, address, hex_bytes,
         )
+
+    async def trace_start(self, ranges: list[dict[str, Any]]) -> dict[str, Any]:
+        """Arm a MemoryAccessMonitor over one or more ranges.
+
+        Each entry is ``{"base": "0x123…", "size": <bytes>}``. The
+        monitor is single-shot per page — when a guarded page is
+        touched, the JS callback fires send({channel:'mem_trace',
+        address, operation, …}) and the SSE stream surfaces it.
+        """
+        return await asyncio.to_thread(
+            self._handle.exports_sync.mem_trace_start, ranges,
+        )
+
+    async def trace_stop(self) -> dict[str, Any]:
+        """Disable the MemoryAccessMonitor. Idempotent."""
+        return await asyncio.to_thread(self._handle.exports_sync.mem_trace_stop)

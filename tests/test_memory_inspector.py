@@ -61,6 +61,14 @@ class _FakeExportsSync:
         self.calls.append(("mem_write", (address, hex_bytes), {}))
         return {"written": len(hex_bytes.split()), "address": address, "previous_hex": "00 11 22 33"}
 
+    def mem_trace_start(self, ranges):
+        self.calls.append(("mem_trace_start", (), {"ranges": list(ranges)}))
+        return {"started": True, "ranges": len(ranges)}
+
+    def mem_trace_stop(self):
+        self.calls.append(("mem_trace_stop", (), {}))
+        return {"stopped": True}
+
 
 def test_memory_ops_modules_calls_rpc(tmp_path) -> None:
     from mnexus.runtime.memory_ops import MemoryOps
@@ -227,10 +235,83 @@ def test_endpoint_400_on_missing_write_address(mem_client) -> None:
     assert r.status_code == 400
 
 
-def test_tooling_script_source_exposes_four_rpc_methods() -> None:
+def test_tooling_script_source_exposes_six_rpc_methods() -> None:
     """Smoke test the JS source so a refactor that removes one of the
-    four methods will fail loudly here instead of at session start."""
+    methods will fail loudly here instead of at session start."""
     from mnexus.runtime.memory_ops import TOOLING_SCRIPT_SOURCE
-    for name in ("memScan", "memRead", "memWrite", "memModules"):
+    for name in ("memScan", "memRead", "memWrite", "memModules", "memTraceStart", "memTraceStop"):
         assert name in TOOLING_SCRIPT_SOURCE, f"{name} missing from rpc.exports"
     assert "rpc.exports" in TOOLING_SCRIPT_SOURCE
+    assert "MemoryAccessMonitor.enable" in TOOLING_SCRIPT_SOURCE
+
+
+# ─── trace endpoints ────────────────────────────────────────────────
+
+
+def test_memory_ops_trace_start_dispatches_with_ranges() -> None:
+    from mnexus.runtime.memory_ops import MemoryOps
+    fake_handle = SimpleNamespace(exports_sync=_FakeExportsSync())
+    ranges = [{"base": "0x10f234000", "size": 4096}]
+    out = asyncio.new_event_loop().run_until_complete(MemoryOps(fake_handle).trace_start(ranges))
+    assert out["started"] is True
+    assert out["ranges"] == 1
+    method, _, kwargs = fake_handle.exports_sync.calls[0]
+    assert method == "mem_trace_start"
+    assert kwargs == {"ranges": ranges}
+
+
+def test_memory_ops_trace_stop_is_idempotent_on_python_side() -> None:
+    """Stop dispatches to mem_trace_stop; calling twice in a row is fine
+    because the JS side guards on disable() raising."""
+    from mnexus.runtime.memory_ops import MemoryOps
+    fake_handle = SimpleNamespace(exports_sync=_FakeExportsSync())
+    loop = asyncio.new_event_loop()
+    out1 = loop.run_until_complete(MemoryOps(fake_handle).trace_stop())
+    out2 = loop.run_until_complete(MemoryOps(fake_handle).trace_stop())
+    assert out1["stopped"] is True and out2["stopped"] is True
+    assert [c[0] for c in fake_handle.exports_sync.calls] == ["mem_trace_stop", "mem_trace_stop"]
+
+
+def test_endpoint_memory_trace_start_round_trips(mem_client) -> None:
+    client, sid = mem_client
+    r = client.post(
+        f"/v1/dynamic/sessions/{sid}/memory/trace",
+        json={"ranges": [{"base": "0x10f234000", "size": 4096}]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["started"] is True
+
+
+def test_endpoint_memory_trace_stop_round_trips(mem_client) -> None:
+    client, sid = mem_client
+    r = client.delete(f"/v1/dynamic/sessions/{sid}/memory/trace")
+    assert r.status_code == 200
+    assert r.json()["stopped"] is True
+
+
+def test_endpoint_memory_trace_400_on_empty_ranges(mem_client) -> None:
+    client, sid = mem_client
+    r = client.post(f"/v1/dynamic/sessions/{sid}/memory/trace", json={"ranges": []})
+    assert r.status_code == 400
+    assert "ranges" in r.text.lower()
+
+
+def test_endpoint_memory_trace_404_on_unknown_session(mem_client) -> None:
+    client, _ = mem_client
+    r = client.post("/v1/dynamic/sessions/ghost/memory/trace", json={"ranges": [{"base": "0x1", "size": 1}]})
+    assert r.status_code == 404
+    r2 = client.delete("/v1/dynamic/sessions/ghost/memory/trace")
+    assert r2.status_code == 404
+
+
+def test_endpoint_memory_trace_503_when_tooling_unavailable(mem_client) -> None:
+    from mnexus.runtime import session_registry
+    client, sid = mem_client
+    session_registry[sid].mem = None
+    r = client.post(
+        f"/v1/dynamic/sessions/{sid}/memory/trace",
+        json={"ranges": [{"base": "0x1", "size": 1}]},
+    )
+    assert r.status_code == 503
+    r2 = client.delete(f"/v1/dynamic/sessions/{sid}/memory/trace")
+    assert r2.status_code == 503

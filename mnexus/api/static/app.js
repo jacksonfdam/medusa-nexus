@@ -1622,6 +1622,15 @@ function view_project_dynamic(ctx) {
             <button class="btn" id="dyn-mem-write-go" style="white-space:nowrap;color:var(--sev-high);border-color:var(--sev-high)">[ OVERWRITE ]</button>
           </div>
           <div id="dyn-mem-write-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap"></div>
+
+          <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;border-top:1px dashed var(--border);padding-top:8px">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:90px">trace:</span>
+            <input id="dyn-mem-trace-addr" class="input t-mono" placeholder="0x10f234000" style="flex:1;min-width:160px">
+            <input id="dyn-mem-trace-size" class="input t-mono" type="number" min="1" max="65536" value="256" style="width:90px">
+            <button class="btn" id="dyn-mem-trace-go" style="white-space:nowrap" title="Arm a MemoryAccessMonitor — first read/write at this address fires a mem_trace event on the SSE stream">[ ▶ ARM ]</button>
+            <button class="btn" id="dyn-mem-trace-stop" style="white-space:nowrap">[ ⏹ STOP ]</button>
+            <span class="muted small" id="dyn-mem-trace-status" style="margin-left:8px">idle</span>
+          </div>
         </div>
       </section>
 
@@ -4027,7 +4036,7 @@ async function mount_project_dynamic(ctx) {
                 renderLogLine({ channel: e.type, line: e.data });
             }
         };
-        ["log", "nexus", "ssl_pin", "crypto", "intent", "net", "fs", "clip", "error", "frida", "raw"].forEach((ch) => es.addEventListener(ch, onMsg));
+        ["log", "nexus", "ssl_pin", "mem_trace", "crypto", "intent", "net", "fs", "clip", "error", "frida", "raw"].forEach((ch) => es.addEventListener(ch, onMsg));
         es.addEventListener("end", (e) => {
             try {
                 const reason = JSON.parse(e.data || "{}");
@@ -4253,6 +4262,47 @@ async function mountMemoryInspector(sessionId) {
             writeOutEl.textContent = `write failed: ${e.message || e}`;
         }
     });
+
+    // Trace ────────────────────────────
+    // MemoryAccessMonitor arming/disarming. Each first-page-touch fires
+    // a mem_trace event on the SSE stream — same channel the dynamic
+    // console renders, so the analyst doesn't need a separate viewer.
+    const traceStatus = $("#dyn-mem-trace-status");
+    $("#dyn-mem-trace-go").addEventListener("click", async () => {
+        const addr = ($("#dyn-mem-trace-addr").value || "").trim();
+        const size = parseInt($("#dyn-mem-trace-size").value || "256", 10);
+        if (!addr) { alert("address required"); return; }
+        traceStatus.style.color = "var(--cyan)";
+        traceStatus.textContent = "arming…";
+        try {
+            const r = await fetch(`/v1/dynamic/sessions/${encodeURIComponent(sessionId)}/memory/trace`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ranges: [{ base: addr, size }] }),
+            });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || r.statusText);
+            if (j.error) throw new Error(j.error);
+            traceStatus.style.color = "var(--acid)";
+            traceStatus.textContent = `armed · ${addr} +${size}B · waiting for first touch`;
+        } catch (e) {
+            traceStatus.style.color = "var(--sev-crit)";
+            traceStatus.textContent = `arm failed: ${e.message || e}`;
+        }
+    });
+    $("#dyn-mem-trace-stop").addEventListener("click", async () => {
+        try {
+            const r = await fetch(`/v1/dynamic/sessions/${encodeURIComponent(sessionId)}/memory/trace`, { method: "DELETE" });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || r.statusText);
+            if (j.error) throw new Error(j.error);
+            traceStatus.style.color = "var(--muted)";
+            traceStatus.textContent = "stopped";
+        } catch (e) {
+            traceStatus.style.color = "var(--sev-crit)";
+            traceStatus.textContent = `stop failed: ${e.message || e}`;
+        }
+    });
 }
 
 /** Format an event from /dynamic/stream into a single console line. */
@@ -4262,6 +4312,10 @@ function _formatStreamEvent(event) {
     const payload = event.payload || {};
     if (event.channel === "ssl_pin") {
         return `[SSL_PIN] ${payload.host || "?"} · ${payload.lib || "?"} → ${payload.outcome || "?"}`;
+    }
+    if (event.channel === "mem_trace") {
+        return `[MEM_TRACE] ${payload.operation || "?"} at ${payload.address || "?"}` +
+               (payload.from ? ` from ${payload.from}` : "");
     }
     if (event.channel === "error") {
         return `[ERROR] ${payload.description || "?"}${payload.line ? " @" + payload.line : ""}`;
