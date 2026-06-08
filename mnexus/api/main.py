@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import shutil
 import sqlite3
 import uuid
@@ -3911,48 +3912,208 @@ async def project_moxy_traffic(
 
 # ─── dynamic session control (screen 12) ──────────────────────────────────
 
-# In-memory session state — process-local. Survives within one uvicorn run only.
-_SESSIONS: dict[str, dict[str, Any]] = {}
-
 
 @app.post("/v1/projects/{project_id}/dynamic/start")
 async def dynamic_start(
     project_id: str,
     hooks: str = Form(default=""),
+    spawn: bool = Form(default=True),
+    device: str | None = Form(default=None),
 ) -> dict[str, Any]:
-    """Spin up a (mock) Frida session for this project.
+    """Attach Frida to the project's package and load the requested hooks.
 
-    `hooks` is a comma-separated list of hook names from /v1/projects/{id}/hooks.
-    Returns a session id the UI can use for /events polling.
+    Args:
+        hooks: comma-separated list of hook names. Each name is resolved
+            against the project's auto-hook catalogue (HookGenerator) so
+            the caller doesn't have to ship the script bodies.
+        spawn: True (default) → ``frida.spawn`` + attach + resume. False
+            → attach to an already-running process. Spawn is required for
+            early-injection (e.g. SSL pinning bypass before OkHttp loads).
+        device: optional adb-style device id. Default uses the first USB
+            device frida sees.
+
+    Errors:
+        * 503 ``frida not installed`` — the python ``frida`` extension
+          isn't on this server; ``pip install frida`` and restart.
+        * 503 ``no USB device``       — phone unplugged or unauthorised.
+        * 500 ``spawn failed``        — the package isn't installed, or
+          frida-server isn't running on the device.
+
+    Returns the same shape the SPA already reads (``session_id`` +
+    ``state`` + ``log``) plus a ``stream_url`` the SPA can subscribe to
+    via EventSource for live events.
     """
+    from mnexus.runtime import (
+        FRIDA_AVAILABLE,
+        FridaNotInstalled,
+        FridaSession,
+        FridaSessionError,
+        NoDeviceError,
+    )
+
     p = _require_project(project_id)
+    if not FRIDA_AVAILABLE:
+        raise HTTPException(503, "frida not installed on the server — pip install frida")
+
+    nexus: MedusaNexus = app.state.nexus
     hook_names = [h.strip() for h in hooks.split(",") if h.strip()]
-    sid = uuid.uuid4().hex[:8]
-    now = datetime.now(UTC).isoformat()
-    _SESSIONS[sid] = {
-        "session_id": sid,
-        "project_id": p.id,
-        "package": p.package_name,
-        "hooks": hook_names,
-        "status": "attached",
-        "started_at": now,
-        "log": [
-            {"ts": now, "channel": "nexus", "line": f"[NEXUS] attaching to {p.package_name}"},
-            {"ts": now, "channel": "nexus", "line": f"[NEXUS] hooks loaded: {len(hook_names)}"},
-            {"ts": now, "channel": "nexus", "line": "[NEXUS] session active · spawn resumed"},
-        ],
-    }
-    return _SESSIONS[sid]
+
+    # Resolve hook names → script sources via the existing generator.
+    scripts: list[tuple[str, str]] = []
+    if p.attack_surface and hook_names:
+        try:
+            generated = HookGenerator().for_attack_surface(p.attack_surface, platform=p.platform)
+        except TypeError:
+            generated = HookGenerator().for_attack_surface(p.attack_surface)
+        by_name = {h.name: h for h in generated}
+        for name in hook_names:
+            h = by_name.get(name)
+            if h is None:
+                raise HTTPException(400, f"unknown hook '{name}' — see /v1/projects/{p.id}/hooks")
+            scripts.append((h.name, h.script))
+
+    try:
+        session = await FridaSession.start(
+            project_id=p.id,
+            package=p.package_name,
+            scripts=scripts,
+            device_id=device,
+            spawn=spawn,
+        )
+    except FridaNotInstalled as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except NoDeviceError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except FridaSessionError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+    # Wire one listener that persists every event into dynamic_events so
+    # the polling endpoints (SSL Map, traffic timeline, audit) still see
+    # them after the SSE consumer has disconnected.
+    persist_log = logging.getLogger(__name__)
+
+    def _persist(event: dict[str, Any]) -> None:
+        ts_iso = datetime.fromtimestamp(event["ts"], tz=UTC).isoformat()
+        try:
+            nexus.db.append_dynamic_event(p.id, ts_iso, event["channel"], event["payload"])
+        except Exception as exc:  # noqa: BLE001 — never let the message thread die on a DB hiccup
+            persist_log.warning("persisting frida event failed: %s", exc)
+
+    session.add_listener(_persist)
+
+    response = session.to_dict()
+    response["stream_url"] = f"/v1/projects/{p.id}/dynamic/stream?session_id={session.session_id}"
+    return response
 
 
 @app.post("/v1/projects/{project_id}/dynamic/stop")
 async def dynamic_stop(project_id: str, session_id: str = Form(...)) -> dict[str, Any]:
-    sess = _SESSIONS.get(session_id)
-    if not sess or sess["project_id"] != project_id:
+    """Detach the session and (when we spawned the PID) kill the app."""
+    from mnexus.runtime import session_registry
+
+    sess = session_registry.get(session_id)
+    if not sess or sess.project_id != project_id:
         raise HTTPException(404, f"no session {session_id} for project {project_id}")
-    sess["status"] = "detached"
-    sess["log"].append({"ts": datetime.now(UTC).isoformat(), "channel": "nexus", "line": "[NEXUS] detached cleanly"})
-    return sess
+    await sess.stop()
+    return sess.to_dict()
+
+
+@app.get("/v1/projects/{project_id}/dynamic/stream")
+async def dynamic_stream(project_id: str, session_id: str) -> StreamingResponse:
+    """Server-Sent Events: every event from a live Frida session, as it happens.
+
+    The SPA opens an EventSource on this URL right after /dynamic/start
+    succeeds; we hand it a never-ending stream of ``data: <json>\\n\\n``
+    frames keyed by channel (nexus / ssl_pin / crypto / intent / net /
+    error). The client closes by detaching from the page; the server
+    closes when the session detaches.
+
+    Heartbeats every 15s keep proxies from idling the connection out.
+    """
+    from mnexus.runtime import session_registry
+
+    sess = session_registry.get(session_id)
+    if not sess or sess.project_id != project_id:
+        raise HTTPException(404, f"no session {session_id} for project {project_id}")
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
+
+    # The listener runs on the Frida message thread → hop to the asyncio
+    # loop with call_soon_threadsafe so put_nowait doesn't race the queue.
+    def _push(event: dict[str, Any]) -> None:
+        loop.call_soon_threadsafe(_safe_put, queue, event)
+
+    unsubscribe = sess.add_listener(_push)
+
+    async def stream() -> AsyncIterator[bytes]:
+        # Replay the recent in-memory log so a late subscriber sees
+        # 'attached' instead of an empty pane.
+        for line in list(sess.log[-50:]):
+            yield _sse_frame("log", line)
+        if sess.state in ("detached", "crashed"):
+            # Session was already over when the client subscribed —
+            # emit the end frame and bail rather than wait on a queue
+            # nobody will ever feed.
+            yield _sse_frame("end", {"reason": sess.state, "error": sess.error})
+            return
+        try:
+            # Internal poll loop runs at 1s so a detach is seen quickly,
+            # but the SSE heartbeat byte is only emitted every 15s of
+            # silence — proxies stay happy, the analyst's console stays
+            # quiet between real events.
+            silence_s = 0.0
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    yield _sse_frame(event["channel"], event)
+                    silence_s = 0.0
+                except asyncio.TimeoutError:
+                    silence_s += 1.0
+                    if silence_s >= 15.0:
+                        yield b": heartbeat\n\n"  # SSE comment frame, ignored by clients
+                        silence_s = 0.0
+                if sess.state in ("detached", "crashed"):
+                    yield _sse_frame("end", {"reason": sess.state, "error": sess.error})
+                    return
+        finally:
+            unsubscribe()
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx buffering
+            "Connection": "keep-alive",
+        },
+    )
+
+
+def _safe_put(queue: asyncio.Queue, item: Any) -> None:
+    """``queue.put_nowait`` that drops the oldest item when the queue
+    is full instead of raising. Frida bursts (e.g. crypto loop) can
+    out-pace a slow consumer; dropping is better than backing up."""
+    try:
+        queue.put_nowait(item)
+    except asyncio.QueueFull:
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            pass
+
+
+def _sse_frame(event_name: str, data: Any) -> bytes:
+    """Encode one SSE frame: ``event: <name>\\ndata: <json>\\n\\n``.
+
+    Multi-line JSON would break the SSE protocol — ``json.dumps`` with
+    no indent keeps it on one line.
+    """
+    return f"event: {event_name}\ndata: {json.dumps(data, default=str)}\n\n".encode("utf-8")
 
 
 @app.post("/v1/projects/{project_id}/dynamic/events")
@@ -4000,22 +4161,27 @@ async def dynamic_events_ingest(project_id: str, request: Request) -> dict[str, 
 async def dynamic_events(project_id: str, session_id: str | None = None) -> dict[str, Any]:
     """Poll endpoint for the live console.
 
-    Returns existing session log if `session_id` is given, otherwise synthesizes
-    a sample feed so the screen looks alive even before a real session runs.
+    Back-compat shim: the SPA's new code path uses the SSE
+    ``/dynamic/stream`` endpoint, but the polling endpoint still works
+    for CI scripts + simple consumers that can't speak EventSource.
+
+    Returns the session's serialised state if ``session_id`` is given
+    (matching the SSE replay log), otherwise synthesises an idle feed.
     """
+    from mnexus.runtime import session_registry
+
     p = _require_project(project_id)
     if session_id:
-        sess = _SESSIONS.get(session_id)
-        if not sess or sess["project_id"] != p.id:
+        sess = session_registry.get(session_id)
+        if not sess or sess.project_id != p.id:
             raise HTTPException(404, f"unknown session {session_id}")
-        return sess
-    # No session: synthesize. Stable across calls so the UI doesn't strobe.
+        return sess.to_dict()
     sample_lines = [
         {"channel": "nexus", "line": f"[NEXUS] no live session for {p.package_name}"},
         {"channel": "meta", "line": "[META  ] start a session via POST /dynamic/start"},
         {"channel": "meta", "line": "[META  ] hooks available at GET /hooks"},
     ]
-    return {"session_id": None, "project_id": p.id, "status": "idle", "log": sample_lines}
+    return {"session_id": None, "project_id": p.id, "status": "idle", "state": "idle", "log": sample_lines}
 
 
 # ─── pipelines (screen 24) ────────────────────────────────────────────────

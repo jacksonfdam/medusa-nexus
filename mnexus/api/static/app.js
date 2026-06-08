@@ -3438,14 +3438,63 @@ async function mount_project_dynamic(ctx) {
     if (consoleEl) {
         const pkg = project?.package_name || "?";
         consoleEl.innerHTML = `<span class="muted">[NEXUS] target: ${escapeHtml(pkg)} · ${hooks.length} auto-hook(s) ready</span>
-<span class="muted">[NEXUS] click [ START SESSION ] to attach (mock — Frida bindings ship in iter 3)</span>`;
+<span class="muted">[NEXUS] click [ START SESSION ] to attach Frida on the connected device</span>`;
     }
 
     let activeSession = null;
-    const renderLog = (lines) => {
+    let activeStream = null;
+
+    const renderLogLine = (entry) => {
         if (!consoleEl) return;
-        consoleEl.innerHTML = lines.map((l) => `<div><span class="${classifyTraceClass(l.channel)}">${escapeHtml(l.line)}</span></div>`).join("")
-            || `<span class="muted">no events</span>`;
+        const line = typeof entry === "string" ? entry : (entry.line || _formatStreamEvent(entry));
+        const channel = (entry && entry.channel) || "nexus";
+        const div = document.createElement("div");
+        div.innerHTML = `<span class="${classifyTraceClass(channel)}">${escapeHtml(line)}</span>`;
+        consoleEl.appendChild(div);
+        // Auto-scroll the console to the bottom on every new line so
+        // a busy crypto-loop hook doesn't push the latest event off-screen.
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+    };
+    const replaceLog = (lines) => {
+        if (!consoleEl) return;
+        consoleEl.innerHTML = "";
+        (lines || []).forEach((l) => renderLogLine(l));
+        if (!lines || !lines.length) consoleEl.innerHTML = `<span class="muted">no events</span>`;
+    };
+
+    const openStream = (sessionId) => {
+        if (activeStream) { activeStream.close(); activeStream = null; }
+        const url = `/v1/projects/${encodeURIComponent(id)}/dynamic/stream?session_id=${encodeURIComponent(sessionId)}`;
+        const es = new EventSource(url);
+        activeStream = es;
+        // Each backend event-type lands on its own EventSource event;
+        // we register a generic + named handlers so unknown channels
+        // (future recipes adding their own send({channel:...})) still surface.
+        const onMsg = (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                renderLogLine(data);
+            } catch (_) {
+                renderLogLine({ channel: e.type, line: e.data });
+            }
+        };
+        ["log", "nexus", "ssl_pin", "crypto", "intent", "net", "fs", "clip", "error", "frida", "raw"].forEach((ch) => es.addEventListener(ch, onMsg));
+        es.addEventListener("end", (e) => {
+            try {
+                const reason = JSON.parse(e.data || "{}");
+                renderLogLine({ channel: "nexus", line: `[NEXUS] stream closed · ${reason.reason || "ended"}${reason.error ? " · " + reason.error : ""}` });
+            } catch (_) {
+                renderLogLine({ channel: "nexus", line: "[NEXUS] stream closed" });
+            }
+            es.close();
+            activeStream = null;
+        });
+        es.onerror = () => {
+            // SSE error events are uninformative — the network panel has the actual status.
+            renderLogLine({ channel: "error", line: "[NEXUS] stream lost — server reachable?" });
+            es.close();
+            activeStream = null;
+        };
     };
 
     $("#dyn-start")?.addEventListener("click", async () => {
@@ -3456,14 +3505,35 @@ async function mount_project_dynamic(ctx) {
         });
         const btn = $("#dyn-start");
         btn.textContent = "[ STARTING… ]";
-        const fd = new FormData(); fd.append("hooks", selected.join(","));
-        const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/start`, { method: "POST", body: fd });
-        const j = await r.json();
-        if (!r.ok) { btn.textContent = "[ FAILED ]"; btn.style.color = "var(--sev-crit)"; return; }
-        activeSession = j.session_id;
-        btn.textContent = `[ ATTACHED · ${activeSession} ]`;
-        btn.style.color = "var(--acid)";
-        renderLog(j.log);
+        btn.disabled = true;
+        const fd = new FormData();
+        fd.append("hooks", selected.join(","));
+        fd.append("spawn", "true");
+        try {
+            const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/start`, { method: "POST", body: fd });
+            const j = await r.json();
+            if (!r.ok) {
+                btn.textContent = `[ ${r.status === 503 ? "NO DEVICE" : "FAILED"} ]`;
+                btn.style.color = "var(--sev-crit)";
+                btn.title = (j && j.detail) || r.statusText;
+                replaceLog([{ channel: "error", line: `[NEXUS] start failed · ${j && j.detail || r.statusText}` }]);
+                btn.disabled = false;
+                return;
+            }
+            activeSession = j.session_id;
+            btn.textContent = `[ ATTACHED · ${activeSession} · pid ${j.pid || "?"} ]`;
+            btn.style.color = "var(--acid)";
+            btn.disabled = false;
+            replaceLog(j.log);
+            // Open the SSE stream right after the synchronous start
+            // response so we don't miss the first batch of events.
+            openStream(activeSession);
+        } catch (e) {
+            btn.textContent = "[ FAILED ]";
+            btn.style.color = "var(--sev-crit)";
+            btn.title = e.message || String(e);
+            btn.disabled = false;
+        }
     });
     $("#dyn-stop")?.addEventListener("click", async () => {
         if (!activeSession) return;
@@ -3472,9 +3542,31 @@ async function mount_project_dynamic(ctx) {
         const j = await r.json();
         if (r.ok) {
             $("#dyn-stop").textContent = "[ DETACHED ]";
-            renderLog(j.log);
+            renderLogLine({ channel: "nexus", line: "[NEXUS] detached cleanly" });
+            if (activeStream) { activeStream.close(); activeStream = null; }
         }
     });
+}
+
+/** Format an event from /dynamic/stream into a single console line. */
+function _formatStreamEvent(event) {
+    if (!event) return "";
+    if (event.line) return event.line;
+    const payload = event.payload || {};
+    if (event.channel === "ssl_pin") {
+        return `[SSL_PIN] ${payload.host || "?"} · ${payload.lib || "?"} → ${payload.outcome || "?"}`;
+    }
+    if (event.channel === "error") {
+        return `[ERROR] ${payload.description || "?"}${payload.line ? " @" + payload.line : ""}`;
+    }
+    if (event.channel === "nexus") {
+        return payload.line || "";
+    }
+    const parts = Object.entries(payload || {})
+        .filter(([k]) => k !== "channel")
+        .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+        .join(" ");
+    return `[${(event.channel || "?").toUpperCase()}] ${parts}`;
 }
 
 async function mount_project_network(ctx) {
