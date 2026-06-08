@@ -242,6 +242,112 @@ def test_pdf_renderer_falls_back_to_html_when_weasyprint_missing(
     assert "Mitigation Playbook" in body
 
 
+# ─── PNG renderer ─────────────────────────────────────────────────────
+
+
+def test_png_renderer_writes_html_when_chrome_missing(
+    project, tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No Chromium on PATH → fall back to HTML with a banner comment."""
+    monkeypatch.setattr("mnexus.reporting.generator._find_chromium", lambda: None)
+    out = tmp_path / "report.png"
+    written = ReportGenerator(project).generate(
+        ReportTemplate.TECHNICAL, ReportFormat.PNG, str(out),
+    )
+    written_path = Path(written)
+    assert written_path.suffix == ".html"
+    body = written_path.read_text(encoding="utf-8")
+    assert "chromium" in body.lower() or "google-chrome" in body.lower()
+    assert "Mitigation Playbook" in body
+
+
+def test_png_renderer_drives_chromium_with_screenshot_flag(
+    project, tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When _find_chromium returns a binary, the renderer subprocess-
+    runs it with --screenshot=<out> and writes a stub PNG."""
+    import subprocess
+
+    captured: list[list[str]] = []
+
+    def fake_chromium() -> str:
+        return "/fake/chromium"
+
+    def fake_run(cmd, check=False, capture_output=False, timeout=None):  # noqa: ARG001, ANN001
+        captured.append(list(cmd))
+        # Find --screenshot=<path> and write stub PNG bytes there.
+        for arg in cmd:
+            if arg.startswith("--screenshot="):
+                out_path = arg.split("=", 1)[1]
+                Path(out_path).write_bytes(b"\x89PNG\r\n\x1a\n stub png")
+                break
+
+        class _Done:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return _Done()
+
+    monkeypatch.setattr("mnexus.reporting.generator._find_chromium", fake_chromium)
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    out = tmp_path / "report.png"
+    written = ReportGenerator(project).generate(
+        ReportTemplate.TECHNICAL, ReportFormat.PNG, str(out),
+    )
+    assert written == str(out)
+    assert Path(written).exists()
+    assert Path(written).read_bytes().startswith(b"\x89PNG")
+    # Chrome was invoked with the right flags.
+    assert captured, "subprocess.run was not called"
+    cmd = captured[0]
+    assert cmd[0] == "/fake/chromium"
+    assert "--headless" in cmd
+    assert any(a == f"--screenshot={out}" for a in cmd)
+    assert any(a.startswith("file://") for a in cmd)
+
+
+def test_png_renderer_falls_back_to_html_when_chrome_produces_nothing(
+    project, tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chrome ran but wrote no bytes (sandbox quirks on CI) → HTML fallback."""
+    def fake_chromium() -> str:
+        return "/fake/chromium"
+
+    def fake_run(cmd, check=False, capture_output=False, timeout=None):  # noqa: ARG001, ANN001
+        class _Done:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+        return _Done()  # ← no file written
+
+    monkeypatch.setattr("mnexus.reporting.generator._find_chromium", fake_chromium)
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    out = tmp_path / "report.png"
+    written = ReportGenerator(project).generate(
+        ReportTemplate.TECHNICAL, ReportFormat.PNG, str(out),
+    )
+    written_path = Path(written)
+    assert written_path.suffix == ".html"
+    body = written_path.read_text(encoding="utf-8")
+    assert "wrote no bytes" in body
+    assert "Mitigation Playbook" in body
+
+
+def test_find_chromium_prefers_env_var(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """MNEXUS_CHROME_BIN beats shutil.which."""
+    from mnexus.reporting.generator import _find_chromium
+
+    fake = tmp_path / "fake-chrome"
+    fake.write_text("#!/bin/bash")
+    monkeypatch.setenv("MNEXUS_CHROME_BIN", str(fake))
+    monkeypatch.setattr("shutil.which", lambda name: "/should/be/ignored")
+    picked = _find_chromium()
+    assert picked == str(fake)
+
+
 def test_pdf_renderer_writes_pdf_when_weasyprint_available(
     project, tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

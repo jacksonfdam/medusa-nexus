@@ -13,6 +13,7 @@ time, before the report can render.
 | `json` | inline writer | none | machine-readable payload — every finding's full body. |
 | `html` | Jinja2 template | `jinja2>=3.1` (always installed) | single file, inline CSS, cyberpunk palette + `@media print` fallback for browser print-to-PDF. |
 | `pdf` | WeasyPrint over HTML | `pip install weasyprint` (heavy native deps) | when WeasyPrint is missing, falls back to HTML with a banner comment so the analyst can browser-print themselves. |
+| `png` | Chromium screenshot of HTML | `google-chrome` / `chromium` on PATH (or `MNEXUS_CHROME_BIN=…`) | runs `chrome --headless --screenshot=<out>` over a `file://` URL of the rendered HTML. Falls back to HTML on missing browser, sandbox failures, or empty output. Useful for executive decks — single image instead of a multi-page PDF. |
 
 ## Templates
 

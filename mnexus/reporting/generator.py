@@ -27,6 +27,7 @@ class ReportFormat(str, Enum):
     HTML = "html"
     MARKDOWN = "markdown"
     JSON = "json"
+    PNG = "png"
 
 
 @dataclass(slots=True)
@@ -70,6 +71,7 @@ class ReportGenerator:
             ReportFormat.JSON: self._render_json,
             ReportFormat.HTML: self._render_html,
             ReportFormat.PDF: self._render_pdf,
+            ReportFormat.PNG: self._render_png,
         }
         return renderers[fmt](data, template, output_path)
 
@@ -250,6 +252,83 @@ class ReportGenerator:
         HTML(string=rendered).write_pdf(output_path)
         return output_path
 
+    def _render_png(self, data: ReportData, template: ReportTemplate, output_path: str) -> str:
+        """Headless-browser PNG screenshot of the HTML report.
+
+        Same Jinja template, then a Chromium-family binary renders the
+        HTML and screenshots it. The screenshot is the full document
+        height (Chrome's ``--screenshot`` + ``--window-size`` combo with
+        an explicit tall viewport).
+
+        Falls back to writing the HTML alongside a banner comment when
+        no Chromium is on PATH — the analyst can browser-print themselves.
+        """
+        import os
+        import shlex
+        import subprocess
+        import tempfile
+
+        rendered = self._render_to_string(data, template)
+        chrome = _find_chromium()
+        if chrome is None:
+            # Same graceful-degrade path the PDF renderer uses.
+            fallback = output_path
+            if fallback.endswith(".png"):
+                fallback = fallback[:-4] + ".html"
+            with open(fallback, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "<!-- chromium / google-chrome not on PATH; saved as HTML. "
+                    "Install Chrome to enable real PNG output:\n"
+                    "  macOS:  brew install --cask google-chrome\n"
+                    "  Linux:  apt-get install -y chromium-browser\n"
+                    "Or set MNEXUS_CHROME_BIN=/abs/path/to/chrome and retry.\n"
+                    "-->\n"
+                )
+                fh.write(rendered)
+            return fallback
+
+        # Drop the HTML into a temp file so file:// can load it without
+        # cross-origin nonsense, then screenshot it.
+        with tempfile.TemporaryDirectory(prefix="mnexus-png-") as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as fh:
+                fh.write(rendered)
+            # 1280×4000 covers most reports; Chrome's screenshot crops to
+            # the actual document height, so a too-tall window is cheap.
+            cmd = [
+                chrome,
+                "--headless",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--hide-scrollbars",
+                "--window-size=1280,4000",
+                f"--screenshot={output_path}",
+                f"file://{html_path}",
+            ]
+            try:
+                subprocess.run(cmd, check=False, capture_output=True, timeout=60)
+            except (subprocess.TimeoutExpired, OSError):
+                # Same fallback as 'chrome not installed' — write HTML.
+                fallback = output_path[:-4] + ".html" if output_path.endswith(".png") else output_path + ".html"
+                with open(fallback, "w", encoding="utf-8") as fh:
+                    fh.write(
+                        f"<!-- {shlex.join(cmd)} failed to produce a PNG; falling back to HTML. -->\n"
+                    )
+                    fh.write(rendered)
+                return fallback
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            # Chrome ran but produced nothing — common on sandboxed CI
+            # without `--no-sandbox` permissions. Same HTML fallback.
+            fallback = output_path[:-4] + ".html" if output_path.endswith(".png") else output_path + ".html"
+            with open(fallback, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "<!-- chrome --headless ran but wrote no bytes "
+                    "(sandbox? cgroups?). Falling back to HTML. -->\n"
+                )
+                fh.write(rendered)
+            return fallback
+        return output_path
+
     def _render_to_string(self, data: ReportData, template: ReportTemplate) -> str:
         """Shared Jinja render — both HTML and PDF paths funnel through here."""
         from datetime import UTC, datetime
@@ -282,6 +361,31 @@ class ReportGenerator:
             masvs_matrix=_build_masvs_matrix(data.all_findings),
             generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
         )
+
+
+def _find_chromium() -> str | None:
+    """Locate a Chromium-family binary for the PNG screenshot path.
+
+    Order of preference:
+      1. ``$MNEXUS_CHROME_BIN`` if set + exists
+      2. ``google-chrome`` / ``chromium`` / ``chrome`` on PATH
+      3. macOS app-bundle path
+      4. None — caller falls back to writing HTML
+    """
+    import os
+    import shutil
+
+    env_pick = os.environ.get("MNEXUS_CHROME_BIN")
+    if env_pick and os.path.exists(env_pick):
+        return env_pick
+    for name in ("google-chrome", "chromium", "chromium-browser", "chrome"):
+        path = shutil.which(name)
+        if path:
+            return path
+    bundle = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if os.path.exists(bundle):
+        return bundle
+    return None
 
 
 def _sev_chip_class(severity) -> str:  # type: ignore[no-untyped-def]
