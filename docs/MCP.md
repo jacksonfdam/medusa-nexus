@@ -1,0 +1,141 @@
+# MCP driver — drive MedusaNexus from your AI assistant
+
+`mnexus mcp-serve` exposes the running Nexus instance as a
+[Model Context Protocol](https://modelcontextprotocol.io) server so
+Claude Desktop, Cursor, Zed, and any other MCP-aware client can read
+projects, walk findings, and fire Firebase probes through tool calls —
+without you copy-pasting `curl` lines into the chat.
+
+The wire format is plain JSON-RPC 2.0 over stdio. There's no `mcp`
+Python dep — the protocol is small and we'd rather pin nothing than
+inherit somebody else's release cadence.
+
+## TL;DR
+
+Two terminals:
+
+```bash
+# T1 — the API the MCP driver talks to.
+mnexus serve
+
+# T2 — confirm the server speaks MCP. The initialize handshake should
+# echo back the protocol revision.
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | mnexus mcp-serve
+```
+
+Then wire it into your assistant (see "Claude Desktop" below) and ask:
+
+> *"List every CRITICAL finding on PRJ-355151DF and propose a
+> remediation order."*
+
+The assistant calls `list_findings` → `get_finding` → reads the
+`remediation` field on each → drafts the plan against your real data.
+
+## Exposed tools
+
+| tool | purpose | underlying route |
+| ---- | ------- | ---------------- |
+| `list_projects` | Every Project in the workspace with risk + counts. | `GET /v1/projects` |
+| `get_project` | One project's overview (risk, severity counts, surface). | `GET /v1/projects/{id}` |
+| `list_findings` | Findings on a project, optionally filtered by severity/category. | `GET /v1/projects/{id}/findings` |
+| `get_finding` | Full finding body — evidence + **remediation**. | `GET /v1/findings/{fid}` |
+| `list_recipes` | Built-in + Medusa/Stheno recipe catalogue. | `GET /v1/recipes` |
+| `decode_android_flag` | Mango flag decoder (Intent / Receiver / PendingIntent / Content). | `POST /v1/mango/decode-flags` |
+| `manifest_diff` | Surface delta against the most recent prior scan. | `GET /v1/projects/{id}/manifest-diff` |
+| `findings_diff` | Security delta against the most recent prior scan. | `GET /v1/projects/{id}/findings-diff` |
+| `firebase_probe` | Standalone RTDB / Firestore / Storage probe. | `POST /v1/firebase/probe` |
+| `doctor` | Engine health check — what's installed, what's missing. | `GET /v1/doctor` |
+
+Mitigation is first-class: `get_finding` always returns the
+`remediation` block, so any assistant-generated plan starts from
+ground truth rather than fabricated advice.
+
+## Claude Desktop wiring
+
+Open `~/Library/Application Support/Claude/claude_desktop_config.json`
+and add the entry under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "medusa-nexus": {
+      "command": "mnexus",
+      "args": ["mcp-serve"],
+      "env": {
+        "MNEXUS_API_BASE": "http://127.0.0.1:8765"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The hammer icon next to the prompt should now
+list ten `medusa-nexus` tools. The `MNEXUS_API_BASE` env var lets you
+point the driver at a remote Nexus — anywhere `urllib` can reach.
+
+## Cursor / Zed
+
+Both ship MCP support in the same shape; copy the JSON above into the
+editor's MCP config (`~/.cursor/mcp.json`, `~/.config/zed/mcp.json`,
+etc.) and reload.
+
+## Wire shape
+
+The dispatcher handles four MCP methods:
+
+| method | purpose |
+| ------ | ------- |
+| `initialize` | Returns `{protocolVersion, capabilities: {tools:{}}, serverInfo}`. |
+| `notifications/initialized` | Notification (no `id`) → no response. |
+| `tools/list` | Lists every tool descriptor in [`TOOLS`](../mnexus/mcp_server.py). |
+| `tools/call` | Invokes a handler, wraps the result in `{content: [{type:"text", text:<json>}]}`. |
+
+Errors map to JSON-RPC codes:
+
+| code | when |
+| ---- | ---- |
+| `-32601` | Unknown `method`. |
+| `-32602` | Unknown `tool` name **or** missing required argument. |
+| `-32603` | Handler raised — surfaced as `RuntimeError: …` so the assistant sees the failure instead of the session dying. |
+| `-32700` | stdin line wasn't valid JSON. |
+
+## Smoke test from the shell
+
+```bash
+# Initialize → tools/list → call list_projects → done.
+( \
+  echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' ; \
+  echo '{"jsonrpc":"2.0","method":"notifications/initialized"}' ; \
+  echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' ; \
+  echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}' \
+) | mnexus mcp-serve | jq .
+```
+
+Each line on stdin → one JSON response on stdout (except for the
+`notifications/initialized` notification, which is silent by spec).
+
+## Why no `mcp` Python package?
+
+Three reasons:
+
+1. **Lean venv.** The whole driver is ~390 lines and depends only on
+   stdlib `urllib`. Adding a dep for a 9-method protocol felt like
+   buying a forklift to move a kettle.
+2. **No version pin treadmill.** MCP is young; the SDK is younger. If
+   the spec moves we patch one file.
+3. **Talking to remote Nexus is identical.** The driver hits the
+   FastAPI server over HTTP, so it works against `127.0.0.1` or
+   `https://nexus.internal:9000` with one env var.
+
+## Limits
+
+* The driver doesn't expose write operations yet (no
+  `start_dynamic_session`, no `patch_apk`). Those touch live devices
+  and re-sign artifacts; we want an explicit confirmation flow before
+  letting an assistant trigger them.
+* `tools/call` text payloads are truncated at 60 000 chars to fit
+  comfortably in the assistant's context. Large project dumps still
+  fit — the truncation only kicks in on pathological cases.
+* The server is stdio-only. No SSE transport, no HTTP transport. Two
+  reasons: every MCP client we care about supports stdio, and stdio
+  has no auth model to design.

@@ -29,6 +29,7 @@ Docs:
 - Reporting + Mitigation Playbook ([`docs/REPORTING.md`](docs/REPORTING.md))
 - Moxy MITM ([`docs/MOXY.md`](docs/MOXY.md))
 - PlayIntel ([`docs/PLAYINTEL.md`](docs/PLAYINTEL.md))
+- **MCP driver** — drive Nexus from Claude Desktop / Cursor / Zed ([`docs/MCP.md`](docs/MCP.md))
 - super-tart-vphone iOS lab ([`docs/VPHONE_PLAN.md`](docs/VPHONE_PLAN.md))
 
 Code:
