@@ -1,0 +1,120 @@
+---
+title: Diff reports
+---
+
+# Diff reports
+
+When the dev team ships a patch, two questions:
+
+1. *What did they actually change in the manifest / surface?*
+2. *What findings got fixed, and what's new?*
+
+MedusaNexus answers both with **manifest-diff** and **findings-diff**,
+working off two project ids of the same package.
+
+## How it picks the base
+
+If you don't pass `--against`, the diff auto-selects the **most recent
+prior scan of the same package**. So the common case is just:
+
+```
+🔱 nexus PRJ-NEW ❯ /diff manifest
+🔱 nexus PRJ-NEW ❯ /diff findings
+```
+
+…and the orchestrator finds the previous build for you.
+
+## REPL
+
+```bash
+# Auto-pick base — most recent prior scan of the same package.
+/diff manifest
+/diff findings
+
+# Explicit base.
+/diff findings --against PRJ-OLD
+```
+
+## HTTP
+
+```
+GET /v1/projects/{pid}/manifest-diff
+GET /v1/projects/{pid}/manifest-diff?against={old_pid}
+GET /v1/projects/{pid}/findings-diff
+GET /v1/projects/{pid}/findings-diff?against={old_pid}
+```
+
+Both return:
+
+```json
+{
+  "package": "com.target.app",
+  "base": { "id": "PRJ-OLD", "version_name": "4.2.1" },
+  "head": { "id": "PRJ-NEW", "version_name": "4.3.0" },
+  "diff": { … }
+}
+```
+
+When the project has *no* prior scan, `base` is `null` — the SPA
+renders a "first scan" empty state instead of crashing.
+
+## Manifest diff
+
+What it surfaces:
+
+* New / removed exported components.
+* Intent filter changes (new deeplink schemes, new actions).
+* Permission additions / removals (with their protection level).
+* `usesCleartextTraffic`, `networkSecurityConfig`, `targetSdkVersion`
+  bumps.
+* Native lib presence (a new `.so` showing up is high-signal).
+
+## Findings diff
+
+Per-finding bucket:
+
+| Bucket | Meaning |
+| ------ | ------- |
+| **resolved** | The same finding (by canonical signature) existed in base, gone in head. |
+| **regressed** | Existed in base, still in head, severity climbed. |
+| **new** | Didn't exist in base, present in head. |
+| **unchanged** | Same signature + severity in both. |
+
+Canonical signature is `(category, location, evidence_hash)` — so a
+finding that moved class but kept the smoking gun stays linked.
+
+## Report template
+
+```bash
+mnexus report --project PRJ-NEW \
+              --template diff \
+              --format html \
+              --output ~/.mnexus/workspace/reports/PRJ-NEW-diff.html
+```
+
+Or from the REPL:
+
+```
+🔱 nexus PRJ-NEW ❯ /report html
+# /report doesn't carry the template flag yet — use the HTTP endpoint
+# or the CLI subcommand for non-technical templates.
+```
+
+The diff report renders only the changed findings + a delta summary at
+the top. Mitigation Playbook is included for every **regressed** and
+**new** finding so the dev team sees concrete fixes.
+
+## Empty-state behavior
+
+| Situation | What you get |
+| --------- | ------------ |
+| First-ever scan of this package | `base = null`, diff JSON is empty, SPA renders "no prior build to compare against". |
+| Same APK uploaded twice (dedup) | Diff returns identical pid for head + base → `summary.any_changes = false`. |
+| Different package | The orchestrator refuses to diff — packages must match. Override with explicit `--against` (it'll still compute, but flag a warning). |
+
+## Code references
+
+* `mnexus/intelligence/manifest_diff.py`
+* `mnexus/intelligence/findings_diff.py`
+* API handlers: `mnexus/api/main.py` → search for `manifest-diff` / `findings-diff`
+* Report template: `mnexus/reporting/templates/diff.*`

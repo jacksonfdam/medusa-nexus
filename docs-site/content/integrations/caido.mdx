@@ -1,0 +1,75 @@
+---
+title: Caido
+---
+
+import { Callout } from 'nextra/components';
+
+# Caido integration
+
+[Caido](https://caido.io) is the lighter, TypeScript-scriptable
+alternative to Burp. MedusaNexus drives it via Caido's REST API.
+
+## Setup
+
+1. Install Caido (free tier is fine for solo work; pro for team
+   features). Open it once so the workbench creates its config.
+2. Generate an API token: *Workbench → Settings → Tokens → Generate*.
+3. Add to `~/.mnexus/env.sh`:
+
+   ```bash
+   export MNEXUS_PROXY_FLAVOR=caido
+   export MNEXUS_CAIDO_URL=http://localhost:8080
+   export MNEXUS_CAIDO_API_KEY=cai_…
+   ```
+
+4. Source + verify:
+
+   ```bash
+   source ~/.mnexus/env.sh
+   mnexus doctor | grep caido
+   ```
+
+## What works today
+
+| Feature | Status |
+| ------- | ------ |
+| Doctor ping | ✓ |
+| Scope auto-populate from project hostnames | ✓ |
+| Live `/api-map` hit overlay | ✓ |
+| Probe plan execution | ✓ |
+| Plugin install (Burp-extension-style auto-load) | Planned |
+
+## API surface used
+
+| Endpoint | Use |
+| -------- | --- |
+| `GET /api/v1/health` | Doctor ping. |
+| `POST /api/v1/scope` | Add discovered hostnames after static scan. |
+| `GET /api/v1/replays` | Pull traffic for the API map overlay. |
+| `POST /api/v1/replay/run` | Execute a probe plan entry. |
+
+## REPL flow
+
+```
+🔱 nexus PRJ-… ❯ /dynamic start            # Caido is set as proxy
+🔱 nexus PRJ-… ❯ /open /#/projects/PRJ-…/api-map
+# Hit counters populate live as the app makes requests.
+```
+
+## Pitfalls
+
+<Callout type="info">
+Caido binds to `127.0.0.1` by default — set it to `0.0.0.0` if the
+device is on the same LAN but a different host. The `MNEXUS_CAIDO_URL`
+env var should still point at `localhost` from MedusaNexus's
+perspective.
+</Callout>
+
+| Symptom | Fix |
+| ------- | --- |
+| `caido  ● MISS` | Token expired or the workbench isn't running. Regenerate the token. |
+| Empty `/api-map` overlay | Caido's HTTPS interception is off. Enable it in *Workbench → Settings → HTTPS*. |
+
+## Code
+
+* Engine: `mnexus/engines/caido_engine.py`

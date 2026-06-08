@@ -1,0 +1,113 @@
+---
+title: Memory Inspector
+---
+
+import { Callout } from 'nextra/components';
+
+# Memory Inspector
+
+Live memory scan / read / write / trace, on top of an active Frida
+session. Useful for token hunting, RASP bypass, instrumentation that
+needs to see the address space the app is running in.
+
+## Prerequisites
+
+* An active dynamic session — `/dynamic start` first.
+* The target process attached + your Frida hooks loaded.
+
+```
+🔱 nexus PRJ-… ❯ /dynamic start
+🔱 nexus PRJ-… ❯ /memory modules
+```
+
+## What it can do
+
+| Operation | What it does | Behind the scenes |
+| --------- | ------------ | ----------------- |
+| `modules` | List every loaded module (name, base, size). | `Process.enumerateModules()` over RPC. |
+| `scan <pattern>` | Search every committed range for a byte pattern. | `Memory.scan()` per range — wildcards (`?? ??`) supported. |
+| `read <addr> [<size>]` | Hex-dump bytes at an address. | `Memory.readByteArray()`. |
+| `write <addr> <hex>` | Overwrite bytes at an address (with rollback hex captured). | `Memory.writeByteArray()`, after a read for rollback. |
+| `trace start <addr> [<size>]` | Install a `MemoryAccessMonitor` watchpoint over a range. | RPC → JS side wires up the monitor + on_access handler. |
+| `trace stop` | Tear down active watchpoints. | `MemoryAccessMonitor.disable()`. |
+
+Watchpoint events stream out as `mem_trace` channel SSE messages on
+`/v1/projects/{id}/dynamic/stream`, alongside the regular Frida `send`
+events.
+
+## REPL examples
+
+```bash
+# Enumerate loaded modules. Filter by name for sanity:
+🔱 nexus ❯ /memory modules
+
+# Find every reference to a JWT prefix in the heap:
+🔱 nexus ❯ /memory scan "65 79 4A"
+
+# Read 128 bytes at the address you spotted:
+🔱 nexus ❯ /memory read 0x7faa12340000 128
+0x7faa12340000  65 79 4a 68 62 47 63 69  4f 69 4a 49 55 7a 49 31  eyJhbGciOiJIUzI1
+0x7faa12340010  4e 69 49 73 49 6e 52 35  cC 49 36 49 6b 70 58 56  NiIsInR5cCI6IkpXV
+…
+
+# Patch the byte at runtime — useful for forcing a comparison:
+🔱 nexus ❯ /memory write 0x7faa12340120 "00 00 00 00"
+✓ wrote 4 byte(s) at 0x7faa12340120
+  rollback: 73 75 63 63
+
+# Watch a range for accesses (e.g. the token buffer):
+🔱 nexus ❯ /memory trace start 0x7faa12340000 256
+✓ watching 256 bytes at 0x7faa12340000
+```
+
+Watchpoint events surface in the web UI's **Dynamic** tab under a
+`MEM_TRACE` chip and in the SSE stream:
+
+```
+data: {"channel":"mem_trace","op":"READ","addr":"0x7faa1234001A",
+       "from":"0x7f1234abc","tid":31402,"ts":1717896420.331}
+```
+
+## API equivalents
+
+| REPL | HTTP |
+| ---- | ---- |
+| `/memory modules` | `GET /v1/dynamic/sessions/{sid}/memory/modules` |
+| `/memory scan …` | `POST /v1/dynamic/sessions/{sid}/memory/scan` |
+| `/memory read …` | `POST /v1/dynamic/sessions/{sid}/memory/read` |
+| `/memory write …` | `POST /v1/dynamic/sessions/{sid}/memory/write` |
+| `/memory trace start` | `POST /v1/dynamic/sessions/{sid}/memory/trace` |
+| `/memory trace stop` | `DELETE /v1/dynamic/sessions/{sid}/memory/trace` |
+
+Bodies and responses are in [API reference → dynamic](/reference/api/dynamic).
+
+## Patterns that work
+
+* **Token hunting:** `/memory scan "Authorization: Bearer "` then read
+  back 256 bytes to grab the token.
+* **String swap:** find a hard-coded URL, overwrite it with a different
+  same-length URL → the next request hits *your* host.
+* **RASP bypass research:** `trace start` over the SSL_read result
+  buffer to confirm what the pinning lib actually compares against.
+* **Crash repro:** if a finding suggests a buffer overflow, `read`
+  before/after the unsafe call, then `write` the canary value.
+
+<Callout type="warning" emoji="⚠">
+**Writes are irreversible from the tool side.**
+
+`/memory write` captures the previous bytes in the response so you can
+manually roll back, but there's no undo log. Confirm the address with a
+read first, and avoid writing in production processes you didn't spawn
+with `/dynamic start --spawn`.
+</Callout>
+
+## Code references
+
+* RPC surface: `mnexus/runtime/memory_ops.py`
+* Frida-JS side (loaded into the session): `mnexus/runtime/scripts/memory_ops.js`
+* API routes: `mnexus/api/main.py` — search for `dynamic/sessions/.+/memory`
+
+Next: [Dynamic + Frida →](/workflows/dynamic) for the surrounding
+session lifecycle, or
+[Pipelines →](/workflows/pipelines) to stack the inspector with other
+recipes.

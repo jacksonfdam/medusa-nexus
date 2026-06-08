@@ -1,0 +1,129 @@
+---
+title: Android static scan
+---
+
+import { Callout } from 'nextra/components';
+
+# Android static scan
+
+The bread-and-butter workflow. APK in → findings + attack surface +
+auto-generated Frida hooks out.
+
+## The one-liner
+
+```bash
+mnexus scan ./target.apk
+```
+
+Everything below is *what just happened* and *how to tune it*.
+
+## Pipeline
+
+```
+target.apk
+    │
+    ├─→ apktool extract_manifest        ←─ package + version + permissions
+    ├─→ apktool decode (smali)          ←─ smali tree under workspace/<pid>/smali/
+    ├─→ jadx decompile                  ←─ java tree under workspace/<pid>/java/
+    │
+    ├─[fan-out in parallel]─→
+    │     ├─ secrets_detector           ─→ FIND-* (HIGH/CRITICAL with mitigation)
+    │     ├─ deeplink_extractor         ─→ AttackSurface.deeplinks
+    │     ├─ permission_analyser        ─→ AttackSurface.permissions
+    │     ├─ crypto_primitive_sniffer   ─→ AttackSurface.crypto_ops
+    │     ├─ ghidra_engine (native libs)─→ JNI exports + ROP gadgets + URL refs
+    │     ├─ mobsf_engine (if running)  ─→ second-opinion findings
+    │     └─ pinning_lib_detector       ─→ AttackSurface.pinning_strategies
+    │
+    ├─→ correlator                      ─→ static-suspicion + evidence merge
+    └─→ hook_generator                  ─→ workspace/<pid>/hooks/*.js (Frida)
+```
+
+## Engines that participate
+
+`apktool`, `jadx`, `ghidra` (if installed), `mobsf` (if running),
+`frida` (auto-hook generator only — runtime is opt-in via
+[Dynamic →](/workflows/dynamic)), plus a handful of in-tree detectors
+in `mnexus/intelligence/`.
+
+Engines you can skip: `ghidra` is the biggest one. Without it the
+**Native** tab will only show what `apktool` could extract (basic
+symbol names from `.dynsym`, plus `strings`-style URL refs). For most
+Android apps that's enough.
+
+## CLI
+
+```bash
+mnexus scan ./target.apk \
+  --package com.target.app \    # override auto-detect
+  --version 4.2.1               # override auto-detect
+```
+
+REPL equivalent:
+
+```
+🔱 nexus ❯ /scan ./target.apk
+```
+
+Both end up calling `MedusaNexus.ingest_apk()` — the same code path as
+`POST /v1/apks/upload`.
+
+## What the web UI gives you
+
+Open `http://127.0.0.1:8765/#/projects/PRJ-…` after `/serve`:
+
+| Tab | Backing endpoint | What you see |
+| --- | ---------------- | ------------ |
+| **Findings** | `GET /v1/projects/{id}/findings` | Every finding, filterable by severity / category. |
+| **Secrets** | `GET /v1/projects/{id}/secrets` | Confirmed + suspected. Distinct from generic findings because the false-positive rate is high enough to warrant manual review. |
+| **Components** | `GET /v1/projects/{id}/components` | Exported activities / services / receivers / providers + their intent filters. |
+| **Native** | `GET /v1/projects/{id}/native` | Per-`.so`: JNI exports, hardcoded URLs, crypto routines, exported functions. |
+| **API map** | `GET /v1/projects/{id}/api-map` | Static URL extraction. When [Moxy](/integrations/moxy) is up, gets a live `hits` overlay. |
+| **SSL map** | `GET /v1/projects/{id}/ssl-map` | Pinning libs detected → matching bypass recipes pre-wired. |
+| **OWASP** | `GET /v1/projects/{id}/owasp` | M1–M10 MASVS matrix. |
+| **Attack tree** | `GET /v1/projects/{id}/attack-tree` | DAG view of attacker → asset chains. |
+| **Dataflow** | `GET /v1/projects/{id}/dataflow` | Source → sink (crypto + network). |
+| **Surface** | `GET /v1/projects/{id}/surface` | Raw `AttackSurface` model dump for power users. |
+| **Hooks** | `GET /v1/projects/{id}/hooks` | Auto-generated Frida scripts, ready to load. |
+| **Correlations** | `GET /v1/projects/{id}/correlations` | Static suspicion + dynamic evidence pairs. |
+| **Traffic** | `GET /v1/projects/{id}/traffic` | MITM capture (proxy plugged in). |
+| **Manifest diff** | `GET /v1/projects/{id}/manifest-diff` | Surface delta vs prior scan. |
+| **Findings diff** | `GET /v1/projects/{id}/findings-diff` | Security delta vs prior scan. |
+
+## Re-scanning
+
+When you suspect a finding is stale (e.g. you changed a rule):
+
+```
+🔱 nexus PRJ-… ❯ /rescan
+```
+
+This re-runs the pipeline in place — the same `PRJ-…` id, same DB row,
+fresh findings. Use this when:
+
+* You edited rules under `rules/`.
+* You upgraded an engine and want to confirm.
+* You want to drop a finding that was a false positive.
+
+To compare two builds of the same app (where version actually changed),
+re-scan the new APK as a *new project* with `mnexus scan` — the diff
+endpoints auto-pick the latest prior scan of the same package.
+
+<Callout type="info">
+Dedup is on by default — uploading the same APK bytes twice returns the
+existing project id. Override with `force=true` on the
+`/v1/apks/upload` endpoint or `--force` on the CLI.
+</Callout>
+
+## Common pitfalls
+
+| Symptom | Likely cause |
+| ------- | ------------ |
+| `apktool` errors with "Could not decode arsc file" | Modern AAPT2 compact resources. The orchestrator falls back to filename heuristics; findings still land. |
+| `jadx` runs forever | Heavy ProGuard'd APK. Pass `--no-jadx` (CLI flag coming) or let it run — it's not blocking the rest of the pipeline. |
+| Zero secrets found | The detector defaults to conservative patterns. Look in `mnexus/playintel/secret_detector.py` to tune. |
+| Native tab empty | No `lib/*/`, or the `.so` was packed. Ghidra still tries — check `ghidra_engine` logs in the workspace. |
+| Risk score feels wrong | `mnexus/intelligence/risk_score.py` — pure function, easy to tune. |
+
+Next: drive a Frida session against the same project →
+[Dynamic + Frida](/workflows/dynamic).

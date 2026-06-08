@@ -1,0 +1,156 @@
+---
+title: Environment variables
+---
+
+import { Callout } from 'nextra/components';
+
+# Environment variables
+
+Every knob MedusaNexus reads at runtime lives in
+`~/.mnexus/env.sh`. The installer writes a baseline file; you can
+hand-edit it or layer overrides via your shell rc. This page is the
+single source of truth — when in doubt:
+
+```bash
+mnexus doctor --env
+```
+
+…dumps every `MNEXUS_*` variable the running process actually sees,
+side by side with what the orchestrator parsed (so you catch mismatches
+between two shells, pyenv shims, etc.).
+
+## Quick map
+
+```
+$MNEXUS_HOME (default: ~/.mnexus)
+├── tools/        ← MNEXUS_*_PATH variables point in here
+├── workspace/    ← MNEXUS_WORKSPACE
+├── nexus.sqlite3 ← MNEXUS_DB_PATH
+└── env.sh        ← sourced by your shell rc
+```
+
+## Variables
+
+### Core engines
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_ADB_PATH` | `adb` | `adb` binary. The glue. |
+| `MNEXUS_JADX_PATH` | `jadx` | `jadx` CLI. Decompiles things that shouldn't decompile. |
+| `MNEXUS_APKTOOL_PATH` | `apktool` | `apktool` CLI. Resource whisperer. |
+| `MNEXUS_GHIDRA_PATH` | *(unset)* | Ghidra install dir. Headless does the dirty work. |
+
+### Workflow tools
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_MEDUSA_PATH` | *(unset)* | [ch0pin/medusa](https://github.com/Ch0pin/medusa) checkout. Recipes live here. |
+| `MNEXUS_STHENO_PATH` | *(unset)* | [ch0pin/Stheno](https://github.com/Ch0pin/Stheno) checkout. APK patcher. |
+| `MNEXUS_VPHONE_PATH` | *(unset)* | [super-tart-vphone](https://github.com/wh1te4ever/super-tart-vphone) checkout (research only). |
+| `MNEXUS_TART_BIN` | *(unset)* | Built `tart` binary from super-tart-vphone. Set by `scripts/setup-vphone.sh`. |
+
+### PlayIntel
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_PLAYINTEL_CREDENTIALS` | `~/.config/mnexus/playintel.ini` | Override path to PlayIntel credentials INI. Falls back to `~/.config/apkeep/apkeep.ini`. |
+| `MNEXUS_PLAYINTEL_ACTIVE_PROBES` | `0` | Set to `1` to enable active Firebase / Firestore / Storage probes by default. |
+
+### MobSF
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_MOBSF_URL` | `http://localhost:8000` | MobSF REST base URL. |
+| `MNEXUS_MOBSF_API_KEY` | *(unset)* | MobSF API key. **Required** if MobSF is in your engine list. |
+
+### Burp Suite
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_BURP_URL` | `http://localhost:1337` | Burp REST API base URL. |
+| `MNEXUS_BURP_API_KEY` | *(unset)* | Burp REST API key. Generate in the Burp extension UI. |
+
+### Caido
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_CAIDO_URL` | `http://localhost:8080` | Caido REST API base URL. |
+| `MNEXUS_CAIDO_API_KEY` | *(unset)* | Caido API token. Generate at *Workbench → Settings → Tokens*. |
+
+### Moxy
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_MOXY_URL` | `http://localhost:5000` | Moxy web UI base URL. |
+| `MNEXUS_MOXY_PROXY_HOST` | `localhost` | Hostname the device should point at for Moxy's MITM proxy. |
+| `MNEXUS_MOXY_PROXY_PORT` | `8081` | Port the device should point at for Moxy's MITM proxy. |
+| `MNEXUS_MOXY_CA_PATH` | *(unset)* | Path to mitmproxy CA cert extracted from the Moxy container. |
+
+### Proxy selection
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_PROXY_FLAVOR` | `burp` | Which intercepting proxy to drive: `burp`, `caido`, or `moxy`. |
+
+### Workspace + DB
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_WORKSPACE` | `~/.mnexus/workspace` | Per-project artefact directory. |
+| `MNEXUS_DB_PATH` | `~/.mnexus/nexus.sqlite3` | SQLite artifact store path. |
+| `MNEXUS_SCRIPTS_PATH` | *(repo `scripts/`)* | Override where the orchestrator looks for shell helpers. |
+| `MNEXUS_RULES_PATH` | *(repo `rules/`)* | Override where the orchestrator looks for finding rules. |
+
+### Tunables
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_PARALLEL_ENGINES` | `1` | Whether static engines fan out in parallel (`0` = sequential, useful for debugging). |
+| `MNEXUS_DEFAULT_DYNAMIC_DURATION_S` | `300` | Default lifetime of a `/dynamic start` session in seconds. |
+
+### MCP driver
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_API_BASE` | `http://127.0.0.1:8765` | URL the [MCP server](/integrations/mcp) calls. Set to a remote Nexus if your assistant is wired to a shared instance. |
+
+## Reading the live config from Python
+
+If you're scripting against the package directly:
+
+```python
+from mnexus.config import NexusConfig
+
+cfg = NexusConfig.from_env()
+print(cfg.workspace)            # PosixPath('/Users/.../.mnexus/workspace')
+print(cfg.proxy_flavor)         # 'burp'
+```
+
+The schema is a Pydantic model — every field has a `description` and a
+sensible default. Run `python -c 'from mnexus.config import NexusConfig;
+print(NexusConfig.model_json_schema())'` to get the machine-readable
+form for tooling.
+
+## Common mistakes
+
+<Callout type="error" emoji="🪤">
+**`mnexus doctor` shows MISS but my env var is set.**
+
+Three suspects, in this order:
+
+1. Your shell sourced `env.sh` *after* the process started.
+2. A pyenv / asdf / direnv shim stripped the var.
+3. You exported the var in a different shell than the one launching `mnexus`.
+
+`mnexus doctor --env` dumps both `os.environ` and the orchestrator's parsed
+config side by side. Mismatches are highlighted.
+</Callout>
+
+<Callout type="warning" emoji="⚠">
+**Setting `MNEXUS_DB_PATH` doesn't move existing data.**
+
+The artifact store is a single SQLite file. Moving it requires a manual
+`cp` — the orchestrator opens whatever path is set at startup.
+</Callout>
+
+Next: [Your first scan →](/getting-started/first-scan).

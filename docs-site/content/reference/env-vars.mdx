@@ -1,0 +1,70 @@
+---
+title: Environment variables
+---
+
+# Environment variables
+
+> The walkthrough version with prose lives in
+> [Getting started → Environment variables](/getting-started/environment).
+> This reference page is the same table set, no commentary — for when you
+> just need the matrix.
+
+```bash
+mnexus doctor --env       # dump the variables this process actually sees
+```
+
+## Engines
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_ADB_PATH` | `adb` | `adb` binary. |
+| `MNEXUS_JADX_PATH` | `jadx` | `jadx` CLI. |
+| `MNEXUS_APKTOOL_PATH` | `apktool` | `apktool` CLI. |
+| `MNEXUS_GHIDRA_PATH` | *(unset)* | Ghidra install dir. |
+| `MNEXUS_MEDUSA_PATH` | *(unset)* | ch0pin/medusa checkout. |
+| `MNEXUS_STHENO_PATH` | *(unset)* | ch0pin/Stheno checkout. |
+| `MNEXUS_VPHONE_PATH` | *(unset)* | super-tart-vphone checkout. |
+| `MNEXUS_TART_BIN` | *(unset)* | `tart` binary from super-tart-vphone. |
+| `MNEXUS_PLAYINTEL_CREDENTIALS` | `~/.config/mnexus/playintel.ini` | PlayIntel credentials INI override. |
+| `MNEXUS_PLAYINTEL_ACTIVE_PROBES` | `0` | Default-on active Firebase probes. |
+
+## Services
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_MOBSF_URL` | `http://localhost:8000` | MobSF REST base URL. |
+| `MNEXUS_MOBSF_API_KEY` | *(unset)* | MobSF API key. |
+| `MNEXUS_BURP_URL` | `http://localhost:1337` | Burp REST API base URL. |
+| `MNEXUS_BURP_API_KEY` | *(unset)* | Burp REST API key. |
+| `MNEXUS_CAIDO_URL` | `http://localhost:8080` | Caido REST API base URL. |
+| `MNEXUS_CAIDO_API_KEY` | *(unset)* | Caido API token. |
+| `MNEXUS_MOXY_URL` | `http://localhost:5000` | Moxy web UI base URL. |
+| `MNEXUS_MOXY_PROXY_HOST` | `localhost` | Hostname the device aims at. |
+| `MNEXUS_MOXY_PROXY_PORT` | `8081` | Port the device aims at. |
+| `MNEXUS_MOXY_CA_PATH` | *(unset)* | Path to extracted mitmproxy CA. |
+| `MNEXUS_PROXY_FLAVOR` | `burp` | Which proxy to drive (`burp` / `caido` / `moxy`). |
+
+## Storage + workspace
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_WORKSPACE` | `~/.mnexus/workspace` | Per-project artefact root. |
+| `MNEXUS_DB_PATH` | `~/.mnexus/nexus.sqlite3` | SQLite artifact store. |
+| `MNEXUS_SCRIPTS_PATH` | *(repo `scripts/`)* | Override scripts dir. |
+| `MNEXUS_RULES_PATH` | *(repo `rules/`)* | Override rules dir. |
+
+## Tunables
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_PARALLEL_ENGINES` | `1` | Parallel static fan-out toggle. |
+| `MNEXUS_DEFAULT_DYNAMIC_DURATION_S` | `300` | Default `/dynamic start` lifetime. |
+
+## MCP
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `MNEXUS_API_BASE` | `http://127.0.0.1:8765` | URL the MCP server calls. |
+
+Schema source of truth: `mnexus/config.py` (`NexusConfig` Pydantic
+model).

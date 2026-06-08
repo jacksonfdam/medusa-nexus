@@ -1,0 +1,179 @@
+---
+title: Your first scan
+---
+
+import { Callout, Steps } from 'nextra/components';
+
+# Your first scan
+
+End-to-end: from a `.apk` on disk to a mitigation-ready report. Follows
+the same pipeline a paid pentest would.
+
+<Steps>
+
+### Drop the APK on disk
+
+Anywhere is fine. The orchestrator copies it into
+`$MNEXUS_WORKSPACE/<project_id>/source.apk` on ingest. For this walkthrough:
+
+```bash
+~/Downloads/target.apk
+```
+
+If you don't have an APK handy, pull one off a connected device:
+
+```bash
+adb shell pm list packages | grep com.target          # find it
+adb shell pm path com.target.app                      # locate the APK
+adb pull /data/app/.../base.apk ~/Downloads/target.apk
+```
+
+### Run the scan
+
+```bash
+mnexus scan ~/Downloads/target.apk
+```
+
+The CLI does the following, in order:
+
+1. **`apktool`** extracts AndroidManifest.xml — package name + version
+   come from there automatically. (You can override with `--package` /
+   `--version`.)
+2. **All static engines fan out in parallel** — jadx, ghidra (if you
+   have it), MobSF (if running), the secrets scanner, the deeplink
+   extractor, the permissions analyser, the crypto-primitive sniffer.
+3. **The attack surface gets built** — exported components, deeplinks,
+   crypto operations, hardcoded URLs, native libraries, JNI exports.
+4. **Findings get correlated** — duplicates from different engines
+   collapse, suspicion + evidence promotes confidence levels.
+5. **Frida hooks get auto-generated** based on what static found. They
+   land in `$MNEXUS_WORKSPACE/<project_id>/hooks/`.
+
+Output:
+
+```
+🔱 ✓ ingest complete
+PRJ-355151DF  ·  com.target.app
+
+risk      67.5/100
+findings  42  (3c 12h 18m 9l)
+surface   24 components · 8 deeplinks · 3 native libs
+hooks     7 auto-generated
+
+Active project set. Try /findings or /report.
+```
+
+### Open the REPL
+
+```bash
+mnexus
+```
+
+You land in the interactive REPL. The project you just scanned is
+already the active one — confirm with `/projects`:
+
+```
+🔱 nexus ❯ /projects
+┌──────────────┬─────────────────┬─────────┬──────┬──────────┬─────────────────────┐
+│ id           │ package         │ version │ risk │ findings │ updated             │
+├──────────────┼─────────────────┼─────────┼──────┼──────────┼─────────────────────┤
+│ PRJ-355151DF ◀│ com.target.app │ 4.2.1   │ 67.5 │ 42       │ 2026-06-08 14:22:01 │
+└──────────────┴─────────────────┴─────────┴──────┴──────────┴─────────────────────┘
+```
+
+### Walk the findings
+
+```
+🔱 nexus PRJ-355151DF ❯ /findings critical
+```
+
+Filters to severity=critical. Repeat with `high`, `medium`, `low`,
+`info`. Each row links to a finding id (`FND-...`) you can drill into
+via the web UI or `GET /v1/findings/{id}`.
+
+### See the attack surface in the web UI
+
+```
+🔱 nexus PRJ-355151DF ❯ /serve
+🔱 nexus PRJ-355151DF ❯ /open
+```
+
+`/serve` starts the FastAPI backend in the background; `/open` launches
+the SPA. The dashboard view shows the project tree:
+
+| Tab | Shows |
+| --- | ----- |
+| **Findings** | Every finding with severity / engine / location columns. |
+| **Secrets** | Confirmed + suspected secrets, grouped by detector. |
+| **Components** | Exported activities / services / receivers / providers. |
+| **Native** | Per-`.so` JNI exports + hardcoded URLs + crypto routines. |
+| **API map** | Hostname → path → methods tree (static + live from Moxy). |
+| **SSL map** | Pinning libraries detected, with bypass recipes pre-wired. |
+| **OWASP** | M1–M10 MASVS matrix populated from finding categories. |
+| **Attack tree** | Exploitation-graph view of the surface. |
+| **Dataflow** | Source → sink crypto + network flows. |
+| **Hooks** | Auto-generated Frida scripts ready to load. |
+| **Correlations** | Static suspicion + dynamic evidence pairs. |
+| **Traffic** | Live MITM capture (needs the proxy plugged in). |
+
+### Generate a report
+
+```
+🔱 nexus PRJ-355151DF ❯ /report html
+```
+
+Drops `~/.mnexus/workspace/reports/PRJ-355151DF.html` on disk. Every
+report carries a **Mitigation Playbook** — concrete before/after code
+for each finding, not bullet points. Formats:
+
+| Format | Use case |
+| ------ | -------- |
+| `markdown` | Pastes into a PR description / Notion / Jira. |
+| `json`     | Feeds into your own pipeline. |
+| `html`     | Self-contained HTML you can email or host. |
+| `pdf`      | Client deliverable (needs WeasyPrint). |
+| `png`      | One-image executive summary (needs Chromium). |
+
+See [Reporting →](/workflows/reporting) for templates + theming.
+
+### Diff against a future scan
+
+When the dev team ships a patch and you re-scan the new APK:
+
+```
+🔱 nexus ❯ /scan ~/Downloads/target-4.3.0.apk
+🔱 nexus PRJ-A88B12C4 ❯ /diff findings
+```
+
+Output is "what got fixed, what's new, what's still there". Same logic
+backs the **Findings diff** report template. See
+[Diff reports →](/workflows/diff).
+
+</Steps>
+
+## What you just did
+
+```
+APK on disk
+  └─→ /scan ───────→ ingest + static fan-out + correlation
+        ├─→ /findings critical    ← inspect the most-painful ones
+        ├─→ /open  /findings      ← same data in the web UI
+        ├─→ /report html          ← deliverable artefact
+        └─→ /diff findings        ← next scan compares against this one
+```
+
+<Callout type="info">
+Every step here has a matching HTTP endpoint. The CLI is a thin client
+over the same FastAPI surface the web UI uses. Read
+[`/reference/api`](/reference/api) for the wire shape if you're
+scripting.
+</Callout>
+
+## Next steps
+
+* **Add dynamic instrumentation** — [Dynamic + Frida →](/workflows/dynamic)
+* **Patch + re-sign the APK** to defeat root detection / pinning —
+  [Pipelines →](/workflows/pipelines)
+* **Pull traffic** with Burp / Caido / Moxy →
+  [Integrations →](/integrations)
+* **Drive Nexus from an AI assistant** — [MCP →](/integrations/mcp)

@@ -1,0 +1,90 @@
+---
+title: Burp Suite
+---
+
+import { Callout } from 'nextra/components';
+
+# Burp Suite integration
+
+MedusaNexus drives Burp via its REST API extension. Captured traffic
+feeds the **Traffic** tab and the API map's live `hits` overlay.
+
+## Setup
+
+1. Install Burp Suite Pro (Community lacks the REST surface).
+2. Run `scripts/setup.sh` — the installer drops the REST API extension
+   JAR into your Burp configuration directory.
+3. Open Burp → *Extensions* → *Installed* → confirm the extension is
+   active.
+4. Open the extension UI → copy the API key.
+5. Add to `~/.mnexus/env.sh`:
+
+   ```bash
+   export MNEXUS_PROXY_FLAVOR=burp
+   export MNEXUS_BURP_URL=http://localhost:1337
+   export MNEXUS_BURP_API_KEY=…           # from the extension UI
+   ```
+
+6. Source the env file and verify:
+
+   ```bash
+   source ~/.mnexus/env.sh
+   mnexus doctor | grep burp
+   # burp  ● OK  v…  http://localhost:1337
+   ```
+
+## How the orchestrator uses it
+
+| When | What it does |
+| ---- | ------------ |
+| Static scan completes | Calls `POST /scope` to add the target package's discovered hostnames to Burp's scope. |
+| `/dynamic start` | Configures the device proxy to point at Burp's listener (set `proxy.host` / `proxy.port` in Burp). |
+| `/v1/projects/{id}/api-map` | Pulls `GET /proxy/history` filtered by scope to overlay live `hits` counts on the static URL tree. |
+| `/burp/probe-plan` | Renders a plan of what Burp will replay against suspected endpoints (with mitigation per response code). |
+| `/burp/execute` | Replays the probe plan, materialises findings from responses. |
+
+## Probe plan
+
+```
+🔱 nexus PRJ-… ❯ /serve
+$ curl http://127.0.0.1:8765/v1/projects/PRJ-…/burp/probe-plan
+```
+
+Or open the **Findings → Burp probes** card in the SPA. The plan lists
+every suggested probe with:
+
+* The endpoint (host + path + method).
+* The reason MedusaNexus thinks it's worth probing (static finding id
+  + category).
+* The expected vulnerability if the probe returns 200.
+* The pre-written mitigation if it does.
+
+Execute via:
+
+```
+POST /v1/projects/{id}/burp/execute
+```
+
+Each response that matches the vulnerability shape lands as a new
+finding with `source_engine=burp`.
+
+## Common pitfalls
+
+<Callout type="warning" emoji="⚠">
+**API key rotates when you restart Burp.** Recopy after each fresh Burp
+session and update `~/.mnexus/env.sh`. The doctor will flag a 401 if
+the key is stale.
+</Callout>
+
+| Symptom | Fix |
+| ------- | --- |
+| `burp  ● MISS` and the URL looks right | Burp is listening but the extension isn't loaded. Check the extension UI. |
+| `401` from the doctor | API key rotated. Recopy from the extension UI. |
+| Traffic missing from `/api-map` | Burp's scope doesn't include the target. Confirm via *Target → Scope*. |
+| The device never proxies | The device's WiFi proxy isn't pointed at Burp. Set host = your Mac's LAN IP, port = Burp listener port. Burp must listen on `0.0.0.0:8080`, not `127.0.0.1`. |
+
+## Where to look in the code
+
+* Engine: `mnexus/engines/burp_engine.py`
+* REST client: same file
+* Probe planner: `mnexus/intelligence/traffic_findings.py`

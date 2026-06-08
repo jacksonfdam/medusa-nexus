@@ -1,0 +1,32 @@
+---
+title: Reference
+---
+
+# Reference
+
+The pages that the build pipeline keeps in sync with the source code,
+plus the architecture and env-var compendiums.
+
+| Page | What it covers | Source |
+| ---- | -------------- | ------ |
+| [Architecture](/reference/architecture) | Layered breakdown — engines, runtime, intelligence, API, MCP. | Hand-written. |
+| [Environment variables](/reference/env-vars) | Every `MNEXUS_*` knob, table form. | Mirrors [Getting started → Environment](/getting-started/environment). |
+| [CLI](/reference/cli) | Every `mnexus <subcommand>` and its flags. | **Generated** from the Click command tree at build time. |
+| [REPL slash commands](/reference/repl) | Every `/<command>` in the interactive REPL. | **Generated** from `SLASH_COMMANDS` at build time. |
+| [HTTP API](/reference/api) | All 136+ FastAPI endpoints, grouped by URL prefix. | **Generated** from the FastAPI OpenAPI schema at build time. |
+
+The generator is `docs-site/scripts/gen_reference.py`. Run it locally:
+
+```bash
+cd docs-site
+npm run dev   # predev hook runs the generator automatically
+```
+
+Or, manually:
+
+```bash
+python3 docs-site/scripts/gen_reference.py
+```
+
+If a flag or endpoint isn't in the reference, it doesn't exist — either
+add it to the source or stop looking.

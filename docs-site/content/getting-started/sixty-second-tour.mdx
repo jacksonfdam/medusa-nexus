@@ -1,0 +1,38 @@
+---
+title: 60-second tour
+---
+
+# 60-second tour
+
+For people evaluating the tool. Six commands, six outcomes. Run them in
+order; the next one assumes the previous one ran.
+
+| Time | Command | What you should see |
+| ---- | ------- | ------------------- |
+| 0:05 | `scripts/setup.sh --minimal` | Python venv + adb + jadx + apktool + frida land under `~/.mnexus/`. ~2 min. |
+| 0:10 | `source ~/.mnexus/env.sh && mnexus doctor` | Engine matrix prints. The minimal engines should all be `● OK`. |
+| 0:20 | `mnexus scan ./target.apk` | Spinner runs, then a panel prints with the risk score + finding counts. ~30s on a 20 MB APK. |
+| 0:35 | `mnexus` | The REPL opens. You're in the cyberpunk terminal. Type `/help` if curious. |
+| 0:45 | `/serve` followed by `/open` | The web UI launches in your browser. Sidebar lists every project tab. |
+| 0:55 | `/report html` | `~/.mnexus/workspace/reports/PRJ-….html` lands on disk. Open it. Mitigation Playbook is at the bottom. |
+
+That's the entire happy path. If any step fails the doctor explains
+why; everything else is incremental detail.
+
+## What to evaluate
+
+* **Did the risk score feel honest?** Compare against your own gut on
+  the target APK. The scoring is tunable in
+  `mnexus/intelligence/risk_score.py`.
+* **Did the Mitigation Playbook give you actual code?** That's the
+  bar — if any finding shipped without remediation, that's a bug, file
+  it.
+* **Was the web UI fast?** Static SPA, JSON over HTTP. 30 ms per route
+  on a M-series Mac is the baseline.
+* **Did the auto-generated hooks compile when loaded into Frida?** Open
+  the **Hooks** tab in the SPA and click *Load to active session* (or
+  copy the JS and feed it to `frida -U -l hooks/foo.js -f com.target`).
+
+If two of those four felt good, go to [Workflows →](/workflows). If
+none did, open an issue on the repo with the project id and what
+disappointed you — that's the fastest feedback loop we have.

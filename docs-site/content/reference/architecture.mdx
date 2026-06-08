@@ -1,0 +1,167 @@
+---
+title: Architecture
+---
+
+# Architecture
+
+One paragraph per layer, then the connection diagram. Read this when
+you want to know where a bug lives or which file owns a behaviour.
+
+## Layers
+
+### Engines (`mnexus/engines/`)
+
+Adapter classes — one per external tool — that subclass `BaseEngine`.
+Each engine exposes `health_check()`, an action API surface
+(`analyze_apk`, `extract_manifest`, `decompile`, etc.), and translates
+the tool's output into `Finding` / `AttackSurface` model fields.
+
+| Engine | Wraps | Role |
+| ------ | ----- | ---- |
+| `adb_engine` | `adb` | Device control, APK pull. |
+| `apkeep_engine` | `apkeep` | Pull APK from Google Play. |
+| `apktool_engine` | `apktool` | AndroidManifest + smali + resources. |
+| `jadx_engine` | `jadx` | Java/Kotlin decompilation. |
+| `ghidra_engine` | Ghidra headless | Native `.so` analysis. |
+| `mobsf_engine` | MobSF REST | Second-opinion static. |
+| `ipatool_engine` | `ipatool` | IPA download from App Store. |
+| `frida_engine` | Frida core | Hook injection. |
+| `burp_engine` / `caido_engine` / `moxy_engine` | proxy REST | Traffic capture + replay. |
+| `play_intel_engine` | (built-in) | Stream APK from Play; Firebase + secrets scan. |
+| `vphone_engine` | `tart` | iOS lab VMs (research only). |
+| `firebase_engine` | alias of `play_intel_engine` | UI-facing rename. |
+
+### Orchestrator (`mnexus/core/`)
+
+`MedusaNexus` (the class) coordinates engine fan-out, builds the
+`Project`/`AttackSurface`/`Finding` graph, and persists everything via
+the `ArtifactStore`. The pipeline is four phases:
+
+1. **Ingest** — copy bytes into the workspace, write the `Project` row,
+   extract manifest meta.
+2. **Static fan-out** — run every static engine in parallel (when
+   `MNEXUS_PARALLEL_ENGINES=1`), collect findings.
+3. **Surface build** — `AttackSurface` synthesises components,
+   deeplinks, native libs, etc. from finding evidence.
+4. **Intelligence** — auto-hook generator, correlator, manifest/findings
+   diff against prior scans.
+
+### Runtime (`mnexus/runtime/`)
+
+Lives separately from engines because it owns *state*, not just
+adapters. `FridaSession`, `MemoryOps`, `APKPatcher`, `IPAPatcher`,
+`IPADecryptor`, `PipelineExecutor`. Each holds a long-lived handle to
+something external (Frida session, mutated APK bytes, decrypt subprocess)
+and exposes async methods the API layer drives.
+
+### Intelligence (`mnexus/intelligence/`)
+
+Pure functions that read findings and produce more findings. No I/O.
+`hook_generator`, `traffic_findings`, `manifest_diff`, `findings_diff`,
+`runtime_scripts`, `android_flags`, `correlator`. The cleanest layer to
+unit-test.
+
+### Models (`mnexus/models/`)
+
+Pydantic v2 schemas — `Finding`, `Severity`, `FindingCategory`,
+`AttackSurface`, `Project`, `PlayAccount`, `PlayScan`. Mitigation
+required at the model layer: any `CRITICAL` or `HIGH` finding without a
+`remediation` block fails validation, before it ever hits the DB.
+
+### Reporting (`mnexus/reporting/`)
+
+`ReportGenerator` + `ReportTemplate` + `ReportFormat`. Templates:
+executive / technical / owasp-matrix / diff. Formats: markdown / json /
+html / pdf / png. PDF via WeasyPrint, PNG via headless Chromium —
+both fall back to HTML when the dependency is missing.
+
+### API (`mnexus/api/`)
+
+FastAPI app — 136 endpoints across 21 resource buckets. SPA-friendly
+JSON, plus SSE for live dynamic streams. Static SPA assets live in
+`mnexus/api/static/` and are served at `/`.
+
+### CLI (`mnexus/cli.py`)
+
+Click + Rich. Two modes share one entrypoint:
+
+* `mnexus` (no args) → interactive REPL with 28 slash commands.
+* `mnexus <subcommand>` → flat one-shot commands (`scan`, `doctor`,
+  `serve`, `mcp-serve`, etc.).
+
+See [CLI reference](/reference/cli) for the live matrix.
+
+### MCP driver (`mnexus/mcp_server.py`)
+
+JSON-RPC 2.0 over stdio, no external deps. Exposes 10 read-only tools
+to AI assistants — every tool routes through the local FastAPI server
+so the same driver works against remote Nexus instances. See
+[MCP →](/integrations/mcp).
+
+## Connection diagram
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                              YOU                                     │
+│   (CLI · REPL · web UI · AI assistant via MCP · curl)                │
+└────────┬────────────────────────────┬─────────────────────┬──────────┘
+         │ click + rich               │ JSON / SSE          │ JSON-RPC
+         ▼                            ▼                     ▼ over stdio
+   ┌─────────────┐              ┌──────────────┐      ┌─────────────┐
+   │   CLI       │              │   FastAPI    │◀────▶│   MCP       │
+   │ (cli.py)    │──────────────▶│   app        │      │   driver    │
+   └─────────────┘  in-process  └──────────────┘      └─────────────┘
+                                      │
+                                      ▼
+                            ┌───────────────────┐
+                            │   Orchestrator    │
+                            │   (MedusaNexus)   │
+                            └─────┬──────┬──────┘
+                                  │      │
+                  ┌───────────────┘      └──────────────┐
+                  ▼                                     ▼
+            ┌──────────┐                       ┌───────────────┐
+            │ Engines  │                       │   Runtime     │
+            │ (jadx,   │ ─── findings ────────▶│ (FridaSession,│
+            │  ghidra, │                       │  Patchers,    │
+            │  mobsf,  │                       │  Pipelines)   │
+            │  frida,  │                       └───────┬───────┘
+            │  …)      │                               │
+            └────┬─────┘                               │
+                 │                                     │
+                 ▼                                     ▼
+            ┌────────────────────────────────────────────────┐
+            │              Intelligence layer                │
+            │  correlator · hook_generator · diff · risk     │
+            └──────────────────────┬─────────────────────────┘
+                                   │
+                                   ▼
+                         ┌───────────────────┐
+                         │  ArtifactStore    │
+                         │  (SQLite, single  │
+                         │   file)           │
+                         └───────────────────┘
+```
+
+## Single-file SQLite store
+
+Everything — projects, findings, attack surfaces, runtime sessions,
+diffs, reports, Play accounts, vphone state — lands in one file
+(`$MNEXUS_DB_PATH`, default `~/.mnexus/nexus.sqlite3`). Schema lives in
+`mnexus/core/artifact_store.py`. WAL mode is on; concurrent reads + one
+writer is the access pattern.
+
+Why one file: portability. You can `cp nexus.sqlite3 …` and reproduce
+the analyst's state on another machine, no migrations required.
+
+## Where to look when…
+
+| You're debugging | Open |
+| ---------------- | ---- |
+| A `MISS` engine | `mnexus/engines/<engine>.py` → `health_check()` |
+| A finding looks wrong | The engine that emitted it (check `finding.source_engine`) + `mnexus/intelligence/correlator.py` |
+| The risk score | `mnexus/intelligence/risk_score.py` |
+| A 500 from the API | `mnexus/api/main.py` (route handler) + the orchestrator method it calls |
+| A Frida hook that won't load | `mnexus/runtime/frida_session.py` + the generated hook in `~/.mnexus/workspace/<pid>/hooks/` |
+| A report rendering wrong | `mnexus/reporting/generator.py` + the template in `mnexus/reporting/templates/` |
+| The web UI talks to a missing route | `mnexus/api/static/app.js` |

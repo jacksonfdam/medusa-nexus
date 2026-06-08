@@ -1,0 +1,126 @@
+---
+title: Requirements
+---
+
+import { Callout } from 'nextra/components';
+
+# Requirements
+
+MedusaNexus is local-first and opinionated about its toolchain. This page
+lists what `scripts/setup.sh` expects to find or install. Numbers reflect
+the versions we test against in CI; the installer pins the floor.
+
+## Operating system
+
+| OS | Status |
+| -- | ------ |
+| **macOS 13+** (Apple Silicon or Intel) | Fully supported. Primary dev target. |
+| **macOS 15.7+ / 26.3+** (Apple Silicon) | Required for the [super-tart-vphone](/integrations/vphone) iOS lab. |
+| **Debian / Ubuntu** (apt-based, kernel ≥ 5.10) | Fully supported. CI runs on Ubuntu 22.04. |
+| Windows | Use WSL2 with Ubuntu 22.04. Native Windows is not on the roadmap. |
+
+## Hardware
+
+| Resource | Floor | Recommended |
+| -------- | ----- | ----------- |
+| RAM | 8 GB | 16 GB+ (Ghidra headless eats RAM in parallel runs) |
+| Disk | 20 GB free | 40 GB+ (Ghidra projects, decrypted IPAs, MobSF Docker image) |
+| Architecture | x86_64 or arm64 | arm64 for vphone, either for everything else |
+
+## Runtime
+
+| Tool | Version floor | Why |
+| ---- | ------------- | --- |
+| **Python** | 3.10+ | `mnexus` itself + the engines. 3.13 is the test target. |
+| **Node.js** | 18.17+ | Only needed if you build the docs site locally. |
+| **Java JRE/JDK** | 17+ | jadx + Ghidra need it. Bundled OpenJDK is fine. |
+| **Docker Desktop / Engine** | 24+ | For [MobSF](#mobsf) and [Moxy](/integrations/moxy). Skip if you pass `--minimal`. |
+| **adb** | platform-tools 34+ | The glue. Bundled with `--minimal` install. |
+| **frida** | 16.x | Static + dynamic engines. The installer pulls the latest matching `frida-server` for your device's arch. |
+
+## Engines
+
+Engines are independent — the orchestrator runs whatever it finds. `doctor`
+will mark missing engines as `MISS` instead of failing the run.
+
+### Always-on (no external services required)
+
+| Engine | Purpose |
+| ------ | ------- |
+| `adb` | Device control + APK pull. |
+| `apkeep` | Download APKs from Play Store (when you have an account). |
+| `apktool` | Resource + AndroidManifest extraction, smali decode. |
+| `jadx` | Decompile to Java + Kotlin. |
+| `frida` | Hook injection at runtime. |
+| **`playintel`** | Stream APKs from Google Play, scan for Firebase / credential leaks. |
+
+### Optional engines
+
+| Engine | Install via | Why you might skip |
+| ------ | ----------- | ------------------ |
+| **Ghidra** | `scripts/setup.sh` (full mode) | Heavy. Skip with `--minimal` if you don't analyse native libs. |
+| **MobSF** | `scripts/setup.sh` (full mode, Docker) | Skip if you already have a self-hosted MobSF — point `MNEXUS_MOBSF_URL` at it. |
+| **Burp Suite** | Manual download + [`scripts/setup.sh` Burp REST extension](#burp-or-caido-or-moxy) | Pick *one* of Burp / Caido / Moxy. |
+| **Caido** | Self-managed | Set `MNEXUS_PROXY_FLAVOR=caido`. |
+| **Moxy** | `scripts/setup.sh --moxy` | Dockerised MITM with auto CA push to device. See [Moxy →](/integrations/moxy). |
+| **ch0pin/medusa** | Cloned by `scripts/setup.sh` | Recipe library; Frida-driven instrumentation. |
+| **ch0pin/Stheno** | Cloned by `scripts/setup.sh` | Patches APKs so you don't have to. |
+| **super-tart-vphone** | `scripts/setup-vphone.sh` (Apple Silicon only) | iOS device emulation for the analyst lab. |
+
+### iOS-only engines
+
+| Engine | What it does |
+| ------ | ------------ |
+| **bagbak** | FairPlay decryption on a jailbroken device. |
+| **frida-ios-dump** | Same job, classic implementation. |
+| **ldid** | Re-sign IPAs after byte patching. |
+| **MachO patcher** (built-in) | Native LC_LOAD_DYLIB injection + VA→file offset translation. |
+
+Install all three iOS helpers with one flag:
+
+```bash
+scripts/setup.sh --ios-tools
+```
+
+See [iOS workflow →](/workflows/ios) for the full pipeline.
+
+## Hardware for dynamic analysis
+
+| Target | Hardware |
+| ------ | -------- |
+| Android dynamic | Rooted device or AVD with Magisk. Pixel 7 / 8 are CI references. |
+| iOS dynamic     | Jailbroken iPhone (palera1n / Dopamine) **or** a super-tart-vphone VM (Apple Silicon Mac). |
+
+<Callout type="warning" emoji="⚠">
+Frida hooks need root / jailbreak. Plain App-Store-installed iOS apps
+on a stock device cannot be hooked without re-signing — see the
+[IPA patcher workflow](/workflows/ios#patch-and-resign).
+</Callout>
+
+## Proxy choice
+
+You pick *one* of Burp / Caido / Moxy. The orchestrator routes traffic
+through whichever you've set `MNEXUS_PROXY_FLAVOR` to (default: `burp`).
+
+| Proxy | Best when |
+| ----- | --------- |
+| **Burp** | You already own a Burp Pro licence and want repeater/intruder integration. |
+| **Caido** | You want a leaner, scriptable proxy with TypeScript automation. |
+| **Moxy** | You want zero-friction Docker MITM with auto CA push (CI-friendly). |
+
+All three feed the same `traffic` table — switching between them is one
+env var, no re-scan needed.
+
+## What you can skip
+
+Anything in the **Optional engines** table can be left out — the doctor
+will flag it as `MISS` but the rest of the pipeline still runs. Common
+skip lists:
+
+* **CI runner:** drop Ghidra (`--minimal`), MobSF (`--minimal`), Burp
+  (use Moxy instead).
+* **Pure static analyst:** drop Frida, Moxy, vphone.
+* **Pure dynamic analyst:** keep Frida + adb + a proxy; everything else
+  is optional.
+
+Next: [Installation →](/getting-started/installation).

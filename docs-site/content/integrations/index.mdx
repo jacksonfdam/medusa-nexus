@@ -1,0 +1,19 @@
+---
+title: Integrations
+---
+
+# Integrations
+
+External tools MedusaNexus speaks to. Per-tool wiring + auth + common
+gotchas.
+
+| Tool | When to pick it | Doc |
+| ---- | --------------- | --- |
+| **Burp Suite** | You already own Burp Pro and want repeater/intruder + REST automation. | [Burp →](/integrations/burp) |
+| **Caido** | You want a lean, scriptable proxy with first-class TypeScript automation. | [Caido →](/integrations/caido) |
+| **Moxy** | Dockerised MITM with auto CA push to the device. CI-friendly. | [Moxy →](/integrations/moxy) |
+| **super-tart-vphone** | Apple-Silicon iOS lab. Research only. | [vphone →](/integrations/vphone) |
+| **MCP** | Drive Nexus from Claude Desktop / Cursor / Zed. | [MCP →](/integrations/mcp) |
+
+Pick *one* of Burp / Caido / Moxy. `MNEXUS_PROXY_FLAVOR` selects which.
+The others can stay installed; they just won't be driven.

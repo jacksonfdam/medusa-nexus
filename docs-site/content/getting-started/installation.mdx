@@ -1,0 +1,190 @@
+---
+title: Installation
+---
+
+import { Callout, Tabs } from 'nextra/components';
+
+# Installation
+
+One installer, one command. `scripts/setup.sh` is idempotent — running
+it twice never breaks anything.
+
+## TL;DR
+
+```bash
+git clone https://github.com/jackson-mafra/MedusaNexus.git
+cd MedusaNexus
+scripts/setup.sh
+source ~/.mnexus/env.sh
+mnexus doctor    # confirms every engine landed
+mnexus           # opens the interactive REPL
+```
+
+On a fresh laptop this takes ~10 minutes (Ghidra and MobSF Docker dominate
+the wall clock).
+
+## Install modes
+
+The setup script reads flags from `scripts/setup.sh --help`:
+
+| Flag | What it does |
+| ---- | ------------ |
+| *(no flag)* | Full install: venv + every engine + Ghidra + MobSF + frida-server. |
+| `--minimal` | Skip Ghidra, MobSF, and the frida-server push. Use for CI or quick eval. |
+| `--device` | *Only* push the matching `frida-server` to the connected ADB device. |
+| `--moxy` | Start [Moxy](/integrations/moxy) in Docker, extract the mitmproxy CA, push it to the device, and write `MNEXUS_MOXY_*` to env. |
+| `--ios-tools` | Install bagbak, ldid, and frida-ios-dump in one shot for iOS work. |
+| `--doctor` | Skip install, just run `mnexus doctor`. |
+
+You can combine flags — e.g. `scripts/setup.sh --minimal --moxy --ios-tools`
+gives you a lean install with iOS + Moxy ready.
+
+## What gets installed where
+
+```
+$HOME/.mnexus/
+├── tools/          ← Ghidra, jadx, frida-server, ldid, bagbak…
+├── workspace/      ← per-project artefacts (apks, decompiled trees, reports)
+├── nexus.sqlite3   ← single-file artifact store
+└── env.sh          ← source this from your shell rc
+```
+
+The installer never writes into `/usr/local/bin` or your `$PATH` directly.
+Everything lives under `$MNEXUS_HOME` (default `~/.mnexus`) and gets
+surfaced via `env.sh`.
+
+## Step by step
+
+<Tabs items={['macOS', 'Linux (Debian / Ubuntu)']}>
+
+<Tabs.Tab>
+
+```bash
+# 1. Toolchain prerequisites — Homebrew handles the rest.
+xcode-select --install
+brew install python@3.13 docker openjdk@17 adb
+
+# 2. Clone + run the installer.
+git clone https://github.com/jackson-mafra/MedusaNexus.git
+cd MedusaNexus
+scripts/setup.sh
+
+# 3. Wire env vars into your shell rc (the installer prints the line).
+echo 'source ~/.mnexus/env.sh' >> ~/.zshrc
+source ~/.mnexus/env.sh
+
+# 4. Verify.
+mnexus doctor
+```
+
+</Tabs.Tab>
+
+<Tabs.Tab>
+
+```bash
+# 1. Prereqs.
+sudo apt update
+sudo apt install -y python3.11 python3.11-venv python3-pip \
+                    docker.io openjdk-17-jdk adb git curl
+
+# 2. Clone + run the installer.
+git clone https://github.com/jackson-mafra/MedusaNexus.git
+cd MedusaNexus
+scripts/setup.sh
+
+# 3. Wire env vars.
+echo 'source ~/.mnexus/env.sh' >> ~/.bashrc
+source ~/.mnexus/env.sh
+
+# 4. Verify.
+mnexus doctor
+```
+
+</Tabs.Tab>
+
+</Tabs>
+
+## What `mnexus doctor` checks
+
+The doctor walks every registered engine and prints a status row per row:
+
+```
+🔱 engine             status   version   note
+────────────────────────────────────────────────────────────────────
+   adb                ● OK     34.0.5    /usr/local/bin/adb
+   jadx               ● OK     1.5.0     /Users/.../tools/jadx
+   apktool            ● OK     2.9.3     /Users/.../tools/apktool
+   ghidra             ● OK     11.1.2    /Users/.../tools/ghidra_11.1.2_PUBLIC
+   mobsf              ● OK     4.0.6     http://localhost:8000
+   frida              ● OK     16.4.10
+   burp               ● MISS             MNEXUS_BURP_API_KEY not set
+   moxy               ● OK     latest    http://localhost:5000
+   playintel          ● OK     —         ready
+   vphone             ● MISS             super-tart-vphone not configured
+```
+
+`MISS` is not a failure. The pipeline runs every engine that's available
+and routes around the ones that aren't. Run `mnexus doctor --env` to see
+which `MNEXUS_*` variables actually reached the process (the most common
+cause of an unexpected `MISS`).
+
+## iOS extras
+
+```bash
+scripts/setup.sh --ios-tools
+```
+
+Installs `bagbak`, `ldid`, and clones `frida-ios-dump`. See the
+[iOS workflow →](/workflows/ios) for what each one does.
+
+## Burp / Caido / Moxy
+
+You only need one. The lightest path is Moxy:
+
+```bash
+scripts/setup.sh --moxy
+```
+
+This starts the Moxy Docker container, waits for the dashboard to come
+up, extracts the mitmproxy CA, pushes it to your connected ADB device
+as a *system* trust anchor (root required), and writes
+`MNEXUS_MOXY_*` + `MNEXUS_PROXY_FLAVOR=moxy` to `~/.mnexus/env.sh`. See
+[Moxy →](/integrations/moxy).
+
+For Burp, install Burp Suite Pro manually, then run
+`scripts/setup.sh` to drop the REST API extension into your Burp
+configuration directory.
+
+For Caido, install Caido yourself, generate an API token at
+*Workbench → Settings → Tokens*, then add it to `env.sh`:
+
+```bash
+export MNEXUS_PROXY_FLAVOR=caido
+export MNEXUS_CAIDO_URL=http://localhost:8080
+export MNEXUS_CAIDO_API_KEY=cai_…
+```
+
+## Updating
+
+```bash
+cd MedusaNexus
+git pull
+scripts/setup.sh        # idempotent — only re-installs what changed
+```
+
+The installer skips engines that are already at the right version.
+Ghidra and the JADX release tarball are pinned to specific versions
+in the script header — bumping the floor requires a manual edit.
+
+## Uninstall
+
+```bash
+rm -rf ~/.mnexus
+# then remove the `source ~/.mnexus/env.sh` line from your shell rc
+```
+
+The repo checkout itself can be deleted with a plain `rm -rf` — nothing
+in MedusaNexus writes outside of `$MNEXUS_HOME`.
+
+Next: [Environment variables →](/getting-started/environment) to
+understand what every `MNEXUS_*` knob does.

@@ -1,0 +1,33 @@
+---
+title: Getting started
+---
+
+# Getting started
+
+You've landed on MedusaNexus. This section walks from `git clone` to your
+first real finding panel without taking detours into theory. The flow is
+sequential — each page builds on the previous.
+
+| Read this | When you want to |
+| --------- | ---------------- |
+| [Installation](/getting-started/installation) | Bring the toolchain up on macOS or Linux. |
+| [Requirements](/getting-started/requirements) | Confirm versions, hardware, and the engines you need (vs the ones you can skip). |
+| [Environment variables](/getting-started/environment) | Understand every `MNEXUS_*` knob and what the installer wrote to `~/.mnexus/env.sh`. |
+| [Your first scan](/getting-started/first-scan) | Drop an APK, watch the static engines fan out, read the findings. |
+| [60-second tour](/getting-started/sixty-second-tour) | The shortest possible end-to-end loop for someone evaluating the tool. |
+
+After this section, [Workflows →](/workflows) takes you deeper into
+specific analyst stories (Android, iOS, dynamic, PlayIntel, reporting).
+
+## How the docs are written
+
+* **Agentic friendly.** Every page is plain MDX in
+  [`docs-site/content/`](https://github.com/jackson-mafra/MedusaNexus/tree/main/docs-site/content) — an AI assistant reading the
+  repo sees the same content as this site.
+* **Developer friendly.** Code blocks are real commands. Tables match
+  the structures in the Python source. The [API reference](/reference/api)
+  and [CLI reference](/reference/cli) are *generated from the code at
+  build time* — they cannot lie to you.
+* **Mitigation is first-class.** Every finding the tool emits, and every
+  workflow doc here, has a remediation section. We don't ship "improve
+  security posture."
