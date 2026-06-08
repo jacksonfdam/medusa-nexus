@@ -3900,13 +3900,25 @@ async def project_moxy_traffic(
         flows = [f for f in flows if f.get("matches_project")]
 
     available = await moxy.list_projects()  # type: ignore[attr-defined]
+
+    # Run the traffic analyser on whatever we just pulled. Findings are
+    # transient (re-computed each request) — they reflect the live
+    # window, not stored state. The UI shows them inline; analysts can
+    # promote specific ones to the project surface via a future button.
+    from mnexus.intelligence.traffic_findings import findings_for_flows
+    derived = findings_for_flows(flows, surface_hosts=hosts, source_engine="moxy")
+    # Strip raw_request / raw_response from the UI payload — analyser
+    # needed them but the table doesn't, and they can be MBs per flow
+    # on a chatty app.
+    ui_flows = [{k: v for k, v in f.items() if k not in ("raw_request", "raw_response")} for f in flows]
     return {
         "project_id": p.id,
         "moxy_project": picked,
-        "captured": flows,
-        "count": len(flows),
+        "captured": ui_flows,
+        "count": len(ui_flows),
         "available_projects": available,
         "hosts": sorted(hosts),
+        "findings": [f.model_dump(mode="json") for f in derived],
     }
 
 

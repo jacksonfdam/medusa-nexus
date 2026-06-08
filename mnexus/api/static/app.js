@@ -3736,18 +3736,34 @@ async function mount_project_network(ctx) {
     if (matchOnlyEl) matchOnlyEl.addEventListener("change", reloadMoxy);
     if (refreshBtn) refreshBtn.addEventListener("click", reloadMoxy);
 
-    // Findings panel
+    // Findings panel — two layers: persisted static findings on top,
+    // live proxy-derived findings (cleartext / JWT leak / insecure
+    // cookies / API key in URL / 5xx run / discovered hosts) beneath
+    // a divider. The live ones don't link to a stored finding (they're
+    // recomputed each request from the current window) — render them
+    // inline instead of as anchors.
     const fEl = $("#net-findings");
-    if (!findings.length) {
-        fEl.innerHTML = `<div class="empty-state">no network-category findings</div>`;
-    } else {
-        fEl.innerHTML = findings.map((f) => `
-          <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
-            <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
-            <div class="title">${escapeHtml(f.title)}</div>
-            <div class="meta">${escapeHtml(f.location || "—")} · ${f.cwe_id || ""} ${f.owasp_mobile || ""}</div>
-          </a>`).join("");
-    }
+    const liveFindings = (moxy && moxy.findings) || [];
+    const staticBlock = findings.length
+        ? findings.map((f) => `
+            <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
+              <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
+              <div class="title">${escapeHtml(f.title)}</div>
+              <div class="meta">${escapeHtml(f.location || "—")} · ${f.cwe_id || ""} ${f.owasp_mobile || ""}</div>
+            </a>`).join("")
+        : `<div class="empty-state">no network-category findings from the static scan</div>`;
+    const liveBlock = liveFindings.length
+        ? `<div class="muted small uppercase" style="letter-spacing:2px;margin-top:8px;padding-top:6px;border-top:1px dashed var(--border)">
+              // live — derived from proxy traffic · ${liveFindings.length}
+           </div>` + liveFindings.map((f) => `
+            <div class="finding" style="cursor:default">
+              <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
+              <div class="title">${escapeHtml(f.title)}</div>
+              <div class="meta">${escapeHtml(f.location || "—")} · ${f.cwe_id || ""} ${f.owasp_mobile || ""}</div>
+              ${f.remediation ? `<div class="muted small" style="margin-top:6px;padding-top:4px;border-top:1px dotted var(--border);white-space:pre-wrap">${escapeHtml(f.remediation)}</div>` : ""}
+            </div>`).join("")
+        : "";
+    fEl.innerHTML = staticBlock + liveBlock;
 }
 
 async function mount_device_pull() {

@@ -71,9 +71,61 @@ class BurpEngine(BaseEngine):
             ),
         )
 
-    async def execute(self, context: AnalysisContext) -> list[Finding]:  # pragma: no cover - stub
-        _ = context
-        return []
+    async def execute(self, context: AnalysisContext) -> list[Finding]:
+        """Promote captured Burp proxy history into structured Findings.
+
+        Pulls ``/burp/proxy/history`` (burp-rest-api) or the Pro
+        equivalent, normalises into the common flow shape, runs the
+        shared traffic analyser. Returns ``[]`` on any unreachable
+        state — Burp is rarely the bottleneck for an ingest.
+        """
+        from mnexus.intelligence.traffic_findings import findings_for_flows
+
+        flows = await self._fetch_history()
+        if not flows:
+            return []
+        surface_hosts = set(getattr(context, "surface_hosts", set()) or set())
+        return findings_for_flows(flows, surface_hosts=surface_hosts, source_engine="burp")
+
+    async def _fetch_history(self) -> list[dict]:
+        """Best-effort Burp proxy history.
+
+        burp-rest-api exposes ``/burp/proxy/history`` returning a list of
+        ``{request, response, host, ...}``. The Pro REST API uses a
+        different path; for now we only walk the burp-rest-api flavour
+        — Pro's API hasn't stabilised across releases and our doctor
+        already says so.
+        """
+        base = self.config.burp_url.rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(f"{base}/burp/proxy/history")
+                if r.status_code != 200:
+                    return []
+                data = r.json()
+                if not isinstance(data, dict):
+                    return []
+                rows = data.get("messages") or data.get("history") or []
+                out: list[dict] = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    url = str(row.get("url") or "")
+                    method = str(row.get("method") or "GET").upper()
+                    status = row.get("statusCode") or row.get("status")
+                    out.append({
+                        "method": method,
+                        "url": url,
+                        "host": row.get("host") or "",
+                        "path": row.get("path") or "/",
+                        "status": int(status) if isinstance(status, int) else status,
+                        "raw_request": row.get("request"),
+                        "raw_response": row.get("response"),
+                        "ts": row.get("time"),
+                    })
+                return out
+        except httpx.HTTPError:
+            return []
 
     # ─── internals ───
 

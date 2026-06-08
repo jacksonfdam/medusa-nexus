@@ -85,9 +85,25 @@ class MoxyEngine(BaseEngine):
                 message=f"Moxy unreachable: {exc.__class__.__name__} — run scripts/setup.sh --moxy",
             )
 
-    async def execute(self, context: AnalysisContext) -> list[Finding]:  # pragma: no cover - stub
-        _ = context
-        return []
+    async def execute(self, context: AnalysisContext) -> list[Finding]:
+        """Promote captured Moxy traffic into structured Findings.
+
+        Looks up the Moxy workspace by package_name, pulls the recent
+        flows, runs the shared traffic analyser. Returns ``[]`` cleanly
+        when Moxy isn't reachable or has no flows yet — never raises,
+        because traffic-derived findings are an enhancement, not a
+        prerequisite for an ingest.
+        """
+        from mnexus.intelligence.traffic_findings import findings_for_flows
+
+        picked = await self.pick_project(getattr(context, "package_name", None))
+        if not picked:
+            return []
+        flows = await self.fetch_flows(int(picked["id"]), limit=1000)
+        if not flows:
+            return []
+        surface_hosts = set(getattr(context, "surface_hosts", set()) or set())
+        return findings_for_flows(flows, surface_hosts=surface_hosts, source_engine="moxy")
 
     # ─── public helpers used by the API / UI ──────────────────────────────
 
@@ -193,6 +209,11 @@ def _normalise_flow(flow: dict[str, Any]) -> dict[str, Any]:
         "origin": "moxy",
         # Lightweight severity heuristic so the UI can paint the row.
         "severity": _severity_for(status),
+        # Raw HTTP — needed by the traffic-findings analyser (JWT-in-body,
+        # cookie flags, …). The /moxy-traffic endpoint strips these
+        # before returning to the UI to keep the JSON payload small.
+        "raw_request": flow.get("raw_request"),
+        "raw_response": raw_response,
     }
 
 

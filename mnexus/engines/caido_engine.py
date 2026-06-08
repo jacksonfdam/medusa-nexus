@@ -88,8 +88,56 @@ class CaidoEngine(BaseEngine):
                 message=f"Caido unreachable: {exc.__class__.__name__} — see https://docs.caido.io/app/quickstart/",
             )
 
-    async def execute(self, context: AnalysisContext) -> list[Finding]:  # pragma: no cover - stub
-        _ = context
+    async def execute(self, context: AnalysisContext) -> list[Finding]:
+        """Promote Caido replay history into structured Findings.
+
+        Same contract as BurpEngine.execute — pull recent requests
+        from /v1/replay/sessions (or /v1/sitemap as a poor proxy when
+        replay isn't available), normalise, run the shared analyser.
+        ``[]`` on any failure path.
+        """
+        from mnexus.intelligence.traffic_findings import findings_for_flows
+
+        flows = await self._fetch_history()
+        if not flows:
+            return []
+        surface_hosts = set(getattr(context, "surface_hosts", set()) or set())
+        return findings_for_flows(flows, surface_hosts=surface_hosts, source_engine="caido")
+
+    async def _fetch_history(self) -> list[dict]:
+        """Caido /v1/replay/sessions or /v1/sitemap into common flow shape."""
+        base = self.config.caido_url.rstrip("/")
+        token = self.config.caido_api_key or ""
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        for path in ("/v1/replay/sessions", "/v1/sitemap"):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.get(f"{base}{path}", headers=headers)
+                    if r.status_code != 200:
+                        continue
+                    payload = r.json()
+            except httpx.HTTPError:
+                continue
+            rows = payload.get("items") if isinstance(payload, dict) else payload
+            if not isinstance(rows, list):
+                continue
+            out: list[dict] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                url = str(row.get("url") or "")
+                out.append({
+                    "method": str(row.get("method") or "GET").upper(),
+                    "url": url,
+                    "host": row.get("host") or "",
+                    "path": row.get("path") or "/",
+                    "status": row.get("status") or row.get("status_code"),
+                    "raw_request": row.get("request") or row.get("raw_request"),
+                    "raw_response": row.get("response") or row.get("raw_response"),
+                    "ts": row.get("ts") or row.get("created_at"),
+                })
+            if out:
+                return out
         return []
 
     # ─── public helpers used by exporters / UI ─────────────────────────
