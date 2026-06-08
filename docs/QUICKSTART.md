@@ -81,6 +81,16 @@ mnexus
 | `/open`            | Open the running web UI in the default browser.                       |
 | `/devices`         | List ADB-connected devices.                                           |
 | `/adb <args>`      | One-shot adb command (recorded in the audit log).                     |
+| `/dynamic <verb>`  | Frida session: `start` · `stop` · `status` · `stream`. See [`RUNTIME.md`](RUNTIME.md). |
+| `/memory <verb>`   | Live memory: `modules` · `scan` · `read` · `write`. Needs an active session. |
+| `/patch apk\|ipa`  | Byte-patch the project's APK or IPA + re-sign.                        |
+| `/decrypt-ios <id>`| Decrypt App Store IPA on a JB device. See [`IOS.md`](IOS.md).         |
+| `/diff manifest\|findings` | Diff the active project against the latest prior scan.        |
+| `/pipeline list\|run` | List built-in pipelines or execute one.                            |
+| `/recipes [filter]`| Browse `/v1/recipes` (built-ins + Medusa modules).                    |
+| `/export <fmt>`    | Write Postman / Caido / Burp / Moxy / deeplinks export to disk.       |
+| `/play-scan <pkg>` | Stream + scan an APK from Google Play (PlayIntel).                    |
+| `/vphone <verb>`   | super-tart-vphone iOS lab control.                                    |
 | `/clear`           | Clear the screen.                                                     |
 | `/exit`, Ctrl-D    | Leave the REPL (server is stopped automatically).                     |
 
@@ -189,3 +199,18 @@ The web UI ships an ADBugger-style control panel at `#/adb`:
 | sidebar is in the way on a small window  | click `[☰]` in the topbar (or hit `⌘B` / `Ctrl-B`)        |
 | server didn't reload                     | check the `dev.sh` log; uvicorn watches `mnexus/` only    |
 | device tabs say "no device"              | plug a phone, authorize USB debugging, click `⟳`         |
+
+## Going deeper
+
+After the quickstart, each area of the platform has its own doc:
+
+| Topic | Doc |
+|---|---|
+| Frida sessions, recipe stacking, Memory Inspector | [`docs/RUNTIME.md`](RUNTIME.md) |
+| iOS workflow (decrypt → patch → token-swap) | [`docs/IOS.md`](IOS.md) |
+| Pipelines (YAML → engine calls) | [`docs/PIPELINES.md`](PIPELINES.md) |
+| Reports + Mitigation Playbook | [`docs/REPORTING.md`](REPORTING.md) |
+| Moxy MITM | [`docs/MOXY.md`](MOXY.md) |
+| Google Play streaming (PlayIntel) | [`docs/PLAYINTEL.md`](PLAYINTEL.md) |
+| super-tart-vphone iOS lab | [`docs/VPHONE_PLAN.md`](VPHONE_PLAN.md) |
+| Product spec (architecture canon) | [`docs/SPEC.md`](SPEC.md) |

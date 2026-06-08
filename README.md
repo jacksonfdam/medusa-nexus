@@ -17,30 +17,55 @@
 
 ## Status
 
-**Pre-alpha — but you can scan APKs end-to-end today.** The repo contains:
+**Alpha — full end-to-end Android pipeline + iOS toolkit + live dynamic loop.**
 
-- Full product spec ([`docs/SPEC.md`](docs/SPEC.md)), 60-second quickstart
-  ([`docs/QUICKSTART.md`](docs/QUICKSTART.md)), and visual design language
-  ([`docs/DESIGN_LANGUAGE.md`](docs/DESIGN_LANGUAGE.md)).
+Docs:
+- Product spec ([`docs/SPEC.md`](docs/SPEC.md))
+- 60-second quickstart ([`docs/QUICKSTART.md`](docs/QUICKSTART.md))
+- Visual design language ([`docs/DESIGN_LANGUAGE.md`](docs/DESIGN_LANGUAGE.md))
+- **Runtime, recipes, Memory Inspector** ([`docs/RUNTIME.md`](docs/RUNTIME.md))
+- **iOS workflow** — IPA decrypt / patch / re-sign / token-swap ([`docs/IOS.md`](docs/IOS.md))
+- Pipelines ([`docs/PIPELINES.md`](docs/PIPELINES.md))
+- Reporting + Mitigation Playbook ([`docs/REPORTING.md`](docs/REPORTING.md))
+- Moxy MITM ([`docs/MOXY.md`](docs/MOXY.md))
+- PlayIntel ([`docs/PLAYINTEL.md`](docs/PLAYINTEL.md))
+- super-tart-vphone iOS lab ([`docs/VPHONE_PLAN.md`](docs/VPHONE_PLAN.md))
+
+Code:
 - 31-screen Pencil UI deck — every screen wired to the API
   ([`design/INDEX.md`](design/INDEX.md)).
-- Python package: `Finding` / `AttackSurface` / `Project` models,
-  `BaseEngine` ABC with 7 engines, orchestrator with a 4-phase pipeline,
-  SQLite artifact store, intelligence layer (correlator + auto-hook
-  generator), reporting with a mandatory Mitigation Playbook, an interactive
-  Click + Rich + prompt_toolkit CLI, FastAPI server with 60+ endpoints.
-- **Built-in scan path** — every static engine ships a fallback scanner
-  (zip + binary AXML for apktool, DEX-string regex for jadx, ELF-string
-  scan for ghidra) so a fresh checkout can produce real findings without
-  any external tools installed. Drop in real `apktool`, `jadx`, `ghidra`
-  binaries and the orchestrator picks them up automatically.
-- 35+ passing tests across API routes, upload/data flow, mitigation
-  invariants, report generation, multi-device endpoints, Burp probe planning.
-
-What's still pending: real Frida session execution (`/v1/projects/{id}/dynamic/start`
-currently returns a synthesized log); HTML/PDF report renderers (Markdown
-and JSON ship today); React frontend (the SPA is hand-rolled vanilla JS —
-intentional, but documented as a follow-up).
+- Python package: `Finding` / `AttackSurface` / `Project` models;
+  `BaseEngine` ABC with 12 engines (adb, apkeep, apktool, ipatool,
+  jadx, ghidra, mobsf, burp, caido, **moxy**, frida, playintel, vphone);
+  orchestrator with a 4-phase pipeline; SQLite artifact store; runtime
+  layer (`mnexus.runtime` — FridaSession, APKPatcher, IPAPatcher,
+  IPADecryptor, MemoryOps, PipelineExecutor); intelligence layer
+  (correlator, auto-hook generator, traffic_findings, manifest_diff,
+  findings_diff, android_flags, runtime_scripts); reporting with
+  mandatory Mitigation Playbook (markdown / json / **HTML** / **PDF**);
+  interactive Click + Rich + prompt_toolkit REPL with 30+ slash
+  commands; FastAPI server with 120+ endpoints.
+- **Live dynamic loop** — `POST /v1/projects/{id}/dynamic/start` actually
+  spawns + attaches Frida, loads N scripts/recipes (each IIFE-isolated),
+  fans `send({...})` events out via SSE (`/v1/projects/{id}/dynamic/stream`)
+  AND into a durable `dynamic_events` table. Memory Inspector
+  (`/v1/dynamic/sessions/{sid}/memory/{scan,read,write,modules}`)
+  auto-injected per session for the token-swap workflow.
+- **iOS toolkit** — IPA decryption via bagbak / frida-ios-dump
+  (`POST /v1/ios/decrypt`); Mach-O byte patcher with re-sign via
+  ldid / codesign (`POST /v1/projects/{id}/ios/patch`); full workflow
+  documented in [`docs/IOS.md`](docs/IOS.md).
+- **Proxy traffic → Findings** — Moxy / Burp / Caido `execute()` now
+  emits structured Findings (cleartext HTTP, JWT leak in body,
+  insecure cookies, API key in URL, hosts discovered live, 5xx runs).
+- **Real reports** — Jinja2 HTML template (single-file, inline CSS,
+  cyberpunk palette), WeasyPrint-backed PDF with graceful fallback
+  to printable HTML when WeasyPrint is missing.
+- **Diff workflow** — manifest-diff (surface delta) + findings-diff
+  (security delta) between two scans of the same package.
+- **460+ passing tests** across API routes, upload/data flow, mitigation
+  invariants, report generation, frida session lifecycle, memory ops,
+  patchers, pipeline executor, manifest/findings diff.
 
 ## Requirements
 
@@ -241,6 +266,46 @@ Device-side setup, common pitfalls (Network Security Config, certificate
 pinning, the intercept-mode "No response available" trap), and the diagnosis
 tree are all in [`docs/MOXY.md`](docs/MOXY.md).
 
+### iOS workflow (decrypt → patch → memory-swap)
+
+If you're testing an iOS app off the App Store you need a different
+toolchain than Android. MedusaNexus wraps the established ecosystem:
+
+```bash
+# IPA decryption — pulls the FairPlay-decrypted Mach-O off a JB device.
+npm install -g bagbak           # preferred
+# or:
+git clone https://github.com/AloneMonkey/frida-ios-dump ~/.mnexus/tools/frida-ios-dump
+(cd ~/.mnexus/tools/frida-ios-dump && pip install -r requirements.txt)
+
+# Re-signing patched IPAs.
+brew install ldid               # preferred; works on JB devices
+# (codesign --force --sign - <Mach-O> is the Apple alternative; ships with Xcode)
+```
+
+Then drive the full workflow from the REPL:
+
+```
+mnexus> /decrypt-ios com.target.bank.test
+mnexus> /patch ipa return_zero_at_offset:0x100123456
+mnexus> /dynamic start --recipes ios_ssl_kill_switch
+mnexus> /memory scan "65 79 4a 68" --module Bank      # find JWT in memory
+mnexus> /memory write 0x10f234000 "..."               # token swap
+```
+
+Endpoints, failure modes, and the full talk-style walkthrough live
+in [`docs/IOS.md`](docs/IOS.md).
+
+### Live dynamic loop + Memory Inspector
+
+The Dynamic tab attaches a real Frida session to the project's
+package, stacks N hooks + Medusa recipes in one session (each
+IIFE-isolated), streams `send({...})` events back via SSE, and
+exposes process memory through four endpoints
+(`/v1/dynamic/sessions/{sid}/memory/{scan,read,write,modules}`).
+Workflow walkthrough — including the **token-swap recipe** — in
+[`docs/RUNTIME.md`](docs/RUNTIME.md).
+
 ## Running
 
 ```bash
@@ -286,6 +351,17 @@ Slash commands (prefix-matched, so `/doc` resolves to `/doctor`):
 | `/serve [port]`    | Start the FastAPI server in the background.                           |
 | `/stop` `/open` `/url` | Background server control.                                        |
 | `/devices`, `/adb` | Quick `adb devices -l` + one-shot `adb` commands.                    |
+| `/dynamic <verb>`  | Frida session control: `start` · `stop` · `status` · `stream`.        |
+| `/memory <verb>`   | Live memory ops on the active session: `modules` · `scan` · `read` · `write`. |
+| `/patch apk\|ipa`  | Byte-patch the project's APK or IPA + re-sign (apktool / ldid / codesign). |
+| `/decrypt-ios <id>`| Decrypt App Store IPA via bagbak / frida-ios-dump + auto-ingest.      |
+| `/diff manifest\|findings` | Diff the active project against the latest prior scan.        |
+| `/pipeline list\|run` | List built-in pipelines or execute one.                            |
+| `/recipes [filter]`| Browse `/v1/recipes` (built-ins + Medusa modules).                    |
+| `/export <fmt>`    | Write Postman / Caido / Burp / Moxy / deeplinks export to disk.       |
+| `/play-scan <pkg>` | Stream + scan an APK from Google Play (PlayIntel).                    |
+| `/play-account <verb>` | Manage stored Play identities.                                    |
+| `/vphone <verb>`   | super-tart-vphone iOS lab control.                                    |
 | `/clear`, `/exit`  | UI plumbing.                                                          |
 
 ### One-shot CLI (for scripts and CI)
