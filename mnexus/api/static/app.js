@@ -1591,7 +1591,8 @@ function view_project_runtime(ctx) {
           <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
             <span class="muted small uppercase" style="letter-spacing:2px;width:110px">version diff:</span>
             <a class="btn" id="rt-mango-diff-link" href="#" style="white-space:nowrap">[ → MANIFEST DIFF AGAINST PRIOR SCAN ]</a>
-            <span class="muted small">compares exported components · deeplinks · permissions · SSL pinning</span>
+            <a class="btn" id="rt-mango-findings-diff-link" href="#" style="white-space:nowrap">[ → FINDINGS DIFF ]</a>
+            <span class="muted small">manifest diff = surface changes · findings diff = security changes</span>
           </div>
 
           <div class="row" style="gap:8px;align-items:flex-start;flex-wrap:wrap">
@@ -1795,6 +1796,10 @@ async function mount_project_runtime(ctx) {
     $("#rt-mango-diff-link").addEventListener("click", (e) => {
         e.preventDefault();
         location.hash = `#/project/${id}/manifest-diff`;
+    });
+    $("#rt-mango-findings-diff-link")?.addEventListener("click", (e) => {
+        e.preventDefault();
+        location.hash = `#/project/${id}/findings-diff`;
     });
 
     // APK patcher — POST /v1/projects/<id>/patch with the selected
@@ -2020,6 +2025,118 @@ async function mount_project_manifest_diff(ctx) {
         <span>${summary.any_changes ? "<span style=\"color:var(--magenta)\">changes detected</span>" : "<span style=\"color:var(--acid)\">identical</span>"}</span>
       </div>
       ${summary.any_changes ? sections.join("") : `<div class="empty-state">no manifest-level changes between these versions.</div>`}`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  SCREEN 13d — FINDINGS DIFF (security delta between two versions)
+ *
+ *  Complements manifest-diff: where that one compares the static
+ *  surface (components / deeplinks / permissions), this one compares
+ *  the actual Findings. Useful for 'did v1.3 actually fix CVE-…?'
+ *  questions during release-gate reviews.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+function view_project_findings_diff(ctx) {
+    const id = ctx.params.id;
+    if (!id) { location.hash = "#/projects"; return ""; }
+    return h`
+    <div class="main">
+      <div class="muted small uppercase">🔱 NEXUS / ${id} / findings-diff</div>
+      ${projectTabs(id, "static")}
+      <section class="panel">
+        <div class="panel-head">
+          <span>// FINDINGS DIFF</span>
+          <span class="spacer"></span>
+          <span class="muted small" id="fd-summary">loading…</span>
+        </div>
+        <div class="panel-body col" style="gap:12px" id="fd-body">
+          <div class="muted small">resolving prior scan of the same package…</div>
+        </div>
+      </section>
+    </div>`;
+}
+
+async function mount_project_findings_diff(ctx) {
+    const id = ctx.params.id;
+    let data;
+    try {
+        data = await getJSON(`/v1/projects/${encodeURIComponent(id)}/findings-diff`);
+    } catch (e) {
+        $("#fd-body").innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">${escapeHtml(e.message || String(e))}</span></div>`;
+        return;
+    }
+    const diff = data.diff || {};
+    const summary = diff.summary || {};
+
+    $("#fd-summary").innerHTML = data.base
+        ? `<span class="t-mono">${escapeHtml(data.base.version_name || "?")} → ${escapeHtml(data.head.version_name || "?")}</span>`
+        : `<span style="color:var(--magenta)">no prior scan of ${escapeHtml(data.package || "?")}</span>`;
+
+    const body = $("#fd-body");
+    if (data.base === null) {
+        body.innerHTML = `
+          <div class="empty-state">
+            <div style="color:var(--magenta);font-size:18px;letter-spacing:2px">NO PRIOR SCAN</div>
+            <div class="muted small">${escapeHtml(data.note || "Scan another version of this package first.")}</div>
+          </div>`;
+        return;
+    }
+
+    const _finding = (f) => `
+      <div class="finding" style="cursor:default;padding:6px 10px">
+        <div class="head">
+          ${chip((f.severity || "info").toLowerCase())}
+          <span class="tag">${escapeHtml(f.id || "?")}</span>
+          <span class="spacer"></span>
+          <span class="tag">[${escapeHtml(f.source_engine || "?")}]</span>
+        </div>
+        <div class="title">${escapeHtml(f.title || "?")}</div>
+        <div class="meta">${escapeHtml(f.location || "—")}${f.cwe_id ? " · " + escapeHtml(f.cwe_id) : ""}${f.masvs ? " · " + escapeHtml(f.masvs) : ""}</div>
+      </div>`;
+
+    const _changed = (c) => `
+      <div class="finding" style="cursor:default;padding:6px 10px">
+        <div class="head">
+          ${chip((c.after.severity || "info").toLowerCase())}
+          <span class="tag">${escapeHtml(c.after.id || "?")}</span>
+          <span class="spacer"></span>
+          <span class="muted small">${c.fields.map((x) => escapeHtml(x)).join(", ")}</span>
+        </div>
+        <div class="title">${escapeHtml(c.after.title || "?")}</div>
+        ${c.fields.includes("severity") ? `<div class="muted small">severity: <span style="color:var(--sev-${(c.before.severity || "info").toLowerCase()})">${escapeHtml((c.before.severity || "info").toUpperCase())}</span> → <span style="color:var(--sev-${(c.after.severity || "info").toLowerCase()})">${escapeHtml((c.after.severity || "info").toUpperCase())}</span></div>` : ""}
+        ${c.fields.includes("remediation") ? `<div class="muted small" style="margin-top:4px;white-space:pre-wrap">remediation diff:\nbefore: ${escapeHtml((c.before.remediation || "—").slice(0, 240))}\nafter:  ${escapeHtml((c.after.remediation || "—").slice(0, 240))}</div>` : ""}
+      </div>`;
+
+    const _section = (cls, label, items, render) => {
+        if (!items || !items.length) return "";
+        return `
+          <div style="margin-bottom:12px">
+            <div class="muted small uppercase" style="letter-spacing:2px;margin-bottom:6px">
+              <span style="color:var(--${cls})">${escapeHtml(label)}</span> · ${items.length}
+            </div>
+            <div class="col" style="gap:6px;padding-left:6px">${items.map(render).join("")}</div>
+          </div>`;
+    };
+
+    const headerLine = `
+      <div class="row small" style="gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px">
+        <span>base: <span class="t-mono" style="color:var(--cyan)">${escapeHtml(data.base.id)}</span> · ${escapeHtml(data.base.version_name || "?")}</span>
+        <span>head: <span class="t-mono" style="color:var(--acid)">${escapeHtml(data.head.id)}</span> · ${escapeHtml(data.head.version_name || "?")}</span>
+        <span class="spacer"></span>
+        <span>${summary.any_changes ? "<span style=\"color:var(--magenta)\">changes detected</span>" : "<span style=\"color:var(--acid)\">identical</span>"}</span>
+      </div>
+      <div class="row small" style="gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px">
+        <span><span class="muted">added</span> <b style="color:var(--sev-crit)">${summary.added_count || 0}</b></span>
+        <span><span class="muted">removed</span> <b style="color:var(--acid)">${summary.removed_count || 0}</b></span>
+        <span><span class="muted">changed</span> <b style="color:var(--magenta)">${summary.changed_count || 0}</b></span>
+        <span><span class="muted">escalated</span> <b style="color:var(--sev-crit)">${summary.severity_escalated || 0}</b></span>
+        <span><span class="muted">relieved</span> <b style="color:var(--sev-low)">${summary.severity_relieved || 0}</b></span>
+      </div>`;
+
+    body.innerHTML = headerLine + (summary.any_changes
+        ? _section("sev-crit", "added in head — new issues",  diff.added,   _finding)
+          + _section("acid",   "removed since base — fixed", diff.removed, _finding)
+          + _section("magenta","changed (severity / remediation / evidence)", diff.changed, _changed)
+        : `<div class="empty-state">no finding-level changes between these versions.</div>`);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -6384,6 +6501,7 @@ const ROUTES = [
     { path: "project/:id/dynamic",              view: view_project_dynamic,   mount: mount_project_dynamic },
     { path: "project/:id/runtime",              view: view_project_runtime,   mount: mount_project_runtime },
     { path: "project/:id/manifest-diff",        view: view_project_manifest_diff, mount: mount_project_manifest_diff },
+    { path: "project/:id/findings-diff",        view: view_project_findings_diff, mount: mount_project_findings_diff },
     { path: "project/:id/tracer",               view: view_project_tracer,    mount: mount_project_tracer },
     { path: "project/:id/network",              view: view_project_network,   mount: mount_project_network },
     { path: "project/:id/api-map",              view: view_project_api_map,   mount: mount_project_api_map },
