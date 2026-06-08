@@ -1820,6 +1820,7 @@ function view_project_runtime(ctx) {
                   <select id="rt-ipa-patch-kind" class="input t-mono" style="min-width:240px">
                     <option value="return_zero_at_offset">return_zero_at_offset (mov x0,#0; ret)</option>
                     <option value="nop_at_offset">nop_at_offset (NOPs × count)</option>
+                    <option value="inject_load_dylib">inject_load_dylib (LC_LOAD_DYLIB)</option>
                   </select>
                   <select id="rt-ipa-patch-addrkind" class="input t-mono" title="va = Ghidra's Address column; offset = Ghidra's Offset column">
                     <option value="offset">offset (file)</option>

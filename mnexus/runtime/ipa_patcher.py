@@ -46,7 +46,7 @@ from typing import Iterable
 log = logging.getLogger(__name__)
 
 
-SUPPORTED_PATCHES = ("nop_at_offset", "return_zero_at_offset")
+SUPPORTED_PATCHES = ("nop_at_offset", "return_zero_at_offset", "inject_load_dylib")
 
 
 # ARM64 instruction encodings, little-endian:
@@ -223,6 +223,124 @@ class IPAPatcher:
 # ─── module-level helpers ────────────────────────────────────────────
 
 
+def _inject_load_dylib(macho_path: Path, dylib_path: str) -> dict:
+    """Add an ``LC_LOAD_DYLIB`` load command pointing at ``dylib_path``.
+
+    Native implementation — no optool / insert_dylib dependency. Walks
+    the header, finds slack between ``sizeofcmds`` (end of existing
+    load commands) and the start of the first segment's file payload,
+    fits the new command in if there's room.
+
+    Most Mach-O binaries linker-pad load commands generously (4KB+ of
+    zeros), so injection works without relocating any segment. If
+    there isn't enough slack, we skip with a clear reason rather than
+    rewriting the file layout (which would require fixing every
+    fileoff / vmaddr downstream — out of scope for now).
+
+    LC_LOAD_DYLIB layout (cmd=0x0C):
+        u32 cmd          = 0x0C
+        u32 cmdsize      = padded total
+        u32 name_offset  = 24 (right after this struct)
+        u32 timestamp    = 2
+        u32 current_ver  = 0x00010000  (1.0.0)
+        u32 compat_ver   = 0x00010000
+        char name[]      NUL-terminated, padded to 8-byte boundary
+    """
+    import struct
+
+    MAGIC_64_LE = b"\xcf\xfa\xed\xfe"
+    LC_LOAD_DYLIB = 0x0C
+    LC_SEGMENT_64 = 0x19
+
+    try:
+        data = bytearray(macho_path.read_bytes())
+    except OSError as exc:
+        return {"ok": False, "reason": f"read failed: {exc}"}
+
+    if data[:4] != MAGIC_64_LE:
+        return {"ok": False, "reason": "only 64-bit little-endian Mach-O supported (Mach-O 32-bit / fat / BE not implemented)"}
+
+    # Parse the 32-byte mach_header_64.
+    if len(data) < 32:
+        return {"ok": False, "reason": "Mach-O header truncated"}
+    cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved = struct.unpack_from(
+        "<IIIIIII", data, 4,
+    )
+    header_end = 32
+    cmds_end = header_end + sizeofcmds
+
+    # Find the lowest fileoff among LC_SEGMENT_64s (ignoring __PAGEZERO
+    # which has fileoff=0 and filesize=0). That tells us where the
+    # 'available slack' ends.
+    cursor = header_end
+    lowest_data_fileoff: int | None = None
+    for _ in range(ncmds):
+        if cursor + 8 > len(data):
+            return {"ok": False, "reason": "load commands exceed file size"}
+        cmd, cmdsize = struct.unpack_from("<II", data, cursor)
+        if cmd == LC_SEGMENT_64 and cursor + 8 + 64 <= len(data):
+            # vmaddr / vmsize / fileoff / filesize at bytes 16..48 of segment body
+            fileoff = struct.unpack_from("<Q", data, cursor + 8 + 16 + 16)[0]
+            filesize = struct.unpack_from("<Q", data, cursor + 8 + 16 + 24)[0]
+            if filesize > 0:
+                if lowest_data_fileoff is None or fileoff < lowest_data_fileoff:
+                    lowest_data_fileoff = fileoff
+        cursor += cmdsize
+
+    # Compute the new command size. Path is NUL-terminated, padded so
+    # cmdsize is a multiple of 8.
+    path_bytes = dylib_path.encode("utf-8") + b"\x00"
+    base_cmd_size = 24  # cmd + cmdsize + name_off + timestamp + cur_ver + compat_ver
+    total = base_cmd_size + len(path_bytes)
+    if total % 8:
+        path_bytes += b"\x00" * (8 - total % 8)
+    new_cmdsize = base_cmd_size + len(path_bytes)
+
+    # Check we have slack between cmds_end and lowest_data_fileoff.
+    if lowest_data_fileoff is None:
+        return {"ok": False, "reason": "no LC_SEGMENT_64 with filesize > 0; binary layout unsupported"}
+    slack = lowest_data_fileoff - cmds_end
+    if slack < new_cmdsize:
+        return {"ok": False, "reason": (
+            f"only {slack} bytes of load-command slack; need {new_cmdsize}. "
+            "Use insert_dylib / optool externally to relocate segments."
+        )}
+
+    # Build the new load command.
+    new_cmd = (
+        struct.pack(
+            "<IIIIII",
+            LC_LOAD_DYLIB,
+            new_cmdsize,
+            24,             # name offset within the command
+            2,              # timestamp (arbitrary >0)
+            0x00010000,     # current_version 1.0.0
+            0x00010000,     # compatibility_version 1.0.0
+        )
+        + path_bytes
+    )
+    assert len(new_cmd) == new_cmdsize
+
+    # Splice: write the new command at the end of the existing cmds
+    # area (still inside the slack region). Update header counters.
+    data[cmds_end:cmds_end + new_cmdsize] = new_cmd
+    struct.pack_into("<I", data, 4 + 12, ncmds + 1)                    # ncmds field
+    struct.pack_into("<I", data, 4 + 16, sizeofcmds + new_cmdsize)     # sizeofcmds field
+
+    try:
+        macho_path.write_bytes(bytes(data))
+    except OSError as exc:
+        return {"ok": False, "reason": f"write failed: {exc}"}
+
+    return {
+        "ok": True,
+        "dylib_path": dylib_path,
+        "bytes_written": new_cmdsize,
+        "slack_remaining": slack - new_cmdsize,
+        "cmds_end": cmds_end,
+    }
+
+
 def _va_to_file_offset(macho_path: Path, va: int) -> int | None:
     """Translate a Mach-O virtual address to a file offset.
 
@@ -338,6 +456,15 @@ def _apply_patch(patch: dict, mach_o: Path) -> dict:
     just saw in the disassembler).
     """
     name = patch["name"]
+
+    # inject_load_dylib is structurally different — no byte-at-offset
+    # write, no VA→offset translation. Dispatch early before the offset
+    # parsing kicks in.
+    if name == "inject_load_dylib":
+        dylib_path = patch.get("dylib_path") or ""
+        if not isinstance(dylib_path, str) or not dylib_path.strip():
+            return {"ok": False, "reason": "inject_load_dylib needs 'dylib_path' (str)"}
+        return _inject_load_dylib(mach_o, dylib_path.strip())
 
     # VA translation path — convert to file offset before falling
     # through to the byte-write logic.

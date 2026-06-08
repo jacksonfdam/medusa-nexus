@@ -219,6 +219,117 @@ async def test_patch_via_va_translates_then_writes_bytes(cfg, tmp_path, monkeypa
     assert patched[payload_offset:payload_offset + 8] == _ARM64_MOV_X0_0 + _ARM64_RET
 
 
+# ─── dylib injection ──────────────────────────────────────────────────
+
+
+def _macho_with_slack(segment_fileoff: int) -> bytes:
+    """Build a Mach-O with one LC_SEGMENT_64 whose data starts at
+    ``segment_fileoff`` — the gap between the existing cmds and that
+    fileoff is the available slack for injection.
+    """
+    import struct
+
+    header = struct.pack(
+        "<IIIIIIII",
+        0xFEEDFACF, 0x0100000C, 0, 2, 1, 72, 0, 0,
+    )
+    segname = b"__TEXT".ljust(16, b"\x00")
+    seg = (
+        struct.pack("<II", 0x19, 72)
+        + segname
+        + struct.pack("<QQQQ", 0x100000000, 0x1000, segment_fileoff, 0x800)
+        + struct.pack("<IIII", 7, 5, 0, 0)
+    )
+    head_len = 32 + 72  # header + one LC_SEGMENT_64
+    pre = b"\x00" * (segment_fileoff - head_len)
+    payload = b"\xaa" * 0x800
+    return header + seg + pre + payload
+
+
+def test_inject_load_dylib_writes_new_command_when_slack_fits(tmp_path) -> None:
+    from mnexus.runtime.ipa_patcher import _inject_load_dylib
+    import struct
+
+    # 1024-byte slack — plenty of room for the injection.
+    macho = tmp_path / "exec"
+    macho.write_bytes(_macho_with_slack(segment_fileoff=0x500))
+    out = _inject_load_dylib(macho, "@executable_path/Frameworks/Frida.dylib")
+    assert out["ok"] is True
+    assert out["dylib_path"] == "@executable_path/Frameworks/Frida.dylib"
+    # Read back the file and parse the header to check ncmds + sizeofcmds bumped.
+    data = macho.read_bytes()
+    ncmds = struct.unpack_from("<I", data, 4 + 12)[0]
+    sizeofcmds = struct.unpack_from("<I", data, 4 + 16)[0]
+    assert ncmds == 2  # original 1 + injected 1
+    assert sizeofcmds > 72  # original 72 + injected cmdsize
+    # The new command's cmd field should be LC_LOAD_DYLIB (0x0C) right
+    # after the original segment cmd (header 32 + seg 72 = 104).
+    new_cmd = struct.unpack_from("<I", data, 32 + 72)[0]
+    assert new_cmd == 0x0C
+    # Dylib path bytes should appear in the load-commands region.
+    assert b"@executable_path/Frameworks/Frida.dylib\x00" in data[:0x500]
+
+
+def test_inject_load_dylib_skips_when_no_slack(tmp_path) -> None:
+    """If the first segment's fileoff is right after the cmds, there's
+    zero slack — injection skips with a clear reason."""
+    from mnexus.runtime.ipa_patcher import _inject_load_dylib
+
+    macho = tmp_path / "exec-tight"
+    macho.write_bytes(_macho_with_slack(segment_fileoff=32 + 72))  # no slack
+    out = _inject_load_dylib(macho, "@executable_path/X.dylib")
+    assert out["ok"] is False
+    assert "slack" in out["reason"]
+
+
+def test_inject_load_dylib_rejects_non_macho(tmp_path) -> None:
+    from mnexus.runtime.ipa_patcher import _inject_load_dylib
+    elf = tmp_path / "elf"
+    elf.write_bytes(b"\x7fELF" + b"\x00" * 100)
+    out = _inject_load_dylib(elf, "@executable_path/X.dylib")
+    assert out["ok"] is False
+    assert "64-bit little-endian" in out["reason"]
+
+
+@pytest.mark.asyncio
+async def test_patch_inject_load_dylib_round_trips(cfg, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: build a real IPA with a Mach-O that has slack, run
+    the full patcher with inject_load_dylib, verify the rebuilt IPA
+    carries the new load command."""
+    import struct
+    import zipfile
+
+    monkeypatch.setattr("mnexus.runtime.ipa_patcher.shutil.which", lambda name: None)
+    macho_bytes = _macho_with_slack(segment_fileoff=0x500)
+    ipa = tmp_path / "fixture.ipa"
+    with zipfile.ZipFile(ipa, "w") as zf:
+        zf.writestr("Payload/Foo.app/Foo", macho_bytes)
+
+    result = await IPAPatcher(cfg).patch(ipa, [
+        {"name": "inject_load_dylib", "dylib_path": "@executable_path/Frida.dylib"},
+    ])
+    assert result.patched_path is not None
+    with zipfile.ZipFile(result.patched_path) as zf:
+        patched = zf.read("Payload/Foo.app/Foo")
+    ncmds = struct.unpack_from("<I", patched, 4 + 12)[0]
+    assert ncmds == 2  # bumped from 1 to 2
+    assert b"Frida.dylib" in patched
+
+
+@pytest.mark.asyncio
+async def test_patch_inject_load_dylib_missing_path_is_skipped(cfg, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty dylib_path → skipped (not failed) with a reason."""
+    import zipfile
+
+    monkeypatch.setattr("mnexus.runtime.ipa_patcher.shutil.which", lambda name: None)
+    ipa = tmp_path / "fixture.ipa"
+    with zipfile.ZipFile(ipa, "w") as zf:
+        zf.writestr("Payload/Foo.app/Foo", _macho_with_slack(0x500))
+    result = await IPAPatcher(cfg).patch(ipa, [{"name": "inject_load_dylib"}])
+    assert not result.patches_applied
+    assert "dylib_path" in result.patches_skipped[0]["reason"]
+
+
 @pytest.mark.asyncio
 async def test_patch_via_va_skipped_when_va_outside_any_segment(cfg, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     import zipfile
@@ -433,7 +544,7 @@ def test_endpoint_ios_patch_400_on_missing_field(ipa_client) -> None:
     assert r.status_code == 400
 
 
-def test_endpoint_ios_patcher_supported_lists_two(ipa_client) -> None:
+def test_endpoint_ios_patcher_supported_lists_all_patches(ipa_client) -> None:
     client, _ = ipa_client
     body = client.get("/v1/ios/patcher/supported").json()
     names = {p["name"] for p in body["patches"]}

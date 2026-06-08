@@ -4480,6 +4480,18 @@ async def ios_patcher_supported() -> dict[str, Any]:
                 ),
                 "params": ["offset|va", "count"],
             },
+            {
+                "name": "inject_load_dylib",
+                "title": "Inject LC_LOAD_DYLIB",
+                "description": (
+                    "Adds an LC_LOAD_DYLIB load command pointing at a "
+                    "user-supplied dylib path. Lets you wire FridaGadget "
+                    "into a non-JB device's IPA. Skips when there's no "
+                    "load-command slack — use insert_dylib / optool "
+                    "externally for tight binaries."
+                ),
+                "params": ["dylib_path"],
+            },
         ],
     }
 

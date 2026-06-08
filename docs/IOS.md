@@ -173,12 +173,13 @@ Content-Type: application/json
 }
 ```
 
-Two patches supported:
+Three patches supported:
 
 | Patch | Bytes written | Purpose |
 |---|---|---|
 | `return_zero_at_offset` | `00 00 80 d2  c0 03 5f d6` (8 bytes: `mov x0, #0; ret`) | Make the function return `false`. Canonical "disable jailbreak check". |
 | `nop_at_offset` | `1f 20 03 d5` × N (4 bytes per NOP) | Wipe a call site without altering surrounding control flow. |
+| `inject_load_dylib` | new `LC_LOAD_DYLIB` command pointing at `dylib_path` | Wire FridaGadget (or any custom dylib) into a non-JB app. Skips when there's no load-command slack; use `insert_dylib` / `optool` externally for tight binaries. |
 
 **Addressing modes**: each patch accepts either ``offset`` (file
 offset, Ghidra's "Offset" column) or ``va`` (virtual address,
