@@ -4489,21 +4489,48 @@ async def get_pipeline(name: str) -> dict[str, Any]:
 
 @app.post("/v1/pipelines/{name}/run")
 async def run_pipeline(name: str, project_id: str = Form(...)) -> dict[str, Any]:
-    """Pretend to run the pipeline. Returns a manifest of what would happen.
+    """Execute the named pipeline against the project. Returns the
+    completed PipelineRun including per-stage outcomes.
 
-    Real execution is wired in iteration 3 (orchestrator already runs the
-    static fan-out — the rest is plumbing).
+    Failures in one stage don't abort subsequent stages; the overall
+    ``state`` is ``failed`` if any stage failed, ``ok`` otherwise.
     """
+    from mnexus.runtime.pipeline_executor import execute_pipeline
+
     pipeline = next((p for p in _BUILTIN_PIPELINES if p["name"] == name), None)
     if not pipeline:
         raise HTTPException(404, f"no pipeline named {name}")
     p = _require_project(project_id)
-    return {
-        "pipeline": pipeline["name"],
-        "project_id": p.id,
-        "status": "queued",
-        "message": "pipeline scheduling stubbed — orchestrator already ran on upload.",
-    }
+    nexus: MedusaNexus = app.state.nexus
+    run = await execute_pipeline(nexus, p, pipeline["yaml"], pipeline_name=name)
+    return run.to_dict()
+
+
+@app.post("/v1/pipelines/run-yaml")
+async def run_pipeline_yaml(yaml_body: str = Form(...), project_id: str = Form(...)) -> dict[str, Any]:
+    """Execute an arbitrary pipeline YAML against the project.
+
+    The Pipeline Editor lets analysts compose ad-hoc workflows
+    without committing them as built-ins. Same return shape as the
+    named-pipeline endpoint."""
+    from mnexus.runtime.pipeline_executor import execute_pipeline
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    run = await execute_pipeline(nexus, p, yaml_body, pipeline_name="ad-hoc")
+    return run.to_dict()
+
+
+@app.get("/v1/pipelines/runs/{run_id}")
+async def get_pipeline_run(run_id: str) -> dict[str, Any]:
+    """Fetch a stored PipelineRun. 404 when the registry doesn't
+    have it — runs don't survive uvicorn restarts."""
+    from mnexus.runtime.pipeline_executor import pipeline_runs
+
+    run = pipeline_runs.get(run_id)
+    if not run:
+        raise HTTPException(404, f"no pipeline run with id {run_id}")
+    return run.to_dict()
 
 
 # ─── finding actions (screen 21) ──────────────────────────────────────────
