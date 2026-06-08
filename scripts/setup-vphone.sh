@@ -280,7 +280,7 @@ cat <<EOF
   $(hl 'Once a VM boots, you can wire frida-server into it with:')
     mnexus vphone bootstrap <vm-name>    # (Wave 2 — pending)
 
-  ${C_DIM}docs:    docs/VPHONE_PLAN.md
+  ${C_DIM}docs:    docs-site/content/integrations/vphone.mdx
   guide:   $REPO_DIR/GUIDE.md
   writeup: $WRITEUP_DIR/${C_RESET}
 EOF

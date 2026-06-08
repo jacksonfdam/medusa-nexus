@@ -27,4 +27,4 @@ MEDUSA NEXUS does not fork, rewrite, or compete with any of these. It makes them
 
 ## Visual reference
 
-UI aesthetic inspired by the `CyberpunkHackersToolkit` Android project (local reference): pure black canvas, neon cyan + acid green + magenta, Courier Prime monospace, CRT scanlines and glitch. Captured and adapted in [`docs/DESIGN_LANGUAGE.md`](docs/DESIGN_LANGUAGE.md).
+UI aesthetic inspired by the `CyberpunkHackersToolkit` Android project (local reference): pure black canvas, neon cyan + acid green + magenta, Courier Prime monospace, CRT scanlines and glitch. Captured and adapted in [`docs-site/content/design/design-language.mdx`](docs-site/content/design/design-language.mdx).

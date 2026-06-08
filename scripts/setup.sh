@@ -1102,7 +1102,7 @@ print_summary() {
     printf "    ${C_ACID}3.${C_RESET} verify               ${C_MUTED}mnexus doctor${C_RESET}\n"
     printf "    ${C_ACID}4.${C_RESET} run web UI           ${C_MUTED}mnexus serve --port 8765${C_RESET}\n"
     printf "    ${C_ACID}5.${C_RESET} or scan an APK       ${C_MUTED}mnexus scan ./target.apk --package com.target.app${C_RESET}\n\n"
-    printf "  docs: ${C_CYAN}docs/SPEC.md${C_RESET} · ${C_CYAN}design/INDEX.md${C_RESET} · ${C_CYAN}CREDITS.md${C_RESET}\n\n"
+    printf "  docs: ${C_CYAN}docs-site/content/design/spec.mdx${C_RESET} · ${C_CYAN}design/INDEX.md${C_RESET} · ${C_CYAN}CREDITS.md${C_RESET}\n\n"
 }
 
 # ─── main ─────────────────────────────────────────────────────────────────

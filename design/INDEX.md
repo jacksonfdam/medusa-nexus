@@ -2,7 +2,7 @@
 
 Source of truth: [`medusanexus.pen`](medusanexus.pen) — open in Pencil to edit.
 
-Every screen is also exported as a PNG under `screens/<group>/`. Hero screens are fully composed; screens tagged *stub* are intentionally wireframe-level — the spec is in [`../docs/SPEC.md`](../docs/SPEC.md) and they'll land at full fidelity in iteration 2.
+Every screen is also exported as a PNG under `screens/<group>/`. Hero screens are fully composed; screens tagged *stub* are intentionally wireframe-level — the spec is in [`../docs-site/content/design/spec.mdx`](../docs-site/content/design/spec.mdx) and they'll land at full fidelity in iteration 2.
 
 All on-screen copy is English. Every finding card and every report template carries a **Mitigation Playbook** — non-negotiable.
 
@@ -110,7 +110,7 @@ Tokens and reusable components live in the same `.pen` file at `x<0` (off-canvas
 - `cmp/AsciiHeader` — large single letter + gradient underline
 - `cmp/RiskGauge` — circular 0–100 arc
 
-Effects specified in [`../docs/DESIGN_LANGUAGE.md`](../docs/DESIGN_LANGUAGE.md) — glitch, scanlines, CRT flicker, neon glow, chaos text, pulse opacity.
+Effects specified in [`../docs-site/content/design/design-language.mdx`](../docs-site/content/design/design-language.mdx) — glitch, scanlines, CRT flicker, neon glow, chaos text, pulse opacity.
 
 ---
 
@@ -119,4 +119,4 @@ Effects specified in [`../docs/DESIGN_LANGUAGE.md`](../docs/DESIGN_LANGUAGE.md) 
 - **hero** — composed with production-ready content, components, copy, and severity chips. Ready to translate to code.
 - **stub** — labeled wireframe with header + title + feature description. Defines the intent; full layout lands in the next iteration.
 
-The spec driving every screen is in [`../docs/SPEC.md`](../docs/SPEC.md). Author credits: [`../CREDITS.md`](../CREDITS.md).
+The spec driving every screen is in [`../docs-site/content/design/spec.mdx`](../docs-site/content/design/spec.mdx). Author credits: [`../CREDITS.md`](../CREDITS.md).

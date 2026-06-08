@@ -19,18 +19,24 @@
 
 **Alpha — full end-to-end Android pipeline + iOS toolkit + live dynamic loop.**
 
-Docs:
-- Product spec ([`docs/SPEC.md`](docs/SPEC.md))
-- 60-second quickstart ([`docs/QUICKSTART.md`](docs/QUICKSTART.md))
-- Visual design language ([`docs/DESIGN_LANGUAGE.md`](docs/DESIGN_LANGUAGE.md))
-- **Runtime, recipes, Memory Inspector** ([`docs/RUNTIME.md`](docs/RUNTIME.md))
-- **iOS workflow** — IPA decrypt / patch / re-sign / token-swap ([`docs/IOS.md`](docs/IOS.md))
-- Pipelines ([`docs/PIPELINES.md`](docs/PIPELINES.md))
-- Reporting + Mitigation Playbook ([`docs/REPORTING.md`](docs/REPORTING.md))
-- Moxy MITM ([`docs/MOXY.md`](docs/MOXY.md))
-- PlayIntel ([`docs/PLAYINTEL.md`](docs/PLAYINTEL.md))
-- **MCP driver** — drive Nexus from Claude Desktop / Cursor / Zed ([`docs/MCP.md`](docs/MCP.md))
-- super-tart-vphone iOS lab ([`docs/VPHONE_PLAN.md`](docs/VPHONE_PLAN.md))
+## Docs
+
+📚 **Full documentation lives at [medusanexus.dev](https://medusanexus.dev)**
+(Vercel deploy of [`docs-site/`](docs-site/) — Nextra 4 + auto-generated
+CLI / REPL / API reference at build time).
+
+| Read | When |
+| ---- | ---- |
+| [Getting started](docs-site/content/getting-started/index.mdx) — install, requirements, env vars, first scan, 60-second tour | First-day setup. |
+| [Workflows](docs-site/content/workflows/index.mdx) — Android static, iOS, dynamic Frida, Memory Inspector, PlayIntel, diff, pipelines, reporting | "I want to do X" — analyst stories. |
+| [Integrations](docs-site/content/integrations/index.mdx) — Burp, Caido, Moxy, super-tart-vphone, MCP | Per-tool wiring + auth + pitfalls. |
+| [Reference](docs-site/content/reference/index.mdx) — architecture, env vars, CLI, REPL, HTTP API (136+ endpoints) | The matrix when you need a flag or a route. |
+| [Design](docs-site/content/design/index.mdx) — full spec, visual design language, iOS workflow plan | Background on why things are shaped the way they are. |
+
+All markdown lives in [`docs-site/content/`](docs-site/content/) so an
+AI assistant reading the repo sees byte-identical content as this site.
+The CLI / REPL / API reference pages are *generated from the Python
+source at build time* — they cannot drift.
 
 Code:
 - 31-screen Pencil UI deck — every screen wired to the API
@@ -55,7 +61,7 @@ Code:
 - **iOS toolkit** — IPA decryption via bagbak / frida-ios-dump
   (`POST /v1/ios/decrypt`); Mach-O byte patcher with re-sign via
   ldid / codesign (`POST /v1/projects/{id}/ios/patch`); full workflow
-  documented in [`docs/IOS.md`](docs/IOS.md).
+  documented in [`docs-site/content/workflows/ios.mdx`](docs-site/content/workflows/ios.mdx).
 - **Proxy traffic → Findings** — Moxy / Burp / Caido `execute()` now
   emits structured Findings (cleartext HTTP, JWT leak in body,
   insecure cookies, API key in URL, hosts discovered live, 5xx runs).
@@ -99,7 +105,7 @@ brews / apts / Ghidra / MobSF docker / Stheno / frida-server staging:
 ```
 
 For the 60-second tour with screenshots and slash-command reference, see
-[`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+[`docs-site/content/getting-started/quickstart.mdx`](docs-site/content/getting-started/quickstart.mdx).
 
 What the script does:
 
@@ -124,8 +130,8 @@ Idempotent — safe to re-run. `NO_COLOR=1 ./scripts/setup.sh` kills ANSI output
 | `--mobsf` | start MobSF in Docker with a pinned API key + write it to `~/.mnexus/env.sh` |
 | `--burp` | verify Burp Pro REST API + write `MNEXUS_BURP_URL` / `_API_KEY` to env |
 | `--burp-rest-api` | install `vmware-archive/burp-rest-api` (jar + `run.sh` wrapper) |
-| `--moxy` | start [Moxy](https://github.com/matank001/Moxy) in Docker, extract the mitmproxy CA, push it to the connected device via `adb`, write `MNEXUS_MOXY_*` to env. Details in [`docs/MOXY.md`](docs/MOXY.md). |
-| `--ios-tools` | install **bagbak + ldid + frida-ios-dump** in one shot. Idempotent; reports per-tool success at the end. Details in [`docs/IOS.md`](docs/IOS.md). |
+| `--moxy` | start [Moxy](https://github.com/matank001/Moxy) in Docker, extract the mitmproxy CA, push it to the connected device via `adb`, write `MNEXUS_MOXY_*` to env. Details in [`docs-site/content/integrations/moxy.mdx`](docs-site/content/integrations/moxy.mdx). |
+| `--ios-tools` | install **bagbak + ldid + frida-ios-dump** in one shot. Idempotent; reports per-tool success at the end. Details in [`docs-site/content/workflows/ios.mdx`](docs-site/content/workflows/ios.mdx). |
 | `--doctor` | only run `mnexus doctor` |
 | `--help` | print usage |
 
@@ -133,7 +139,7 @@ Idempotent — safe to re-run. `NO_COLOR=1 ./scripts/setup.sh` kills ANSI output
 
 The `vphone` engine wraps [`wh1te4ever/super-tart-vphone`](https://github.com/wh1te4ever/super-tart-vphone) — a fork of Tart that boots **real iOS** in a VM on Apple Silicon. With it, every iOS Frida recipe in the library runs against a local VM (`frida -H 127.0.0.1:27042`) instead of needing a physical jailbroken iPhone.
 
-**Research-only.** Requires Apple Silicon, macOS Sequoia 15.7.4+ / Tahoe 26.3+, and SIP + AMFI disabled (`csrutil disable && csrutil allow-research-guests enable`). The full integration plan, the four-wave breakdown, and the explicit yes/no automation matrix live in [`docs/VPHONE_PLAN.md`](docs/VPHONE_PLAN.md).
+**Research-only.** Requires Apple Silicon, macOS Sequoia 15.7.4+ / Tahoe 26.3+, and SIP + AMFI disabled (`csrutil disable && csrutil allow-research-guests enable`). The full integration plan, the four-wave breakdown, and the explicit yes/no automation matrix live in [`docs-site/content/integrations/vphone.mdx`](docs-site/content/integrations/vphone.mdx).
 
 ```bash
 ./scripts/setup-vphone.sh           # checks prereqs + clones + builds + writes MNEXUS_TART_BIN
@@ -266,7 +272,7 @@ mnexus doctor                    # moxy row should flip to OK
 
 Device-side setup, common pitfalls (Network Security Config, certificate
 pinning, the intercept-mode "No response available" trap), and the diagnosis
-tree are all in [`docs/MOXY.md`](docs/MOXY.md).
+tree are all in [`docs-site/content/integrations/moxy.mdx`](docs-site/content/integrations/moxy.mdx).
 
 ### iOS workflow (decrypt → patch → memory-swap)
 
@@ -299,7 +305,7 @@ mnexus> /memory write 0x10f234000 "..."               # token swap
 ```
 
 Endpoints, failure modes, and the full talk-style walkthrough live
-in [`docs/IOS.md`](docs/IOS.md).
+in [`docs-site/content/workflows/ios.mdx`](docs-site/content/workflows/ios.mdx).
 
 ### Live dynamic loop + Memory Inspector
 
@@ -309,7 +315,7 @@ IIFE-isolated), streams `send({...})` events back via SSE, and
 exposes process memory through four endpoints
 (`/v1/dynamic/sessions/{sid}/memory/{scan,read,write,modules}`).
 Workflow walkthrough — including the **token-swap recipe** — in
-[`docs/RUNTIME.md`](docs/RUNTIME.md).
+[`docs-site/content/workflows/dynamic.mdx`](docs-site/content/workflows/dynamic.mdx).
 
 ## Running
 
@@ -443,7 +449,7 @@ Key API endpoints (full list at `/docs`):
 adb shell su -c '/data/local/tmp/frida-server &'
 
 # On a non-rooted device, patch the APK instead of running frida-server:
-# (handled by the Stheno engine; see docs/SPEC.md § 3.3)
+# (handled by the Stheno engine; see docs-site/content/design/spec.mdx § 3.3)
 ```
 
 ## Development
@@ -486,8 +492,8 @@ python -m mnexus.cli dev             # serve with reload
 | `mnexus/` | Python package — models, engines, orchestrator, intelligence, reporting, CLI, API. |
 | `tests/` | Pytest suite — mitigation invariant + report generator coverage. |
 | `scripts/setup.sh` | One-shot installer (macOS + Linux). |
-| `docs/SPEC.md` | Full product specification. |
-| `docs/DESIGN_LANGUAGE.md` | Visual tokens, typography, motion effects. |
+| `docs-site/content/design/spec.mdx` | Full product specification. |
+| `docs-site/content/design/design-language.mdx` | Visual tokens, typography, motion effects. |
 | `design/medusanexus.pen` | Pencil source file (31 screens + design system). |
 | `design/screens/` | Per-screen PNG exports, grouped. |
 | `design/INDEX.md` | Screen catalog with fidelity levels. |

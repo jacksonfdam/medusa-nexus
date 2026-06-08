@@ -1954,7 +1954,7 @@ def mcp_serve_cmd(api_base: str) -> None:
 
     Tools exposed: list_projects · get_project · list_findings · get_finding ·
     list_recipes · decode_android_flag · manifest_diff · findings_diff ·
-    firebase_probe · doctor. See docs/MCP.md for the full wire-up.
+    firebase_probe · doctor. See docs-site/content/integrations/mcp.mdx for the full wire-up.
     """
     if api_base:
         os.environ["MNEXUS_API_BASE"] = api_base
