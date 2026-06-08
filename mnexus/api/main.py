@@ -4325,6 +4325,87 @@ def _safe_put(queue: asyncio.Queue, item: Any) -> None:
             pass
 
 
+# ─── IPA Patcher (Bloco 1) ───────────────────────────────────────────────
+
+
+@app.post("/v1/projects/{project_id}/ios/patch")
+async def project_ios_patch(project_id: str, request: Request) -> dict[str, Any]:
+    """Patch the project's IPA at Mach-O byte level + re-sign.
+
+    Body::
+        {
+          "patches": [
+            {"name": "return_zero_at_offset", "offset": "0x100123456"},
+            {"name": "nop_at_offset",         "offset": "0x100123458", "count": 4}
+          ]
+        }
+
+    Supported patches mirror IPAPatcher.SUPPORTED_PATCHES:
+      * ``return_zero_at_offset`` — write ``mov x0,#0 ; ret`` (8 bytes
+        at offset). Use this on the jailbreak-check function epilogue.
+      * ``nop_at_offset`` — write N ARM64 NOPs (4 bytes each). Use on
+        call sites to anti-Frida / anti-debug probes.
+
+    Returns the IPAPatchResult dump — patched_path, per-patch outcome
+    (with previous_hex for rollback), signing_tool used, warnings.
+    400 on unknown patches or malformed body; 410 if the IPA is gone.
+    """
+    from mnexus.runtime.ipa_patcher import IPAPatcher, IPAPatcherError
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict) or "patches" not in body:
+        raise HTTPException(400, "body must contain 'patches' array")
+    patches = body["patches"]
+    if not isinstance(patches, list) or not patches:
+        raise HTTPException(400, "'patches' must be a non-empty array")
+
+    apk_path = p.apk_path if isinstance(p.apk_path, Path) else Path(str(p.apk_path))
+    if not apk_path.exists():
+        raise HTTPException(410, f"IPA no longer present at {apk_path} — re-import.")
+
+    try:
+        result = await IPAPatcher(nexus.config).patch(apk_path, patches)
+    except IPAPatcherError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    return {"project_id": p.id, **result.model_dump()}
+
+
+@app.get("/v1/ios/patcher/supported")
+async def ios_patcher_supported() -> dict[str, Any]:
+    """Mirror of /v1/mango/patcher/supported but for iOS — the UI uses
+    it to render the patch picker without hardcoding names."""
+    return {
+        "patches": [
+            {
+                "name": "return_zero_at_offset",
+                "title": "Return zero (mov x0,#0; ret)",
+                "description": (
+                    "Overwrites 8 bytes at a Mach-O file offset with the ARM64 "
+                    "'mov x0, #0; ret' sequence. Canonical pattern for disabling "
+                    "a jailbreak-check or anti-debug function."
+                ),
+                "params": ["offset"],
+            },
+            {
+                "name": "nop_at_offset",
+                "title": "NOP-out instructions",
+                "description": (
+                    "Writes N ARM64 NOPs (4 bytes each) at a Mach-O file offset. "
+                    "Use on call sites you want to neutralise without altering "
+                    "control flow above or below."
+                ),
+                "params": ["offset", "count"],
+            },
+        ],
+    }
+
+
 # ─── IPA Decryptor (Bloco 2) ─────────────────────────────────────────────
 
 
