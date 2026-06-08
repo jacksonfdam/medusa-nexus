@@ -3696,6 +3696,69 @@ async def project_manifest_diff(project_id: str, against: str | None = None) -> 
     }
 
 
+@app.get("/v1/projects/{project_id}/findings-diff")
+async def project_findings_diff(project_id: str, against: str | None = None) -> dict[str, Any]:
+    """Diff this project's Finding set against another scan of the
+    same package — the security-delta complement to /manifest-diff.
+
+    Resolution rules match /manifest-diff: explicit ``?against=<pid>``
+    wins; otherwise we pick the most recent non-self Project with the
+    same ``package_name``. No prior scan → ``base=null`` + an
+    'everything is new' diff against an empty list.
+    """
+    from mnexus.intelligence.findings_diff import findings_diff
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    head_findings = list(p.attack_surface.findings) if p.attack_surface else []
+
+    base_project: Project | None = None
+    if against:
+        base_project = nexus.db.load_project(against)
+        if base_project is None:
+            raise HTTPException(404, f"no project with id '{against}'")
+        if base_project.id == p.id:
+            raise HTTPException(400, "cannot diff a project against itself")
+    else:
+        for row in nexus.db.list_projects():
+            if row.get("id") == p.id:
+                continue
+            if (row.get("package_name") or "") != (p.package_name or ""):
+                continue
+            base_project = nexus.db.load_project(row["id"])
+            if base_project is not None:
+                break
+
+    if base_project is None:
+        return {
+            "project_id": p.id,
+            "package": p.package_name,
+            "base": None,
+            "head": {"id": p.id, "version_name": p.version_name},
+            "diff": findings_diff([], head_findings),
+            "note": "no prior scan of this package — diff renders 'all added' against an empty base.",
+        }
+
+    base_findings = list(base_project.attack_surface.findings) if base_project.attack_surface else []
+    return {
+        "project_id": p.id,
+        "package": p.package_name,
+        "base": {
+            "id": base_project.id,
+            "version_name": base_project.version_name,
+            "version_code": base_project.version_code,
+            "created_at": base_project.created_at.isoformat(),
+        },
+        "head": {
+            "id": p.id,
+            "version_name": p.version_name,
+            "version_code": p.version_code,
+            "created_at": p.created_at.isoformat(),
+        },
+        "diff": findings_diff(base_findings, head_findings),
+    }
+
+
 @app.post("/v1/projects/{project_id}/mango/deeplink/fire")
 async def mango_deeplink_fire(project_id: str, uri: str = Form(...)) -> dict[str, Any]:
     """Fire a deeplink intent on the connected device — Mango's ``deeplink``.
