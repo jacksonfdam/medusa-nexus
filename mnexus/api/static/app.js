@@ -1821,6 +1821,10 @@ function view_project_runtime(ctx) {
                     <option value="return_zero_at_offset">return_zero_at_offset (mov x0,#0; ret)</option>
                     <option value="nop_at_offset">nop_at_offset (NOPs × count)</option>
                   </select>
+                  <select id="rt-ipa-patch-addrkind" class="input t-mono" title="va = Ghidra's Address column; offset = Ghidra's Offset column">
+                    <option value="offset">offset (file)</option>
+                    <option value="va">va (virtual)</option>
+                  </select>
                   <input id="rt-ipa-patch-offset" class="input t-mono" placeholder="0x100123456" style="flex:1;min-width:140px">
                   <input id="rt-ipa-patch-count" class="input t-mono" type="number" min="1" max="64" value="1" title="NOP count (return_zero ignores)" style="width:80px">
                   <button class="btn" id="rt-ipa-patch-add" style="white-space:nowrap">[ + ADD ]</button>
@@ -2087,11 +2091,14 @@ async function mount_project_runtime(ctx) {
                     queueEl.innerHTML = `<span class="muted small">no patches queued — add one above</span>`;
                     return;
                 }
-                queueEl.innerHTML = queue.map((p, i) => `
+                queueEl.innerHTML = queue.map((p, i) => {
+                    const addrLabel = p.va ? `va=${p.va}` : `offset=${p.offset}`;
+                    return `
                     <div class="row small" style="gap:6px;align-items:center;padding:2px 0">
-                      <span class="t-mono" style="color:var(--cyan);flex:1">${escapeHtml(p.name)} @ ${escapeHtml(p.offset)}${p.count ? " ×" + p.count : ""}</span>
+                      <span class="t-mono" style="color:var(--cyan);flex:1">${escapeHtml(p.name)} ${escapeHtml(addrLabel)}${p.count ? " ×" + p.count : ""}</span>
                       <a href="#" data-rm="${i}" class="muted small">[ × ]</a>
-                    </div>`).join("");
+                    </div>`;
+                }).join("");
                 $$('[data-rm]').forEach((a) => a.addEventListener("click", (e) => {
                     e.preventDefault();
                     queue.splice(parseInt(a.dataset.rm, 10), 1);
@@ -2102,10 +2109,12 @@ async function mount_project_runtime(ctx) {
 
             $("#rt-ipa-patch-add").addEventListener("click", () => {
                 const kind = $("#rt-ipa-patch-kind").value;
-                const offset = ($("#rt-ipa-patch-offset").value || "").trim();
+                const addrKind = ($("#rt-ipa-patch-addrkind") || {}).value || "offset";
+                const addr = ($("#rt-ipa-patch-offset").value || "").trim();
                 const count = parseInt($("#rt-ipa-patch-count").value || "1", 10);
-                if (!offset) { alert("offset required (hex like 0x100123456 or decimal)"); return; }
-                const entry = { name: kind, offset };
+                if (!addr) { alert(`${addrKind} required (hex like 0x100123456 or decimal)`); return; }
+                const entry = { name: kind };
+                entry[addrKind] = addr;   // 'offset' or 'va'
                 if (kind === "nop_at_offset") entry.count = count;
                 queue.push(entry);
                 $("#rt-ipa-patch-offset").value = "";

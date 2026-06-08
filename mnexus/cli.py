@@ -1329,13 +1329,23 @@ def _patch(state: ReplState, args: list[str]) -> None:
 
     elif kind == "ipa":
         if not payload_args:
-            console.print("[red]usage:[/red] /patch ipa <name>:<offset>[:<count>] …"); return
+            console.print(
+                "[red]usage:[/red] /patch ipa <name>:<offset>[:<count>] …\n"
+                "  or  /patch ipa <name>:va=<address>[:<count>] …  (Ghidra Address column)"
+            ); return
         patches: list[dict] = []
         for raw in payload_args:
             parts = raw.split(":")
             if len(parts) < 2:
                 console.print(f"[red]bad patch spec:[/red] {raw} — expected <name>:<offset>[:<count>]"); return
-            entry = {"name": parts[0], "offset": parts[1]}
+            entry: dict = {"name": parts[0]}
+            addr_token = parts[1]
+            # va=0x… switches to virtual-address translation; bare value
+            # is treated as a file offset.
+            if addr_token.startswith("va="):
+                entry["va"] = addr_token[3:]
+            else:
+                entry["offset"] = addr_token
             if len(parts) > 2:
                 try:
                     entry["count"] = int(parts[2])

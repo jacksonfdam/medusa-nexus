@@ -108,6 +108,133 @@ async def test_nop_at_offset_writes_count_nops(cfg, tmp_path, monkeypatch: pytes
     assert patched_exe[52:] == b"\xff" * (128 - 52)
 
 
+# ─── VA → file offset translation ─────────────────────────────────────
+
+
+def _macho_with_one_segment(vmaddr: int, fileoff: int, total_size: int, payload_offset: int, payload: bytes) -> bytes:
+    """Build a minimal 64-bit Mach-O with one LC_SEGMENT_64.
+
+    Header:
+      magic 0xfeedfacf (LE) · cputype/sub/filetype/ncmds=1/sizeofcmds/flags/reserved
+
+    Then one LC_SEGMENT_64 (cmd=0x19, cmdsize=72):
+      segname=__TEXT (16 bytes), vmaddr, vmsize=total_size, fileoff,
+      filesize=total_size, prot/sects/flags zeros.
+
+    The 'executable' payload lives at file offset `fileoff + payload_offset`
+    so VA = vmaddr + payload_offset translates to that file offset.
+    """
+    import struct
+
+    header = struct.pack(
+        "<IIIIIIII",
+        0xFEEDFACF,                     # MH_MAGIC_64 little-endian
+        0x0100000C,                     # CPU_TYPE_ARM64
+        0,                              # cpusubtype
+        2,                              # MH_EXECUTE
+        1,                              # ncmds
+        72,                             # sizeofcmds
+        0, 0,                           # flags, reserved
+    )
+    segname = b"__TEXT".ljust(16, b"\x00")
+    seg = (
+        struct.pack("<II", 0x19, 72)                  # cmd=LC_SEGMENT_64, cmdsize=72
+        + segname
+        + struct.pack(
+            "<QQQQ",
+            vmaddr, total_size, fileoff, total_size,  # vmaddr / vmsize / fileoff / filesize
+        )
+        + struct.pack("<IIII", 7, 5, 0, 0)            # maxprot/initprot/nsects/flags
+    )
+    head_len = len(header) + len(seg)
+    # Pad up to fileoff + payload_offset, then write the payload, then pad
+    # to total_size.
+    if fileoff + payload_offset < head_len:
+        # Header is fileoff + payload_offset bytes long — collision. Bump fileoff up.
+        # Caller's responsibility, but keep the assert visible:
+        raise ValueError("fileoff + payload_offset can't be inside the header")
+    pre_payload = b"\x00" * (fileoff + payload_offset - head_len)
+    post_payload = b"\x00" * (total_size - (fileoff + payload_offset + len(payload)))
+    return header + seg + pre_payload + payload + post_payload
+
+
+def test_va_to_file_offset_translates_within_segment(tmp_path) -> None:
+    from mnexus.runtime.ipa_patcher import _va_to_file_offset
+
+    vmaddr = 0x100000000
+    fileoff = 0x0  # segment starts at file beginning
+    total_size = 0x1000
+    blob = _macho_with_one_segment(vmaddr, fileoff, total_size, 0x200, b"PAYLOAD")
+    macho = tmp_path / "exec"
+    macho.write_bytes(blob)
+
+    # VA pointing at the payload → file offset
+    out = _va_to_file_offset(macho, vmaddr + 0x200)
+    assert out == 0x200
+
+    # VA at segment base → file offset 0
+    assert _va_to_file_offset(macho, vmaddr) == 0
+
+
+def test_va_to_file_offset_returns_none_outside_any_segment(tmp_path) -> None:
+    from mnexus.runtime.ipa_patcher import _va_to_file_offset
+    blob = _macho_with_one_segment(0x100000000, 0, 0x1000, 0x200, b"\x00")
+    macho = tmp_path / "exec"
+    macho.write_bytes(blob)
+    # Way outside the single segment.
+    assert _va_to_file_offset(macho, 0x300000000) is None
+
+
+def test_va_to_file_offset_returns_none_on_non_macho(tmp_path) -> None:
+    from mnexus.runtime.ipa_patcher import _va_to_file_offset
+    not_macho = tmp_path / "elf-like"
+    not_macho.write_bytes(b"\x7fELF" + b"\x00" * 100)
+    assert _va_to_file_offset(not_macho, 0x100000000) is None
+
+
+@pytest.mark.asyncio
+async def test_patch_via_va_translates_then_writes_bytes(cfg, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: build an IPA whose executable is a real Mach-O,
+    patch by VA, verify the bytes landed at the right file offset."""
+    import zipfile
+
+    monkeypatch.setattr("mnexus.runtime.ipa_patcher.shutil.which", lambda name: None)
+
+    vmaddr = 0x100000000
+    payload_offset = 0x400
+    blob = _macho_with_one_segment(vmaddr, 0, 0x1000, payload_offset, b"\xaa" * 32)
+
+    ipa = tmp_path / "fixture.ipa"
+    with zipfile.ZipFile(ipa, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Payload/Foo.app/Foo", blob)
+        zf.writestr("Payload/Foo.app/Info.plist", b"<plist><dict/></plist>")
+
+    result = await IPAPatcher(cfg).patch(ipa, [
+        {"name": "return_zero_at_offset", "va": hex(vmaddr + payload_offset)},
+    ])
+    assert result.patched_path is not None
+    with zipfile.ZipFile(result.patched_path) as zf:
+        patched = zf.read("Payload/Foo.app/Foo")
+    # Bytes at the translated file offset should be the ret-zero sequence.
+    assert patched[payload_offset:payload_offset + 8] == _ARM64_MOV_X0_0 + _ARM64_RET
+
+
+@pytest.mark.asyncio
+async def test_patch_via_va_skipped_when_va_outside_any_segment(cfg, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import zipfile
+
+    monkeypatch.setattr("mnexus.runtime.ipa_patcher.shutil.which", lambda name: None)
+    blob = _macho_with_one_segment(0x100000000, 0, 0x1000, 0x400, b"\x00" * 16)
+    ipa = tmp_path / "fixture.ipa"
+    with zipfile.ZipFile(ipa, "w") as zf:
+        zf.writestr("Payload/Foo.app/Foo", blob)
+    result = await IPAPatcher(cfg).patch(ipa, [
+        {"name": "return_zero_at_offset", "va": "0x300000000"},
+    ])
+    assert not result.patches_applied
+    assert "not covered" in result.patches_skipped[0]["reason"]
+
+
 @pytest.mark.asyncio
 async def test_multiple_patches_apply_in_one_pass(cfg, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mnexus.runtime.ipa_patcher.shutil.which", lambda name: None)

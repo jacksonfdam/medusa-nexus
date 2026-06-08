@@ -223,6 +223,66 @@ class IPAPatcher:
 # ─── module-level helpers ────────────────────────────────────────────
 
 
+def _va_to_file_offset(macho_path: Path, va: int) -> int | None:
+    """Translate a Mach-O virtual address to a file offset.
+
+    Walks ``LC_SEGMENT_64`` load commands from the Mach-O header until
+    we find one whose VM range covers ``va``, then computes
+    ``file_offset = (va - vmaddr) + fileoff``.
+
+    Returns ``None`` when no segment claims the address — usually means
+    the analyst gave us a wrong VA or a fat-binary slice we didn't pick.
+
+    We only walk 64-bit Mach-O for now (``MH_MAGIC_64`` /
+    ``MH_CIGAM_64``). 32-bit (``MH_MAGIC`` / ``LC_SEGMENT``) is
+    rarer on modern iOS — left as a follow-up. Fat binaries
+    (``FAT_MAGIC``/``FAT_MAGIC_64``) are also out of scope here; the
+    typical workflow ingests an already-thinned single-arch binary.
+    """
+    import struct
+
+    LC_SEGMENT_64 = 0x19
+    MAGIC_64_LE = b"\xcf\xfa\xed\xfe"  # little-endian on disk (arm64)
+    MAGIC_64_BE = b"\xfe\xed\xfa\xcf"  # big-endian variant
+
+    try:
+        with macho_path.open("rb") as fh:
+            magic = fh.read(4)
+            if magic not in (MAGIC_64_LE, MAGIC_64_BE):
+                return None  # not a 64-bit Mach-O thin slice
+            endian = "<" if magic == MAGIC_64_LE else ">"
+            # mach_header_64 layout after magic:
+            #   cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved
+            fh.read(24)  # skip past cputype...reserved (we want the cmds count)
+            # Actually re-read with proper struct: 7×u32 = 28 bytes total
+            fh.seek(4)  # right after magic
+            header = fh.read(28)
+            cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved = struct.unpack(
+                endian + "IIIIIII", header,
+            )
+            for _ in range(ncmds):
+                cmd_header = fh.read(8)
+                if len(cmd_header) < 8:
+                    return None
+                cmd, cmdsize = struct.unpack(endian + "II", cmd_header)
+                rest = fh.read(cmdsize - 8)
+                if cmd != LC_SEGMENT_64:
+                    continue
+                # segment_command_64 layout (already past cmd+cmdsize):
+                #   segname[16], vmaddr u64, vmsize u64, fileoff u64,
+                #   filesize u64, maxprot u32, initprot u32, nsects u32, flags u32
+                if len(rest) < 64:
+                    return None
+                vmaddr, vmsize, fileoff, filesize = struct.unpack(
+                    endian + "QQQQ", rest[16:48],
+                )
+                if vmaddr <= va < vmaddr + vmsize:
+                    return (va - vmaddr) + fileoff
+        return None
+    except (OSError, struct.error):
+        return None
+
+
 def _find_main_macho(extracted_root: Path) -> Path | None:
     """Find ``Payload/<App>.app/<Executable>`` in an unzipped IPA.
 
@@ -267,15 +327,38 @@ def _apply_patch(patch: dict, mach_o: Path) -> dict:
 
     Failures land on ``{ok: False, reason: "..."}`` rather than raising
     so a typo in one patch doesn't abort the rest of the batch.
+
+    Two ways to address bytes:
+      * ``offset``  — file offset (Ghidra's "Offset" column / Hopper's "File offset")
+      * ``va``      — virtual address (Ghidra's "Address" / "Addr" column).
+                      We translate via LC_SEGMENT_64 load commands.
+
+    Patches may supply either field; ``va`` takes precedence when both
+    are present (the analyst is presumably copy-pasting the VA they
+    just saw in the disassembler).
     """
     name = patch["name"]
-    try:
-        offset = _parse_offset(patch.get("offset"))
-    except IPAPatcherError as exc:
-        return {"ok": False, "reason": f"bad offset: {exc}"}
 
-    if offset < 0:
-        return {"ok": False, "reason": "offset must be non-negative"}
+    # VA translation path — convert to file offset before falling
+    # through to the byte-write logic.
+    if patch.get("va") is not None:
+        try:
+            va = _parse_offset(patch.get("va"))
+        except IPAPatcherError as exc:
+            return {"ok": False, "reason": f"bad va: {exc}"}
+        if va < 0:
+            return {"ok": False, "reason": "va must be non-negative"}
+        translated = _va_to_file_offset(mach_o, va)
+        if translated is None:
+            return {"ok": False, "reason": f"va {hex(va)} not covered by any LC_SEGMENT_64 in {mach_o.name}"}
+        offset = translated
+    else:
+        try:
+            offset = _parse_offset(patch.get("offset"))
+        except IPAPatcherError as exc:
+            return {"ok": False, "reason": f"bad offset: {exc}"}
+        if offset < 0:
+            return {"ok": False, "reason": "offset must be non-negative"}
 
     size = mach_o.stat().st_size
     if name == "nop_at_offset":

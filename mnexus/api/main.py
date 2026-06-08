@@ -4450,28 +4450,35 @@ async def project_ios_patch(project_id: str, request: Request) -> dict[str, Any]
 @app.get("/v1/ios/patcher/supported")
 async def ios_patcher_supported() -> dict[str, Any]:
     """Mirror of /v1/mango/patcher/supported but for iOS — the UI uses
-    it to render the patch picker without hardcoding names."""
+    it to render the patch picker without hardcoding names.
+
+    Both patches accept ``offset`` (file offset, Ghidra's Offset column)
+    OR ``va`` (virtual address, Ghidra's Address column). When ``va``
+    is present, the patcher translates via LC_SEGMENT_64 load commands
+    so the analyst can paste straight from the disassembler.
+    """
     return {
         "patches": [
             {
                 "name": "return_zero_at_offset",
                 "title": "Return zero (mov x0,#0; ret)",
                 "description": (
-                    "Overwrites 8 bytes at a Mach-O file offset with the ARM64 "
-                    "'mov x0, #0; ret' sequence. Canonical pattern for disabling "
-                    "a jailbreak-check or anti-debug function."
+                    "Overwrites 8 bytes at a Mach-O file offset (or virtual "
+                    "address, via va=) with the ARM64 'mov x0, #0; ret' "
+                    "sequence. Canonical pattern for disabling a "
+                    "jailbreak-check or anti-debug function."
                 ),
-                "params": ["offset"],
+                "params": ["offset|va"],
             },
             {
                 "name": "nop_at_offset",
                 "title": "NOP-out instructions",
                 "description": (
-                    "Writes N ARM64 NOPs (4 bytes each) at a Mach-O file offset. "
-                    "Use on call sites you want to neutralise without altering "
-                    "control flow above or below."
+                    "Writes N ARM64 NOPs (4 bytes each) at a Mach-O file "
+                    "offset (or va=). Use on call sites you want to "
+                    "neutralise without altering control flow above or below."
                 ),
-                "params": ["offset", "count"],
+                "params": ["offset|va", "count"],
             },
         ],
     }
