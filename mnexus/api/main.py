@@ -580,6 +580,67 @@ async def playintel_scans_delete(scan_id: str) -> dict[str, Any]:
     raise HTTPException(404, f"no scan with id '{scan_id}'")
 
 
+@app.post("/v1/projects/{project_id}/patch")
+async def project_patch(
+    project_id: str,
+    patches: str = Form(...),
+) -> dict[str, Any]:
+    """Patch the project's APK with one or more manifest tweaks.
+
+    ``patches`` is a comma-separated list of names from APKPatcher's
+    ``SUPPORTED_PATCHES`` — currently:
+        * ``debuggable``         — flip android:debuggable=true.
+        * ``cleartext_traffic``  — flip android:usesCleartextTraffic=true.
+        * ``user_ca_trust``      — inject network_security_config.xml
+                                   that accepts user-installed CAs.
+
+    Output carries the path to the rebuilt APK + warnings + the list
+    of patches that no-op'd (already applied) vs. ones that actually
+    changed something. When apktool is missing on the server, the
+    endpoint returns a preview-only result with ``preview=true`` so
+    the UI can render 'this is what the patch would do' without an
+    APK to install.
+    """
+    from mnexus.runtime.apk_patcher import APKPatcher, APKPatcherError, SUPPORTED_PATCHES
+
+    p = _require_project(project_id)
+    patch_list = [s.strip() for s in patches.split(",") if s.strip()]
+    unknown = [name for name in patch_list if name not in SUPPORTED_PATCHES]
+    if unknown:
+        raise HTTPException(400, f"unknown patches: {unknown!r} — supported: {SUPPORTED_PATCHES}")
+    if not patch_list:
+        raise HTTPException(400, "at least one patch is required")
+
+    nexus: MedusaNexus = app.state.nexus
+    apk_path = p.apk_path if isinstance(p.apk_path, Path) else Path(str(p.apk_path))
+    if not apk_path.exists():
+        raise HTTPException(410, f"APK no longer present at {apk_path} — re-import.")
+
+    patcher = APKPatcher(nexus.config)
+    try:
+        result = await patcher.patch(apk_path, patch_list)
+    except APKPatcherError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+    return {"project_id": p.id, **result.model_dump()}
+
+
+@app.get("/v1/mango/patcher/supported")
+async def mango_patcher_supported() -> dict[str, Any]:
+    """Surface the supported patch names + their behaviour so the UI
+    can render the patch picker without hardcoding the list client-side."""
+    return {
+        "patches": [
+            {"name": "debuggable",        "title": "Debuggable flag",
+             "description": "Flips android:debuggable=true on <application>. Enables jdb attach."},
+            {"name": "cleartext_traffic", "title": "Cleartext HTTP",
+             "description": "Flips android:usesCleartextTraffic=true. Lets you proxy plain-HTTP endpoints."},
+            {"name": "user_ca_trust",     "title": "Trust user CAs",
+             "description": "Injects network_security_config.xml that trusts user-installed CAs. Unblocks Burp/Caido/Moxy MITM."},
+        ],
+    }
+
+
 @app.post("/v1/projects/{project_id}/play-scan")
 async def project_play_scan(
     project_id: str,

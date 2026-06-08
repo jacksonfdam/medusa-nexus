@@ -99,7 +99,26 @@ class FridaEngine(BaseEngine):
             )
         return matches[0].read_text(encoding="utf-8", errors="replace")
 
-    async def patch_with_stheno(self, apk_path: Path, patches: list[str]) -> Path:  # pragma: no cover - stub
-        """Invoke Stheno on `apk_path` with the listed patches. Returns patched apk path."""
-        _ = apk_path, patches
-        raise NotImplementedError("stheno binding pending — see plan iteration 3")
+    async def patch_with_stheno(self, apk_path: Path, patches: list[str]) -> Path:
+        """Apply ``patches`` to ``apk_path`` and return the patched APK.
+
+        The original spec called this 'Stheno' patching — ch0pin/Stheno
+        turned out to be a runtime intent monitor, not an APK patcher.
+        The actual implementation uses apktool + apksigner via
+        ``APKPatcher`` and the name is kept for back-compat. New
+        callers should prefer ``APKPatcher`` directly so they can
+        read the full PatchResult (warnings, skipped patches, keystore
+        path).
+        """
+        from mnexus.runtime.apk_patcher import APKPatcher, APKPatcherError
+
+        patcher = APKPatcher(self.config)
+        try:
+            result = await patcher.patch(apk_path, patches)
+        except APKPatcherError as exc:
+            raise RuntimeError(f"patch failed: {exc}") from exc
+        if result.patched_path is None:
+            raise RuntimeError(
+                "patcher returned no APK — check warnings: " + ", ".join(result.warnings)
+            )
+        return result.patched_path

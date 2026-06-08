@@ -1593,6 +1593,26 @@ function view_project_runtime(ctx) {
             <a class="btn" id="rt-mango-diff-link" href="#" style="white-space:nowrap">[ → MANIFEST DIFF AGAINST PRIOR SCAN ]</a>
             <span class="muted small">compares exported components · deeplinks · permissions · SSL pinning</span>
           </div>
+
+          <div class="row" style="gap:8px;align-items:flex-start;flex-wrap:wrap">
+            <span class="muted small uppercase" style="letter-spacing:2px;width:110px;padding-top:6px">patch apk:</span>
+            <div class="col" style="gap:6px;flex:1;min-width:280px">
+              <label class="row small" style="gap:6px;align-items:center;cursor:pointer">
+                <input type="checkbox" data-patch="user_ca_trust" checked>
+                <span><b style="color:var(--cyan)">user_ca_trust</b> — trust user-installed CAs (unblocks Burp/Caido/Moxy)</span>
+              </label>
+              <label class="row small" style="gap:6px;align-items:center;cursor:pointer">
+                <input type="checkbox" data-patch="debuggable">
+                <span><b style="color:var(--cyan)">debuggable</b> — flip android:debuggable=true (jdb attach)</span>
+              </label>
+              <label class="row small" style="gap:6px;align-items:center;cursor:pointer">
+                <input type="checkbox" data-patch="cleartext_traffic">
+                <span><b style="color:var(--cyan)">cleartext_traffic</b> — allow plain HTTP</span>
+              </label>
+            </div>
+            <button class="btn primary" id="rt-mango-patch-go" style="white-space:nowrap" title="apktool + apksigner under the hood; produces a re-signed APK in the workspace">[ ▶ PATCH APK ]</button>
+          </div>
+          <div id="rt-mango-patch-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap"></div>
         </div>
       </section>
 
@@ -1775,6 +1795,59 @@ async function mount_project_runtime(ctx) {
     $("#rt-mango-diff-link").addEventListener("click", (e) => {
         e.preventDefault();
         location.hash = `#/project/${id}/manifest-diff`;
+    });
+
+    // APK patcher — POST /v1/projects/<id>/patch with the selected
+    // checkboxes, render the result inline (path + warnings + skipped).
+    const patchOut = $("#rt-mango-patch-out");
+    $("#rt-mango-patch-go").addEventListener("click", async () => {
+        const selected = [];
+        $$('input[data-patch]').forEach((cb) => { if (cb.checked) selected.push(cb.dataset.patch); });
+        if (!selected.length) {
+            alert("pick at least one patch (user_ca_trust is usually enough)");
+            return;
+        }
+        const btn = $("#rt-mango-patch-go");
+        const orig = btn.textContent;
+        btn.textContent = "[ PATCHING… ]";
+        btn.disabled = true;
+        patchOut.style.display = "";
+        patchOut.style.color = "var(--cyan)";
+        patchOut.textContent = `patching with: ${selected.join(", ")}…`;
+        try {
+            const fd = new FormData(); fd.append("patches", selected.join(","));
+            const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/patch`, { method: "POST", body: fd });
+            const j = await r.json();
+            if (!r.ok) throw new Error((j && j.detail) || r.statusText);
+            const lines = [];
+            if (j.preview) {
+                lines.push("preview mode — apktool isn't installed on the server, no APK produced.");
+            } else if (j.patched_path) {
+                lines.push(`✓ patched APK at ${j.patched_path}`);
+            }
+            if (j.patches_applied && j.patches_applied.length) {
+                lines.push(`applied: ${j.patches_applied.join(", ")}`);
+            }
+            if (j.patches_skipped && j.patches_skipped.length) {
+                lines.push(`skipped: ${j.patches_skipped.map((s) => s.name + " (" + s.reason + ")").join(" · ")}`);
+            }
+            if (j.warnings && j.warnings.length) {
+                lines.push("warnings:");
+                j.warnings.forEach((w) => lines.push("  · " + w));
+            }
+            patchOut.style.color = j.preview ? "var(--magenta)" : "var(--acid)";
+            patchOut.textContent = lines.join("\n");
+            btn.textContent = "[ ✓ DONE ]";
+            btn.style.color = "var(--acid)";
+            btn.disabled = false;
+            setTimeout(() => { btn.textContent = orig; btn.style.color = ""; }, 6000);
+        } catch (e) {
+            patchOut.style.color = "var(--sev-crit)";
+            patchOut.textContent = `request failed: ${e.message || e}`;
+            btn.textContent = "[ FAILED ]";
+            btn.style.color = "var(--sev-crit)";
+            btn.disabled = false;
+        }
     });
 
     $("#rt-copy").addEventListener("click", async () => {
