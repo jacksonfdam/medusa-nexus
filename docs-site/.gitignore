@@ -1,0 +1,33 @@
+# Next.js
+.next/
+out/
+build/
+.next-env.d.ts
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Local env
+.env*.local
+
+# Vercel
+.vercel
+
+# IDE
+.vscode/
+.idea/
+
+# Auto-generated reference pages.
+# These are regenerated on every `npm run dev` / `npm run build` via
+# scripts/gen_reference.py. Source of truth = the Python code in ../mnexus/.
+pages/reference/cli.mdx
+pages/reference/repl.mdx
+pages/reference/api/*.mdx
+!pages/reference/api/_meta.json
+!pages/reference/api/index.mdx
+
+# Build artefacts
+*.log
+.DS_Store

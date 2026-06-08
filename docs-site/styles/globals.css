@@ -1,0 +1,40 @@
+/*
+ * Local overrides on top of nextra-theme-docs.
+ * Keep this file thin — most chrome comes from theme.config.tsx
+ * and Nextra's built-in dark theme. Cyberpunk accents only.
+ */
+
+:root {
+  --nextra-primary-hue: 188deg;
+  --nextra-primary-saturation: 90%;
+}
+
+/* Code blocks: subtle cyan glow on the gutter so they read as terminal output. */
+html[class~='dark'] .nextra-code-block pre {
+  background-color: #0a0e14 !important;
+  border-left: 1px solid rgba(34, 211, 238, 0.25);
+}
+
+/* Headings get the same cyan→magenta gradient as the wordmark for h1. */
+html[class~='dark'] .nextra-content h1 {
+  background-image: linear-gradient(90deg, #22d3ee 0%, #f0abfc 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Callouts are too pastel by default — bump to neon. */
+html[class~='dark'] .nextra-callout {
+  border-color: rgba(34, 211, 238, 0.4);
+}
+
+/* Table rows: tighter line-height so the reference tables don't sprawl. */
+.nextra-content table tr td,
+.nextra-content table tr th {
+  line-height: 1.4;
+}
+
+/* Slash commands look like links — give them a terminal cursor. */
+.nextra-content code:not(pre code):where([class*='language-bash'] *) {
+  font-feature-settings: "calt" 1;
+}

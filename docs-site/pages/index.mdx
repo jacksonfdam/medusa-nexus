@@ -1,0 +1,104 @@
+---
+title: MedusaNexus — unified mobile threat analysis
+---
+
+import { Cards, Card, Callout } from 'nextra/components';
+
+# 🔱 MedusaNexus
+
+*Unified mobile threat analysis. Every head sees a different angle.*
+
+`mnexus` is the orchestrator your APK never asked for. It doesn't reinvent JADX,
+Ghidra, MobSF, Frida, Medusa, Stheno, Burp, Caido, Moxy or APKTool — it makes
+them stop pretending they don't know each other, sits them down at one
+SQLite-backed table, and watches them correlate findings like adults.
+
+<Callout type="info" emoji="⚡">
+**Alpha — full Android pipeline + iOS toolkit + live dynamic loop.**
+The API still shifts week to week; pin to commits in CI.
+</Callout>
+
+## Get up and running
+
+<Cards>
+  <Card
+    icon="🚀"
+    title="60-second tour"
+    href="/getting-started/sixty-second-tour"
+  >
+    From `git clone` to the first finding panel — what every screen and
+    command does, with no detours.
+  </Card>
+  <Card
+    icon="🧰"
+    title="Install MedusaNexus"
+    href="/getting-started/installation"
+  >
+    macOS / Linux / Apple Silicon. Walks through `scripts/setup.sh`, the
+    `--ios-tools` and `--moxy` flags, and what `~/.mnexus/env.sh` writes.
+  </Card>
+  <Card
+    icon="🎯"
+    title="Your first scan"
+    href="/getting-started/first-scan"
+  >
+    `mnexus scan target.apk` → `/findings` → `/report`. Every step
+    annotated, including why the risk score landed where it did.
+  </Card>
+  <Card
+    icon="🧬"
+    title="Architecture map"
+    href="/reference/architecture"
+  >
+    How engines, runtime, intelligence and reporting fit together —
+    one diagram, one paragraph per layer.
+  </Card>
+</Cards>
+
+## What it does
+
+1. **You drop an APK or IPA** (or pull one off a device with one click).
+2. **Static engines run in parallel** — JADX decompiles, MobSF lectures,
+   Ghidra dissects every `.so`, the secrets scanner finds the API key that's
+   been hard-coded since 2019.
+3. **The attack surface gets built** — exported components, deep links,
+   crypto primitives, pinning libs, root-detection libs, the works.
+4. **Frida hooks get auto-generated** based on what static analysis actually
+   found. No more copy-pasting `universal-ssl-pinning-bypass.js` from Stack
+   Overflow.
+5. **You run the dynamic session.** Traffic routes through Burp / Caido / Moxy,
+   Medusa recipes load, Stheno patches the APK if needed, every crypto call
+   and intent gets logged.
+6. **Correlation layer confirms findings** — static suspicion + dynamic
+   evidence = a finding with a confidence level your client will take
+   seriously.
+7. **Reports ship with mitigation.** Not "improve security posture". Actual
+   before/after code.
+
+## Pick your surface
+
+<Cards>
+  <Card icon="🤖" title="Android workflow"   href="/workflows/android-static" />
+  <Card icon="🍎" title="iOS workflow"       href="/workflows/ios" />
+  <Card icon="🎭" title="Dynamic + Frida"    href="/workflows/dynamic" />
+  <Card icon="🧠" title="Memory Inspector"   href="/workflows/memory-inspector" />
+  <Card icon="🛰️" title="PlayIntel"          href="/workflows/playintel" />
+  <Card icon="📊" title="Reporting"          href="/workflows/reporting" />
+  <Card icon="🔌" title="MCP for assistants" href="/integrations/mcp" />
+  <Card icon="📚" title="CLI / REPL / API"   href="/reference/cli" />
+</Cards>
+
+## How the docs are organised
+
+| Section | When to open it |
+| ------- | --------------- |
+| **Getting started** | First-day install + first scan + the language the rest of the docs use. |
+| **Workflows** | "I want to do X" — every supported analyst story, end to end. |
+| **Integrations** | Per-tool wiring: Burp, Caido, Moxy, super-tart-vphone, MCP. |
+| **Reference** | Auto-generated CLI / REPL / API matrices plus env var inventory. |
+| **Design** | Architecture, internal models, the product spec, and the visual language deck. |
+
+Source of truth is the markdown next to the code in
+[`docs-site/pages/`](https://github.com/jackson-mafra/MedusaNexus/tree/main/docs-site/pages).
+Every page renders byte-identically in your editor and on this site — so when
+an AI assistant reads the repo, it sees the same words you do.
