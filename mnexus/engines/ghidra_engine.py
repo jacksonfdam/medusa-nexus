@@ -327,9 +327,63 @@ class GhidraEngine(BaseEngine):
             ))
         return out
 
-    async def analyze_native_lib(self, so_path: Path) -> dict[str, object]:  # pragma: no cover - stub
-        _ = so_path
-        return {}
+    async def analyze_native_lib(self, so_path: Path) -> dict[str, object]:
+        """Scan one native binary (ELF or Mach-O) and return findings + symbols.
+
+        Used by ``/v1/projects/{id}/native/analyze`` — the analyst picks a
+        specific .so / framework from the Native tab and gets a detailed
+        per-binary view. Goes deeper than the ingest fan-out:
+
+          * Pattern matches against ``_NATIVE_PATTERNS`` (ELF) and
+            ``_IOS_NATIVE_PATTERNS`` (Mach-O). Same rules as ``execute()``
+            but emits findings inline.
+          * JNI export detection — ELF dynamic symbol strings starting
+            with ``Java_`` reveal which Java classes the lib bridges,
+            i.e. the exact attack surface for a Frida ``-l`` script.
+          * Hardcoded URL/secret strings — ``http(s)://…`` + ``AIza[A-Za-z0-9_-]{30,}``.
+
+        Returns ``{"format": "elf"|"macho", "size": N, "findings": [...],
+        "jni_exports": [...], "hardcoded_urls": [...], "hardcoded_keys": [...]}``.
+
+        Always returns a dict; ``{"error": "..."}`` for unreadable files
+        instead of raising — the API layer wraps that into a clean 404.
+        """
+        if not so_path.exists():
+            return {"error": f"file not found: {so_path}"}
+        try:
+            data = so_path.read_bytes()
+        except OSError as exc:
+            return {"error": f"read failed: {exc}"}
+        if not data:
+            return {"error": "empty file"}
+
+        fmt = _binary_format(data)
+        findings: list[Finding] = []
+        crypto_ops: list[CryptoOperation] = []
+        name = so_path.name
+
+        if fmt == "elf":
+            self._scan_elf(name, data, findings, crypto_ops)
+        elif fmt == "macho":
+            self._scan_macho(name, data, findings, crypto_ops)
+        else:
+            return {"error": f"unknown binary format (first 4 bytes: {data[:4]!r})"}
+
+        # JNI exports — only meaningful for ELF (Android JNI).
+        jni_exports: list[str] = []
+        if fmt == "elf":
+            jni_exports = _extract_jni_exports(data)
+
+        return {
+            "format": fmt,
+            "name": name,
+            "size": len(data),
+            "findings": [f.model_dump(mode="json") for f in findings],
+            "jni_exports": jni_exports,
+            "hardcoded_urls": _extract_hardcoded_urls(data),
+            "hardcoded_keys": _extract_aiza_keys(data),
+            "crypto_operations": [c.model_dump(mode="json") if hasattr(c, "model_dump") else dict(c.__dict__) for c in crypto_ops],
+        }
 
     async def _run(self, cmd: list[str]) -> str:
         proc = await asyncio.create_subprocess_exec(
@@ -337,6 +391,45 @@ class GhidraEngine(BaseEngine):
         )
         stdout, _ = await proc.communicate()
         return stdout.decode("utf-8", errors="replace")
+
+
+# Patterns used by analyze_native_lib's standalone API. Kept here (not
+# at module top) because they're a closed set used only by the
+# per-binary scanner — no need to expose to other modules.
+_JNI_EXPORT_PATTERN = re.compile(rb"Java_[A-Za-z0-9_$]{4,}")
+_HTTP_URL_PATTERN = re.compile(rb"https?://[A-Za-z0-9._~:/?#@!$&\'()*+,;=%-]{6,200}")
+_AIZA_KEY_PATTERN = re.compile(rb"AIza[0-9A-Za-z_-]{30,}")
+
+
+def _extract_jni_exports(data: bytes) -> list[str]:
+    """Strings starting with ``Java_<class>_<method>`` from an ELF binary.
+
+    JNI exports are mangled per the Java ↔ C calling convention:
+    package separators are ``_``, ``_1`` etc. Decoding them back to
+    the Java name would be nice-to-have but the raw string is enough
+    to feed a Frida ``Interceptor.attach`` script.
+    """
+    matches = {m.group(0).decode("utf-8", errors="replace") for m in _JNI_EXPORT_PATTERN.finditer(data)}
+    return sorted(matches)[:200]  # cap so a 50MB blob doesn't explode the response
+
+
+def _extract_hardcoded_urls(data: bytes) -> list[str]:
+    """``http(s)://…`` strings in the binary. Useful for surface discovery."""
+    out: set[str] = set()
+    for m in _HTTP_URL_PATTERN.finditer(data):
+        # Trim trailing punctuation that's clearly outside the URL.
+        url = m.group(0).rstrip(b"\\'\"; .,)").decode("utf-8", errors="replace")
+        out.add(url)
+    return sorted(out)[:100]
+
+
+def _extract_aiza_keys(data: bytes) -> list[str]:
+    """Google-API-key-shaped strings. Easy to false-positive; we still
+    surface them — every match is worth a manual look."""
+    out: set[str] = set()
+    for m in _AIZA_KEY_PATTERN.finditer(data):
+        out.add(m.group(0).decode("utf-8", errors="replace"))
+    return sorted(out)[:50]
 
 
 def _looks_like_main_macho(name: str) -> bool:

@@ -3134,6 +3134,61 @@ async def project_native(project_id: str) -> dict[str, Any]:
     }
 
 
+@app.get("/v1/projects/{project_id}/native/analyze")
+async def project_native_analyze(project_id: str, lib: str) -> dict[str, Any]:
+    """Per-binary deep scan — runs GhidraEngine.analyze_native_lib on
+    ONE native binary inside the project's APK/IPA.
+
+    Args:
+        lib: zip-internal path to the binary, e.g.
+             ``lib/arm64-v8a/libcrypto.so`` or
+             ``Payload/Target.app/Frameworks/Crypto.framework/Crypto``.
+             Must match a string returned by /v1/projects/{id}/native
+             under ``native_libraries[*].path``.
+
+    Returns the analyze_native_lib dict (format / findings / jni_exports
+    / hardcoded_urls / hardcoded_keys / crypto_operations) — same shape
+    for ELF and Mach-O so the UI doesn't need a per-format renderer.
+
+    404 when the binary isn't in the APK. 500 with the engine error
+    when the file can't be read.
+    """
+    import tempfile
+    import zipfile
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    ghidra = nexus.engines.get("ghidra")
+    if ghidra is None:
+        raise HTTPException(503, "ghidra engine not registered")
+
+    apk_path = p.apk_path if isinstance(p.apk_path, Path) else Path(str(p.apk_path))
+    if not apk_path.exists():
+        raise HTTPException(410, f"APK no longer present at {apk_path} — re-import.")
+
+    try:
+        with zipfile.ZipFile(apk_path) as zf:
+            try:
+                blob = zf.read(lib)
+            except KeyError as exc:
+                raise HTTPException(404, f"binary not in archive: {lib}") from exc
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(500, f"archive is not a zip: {exc}") from exc
+
+    # analyze_native_lib reads from disk — drop the blob to a temp file
+    # so we don't have to add a second entry-point. The temp file dies
+    # with the context manager.
+    with tempfile.NamedTemporaryFile(suffix=Path(lib).suffix, delete=True) as tf:
+        tf.write(blob)
+        tf.flush()
+        result = await ghidra.analyze_native_lib(Path(tf.name))  # type: ignore[attr-defined]
+    if "error" in result:
+        raise HTTPException(500, result["error"])
+    result["project_id"] = p.id
+    result["lib"] = lib
+    return result
+
+
 async def _gather_live_evidence(
     project_id: str,
     package_name: str | None,
