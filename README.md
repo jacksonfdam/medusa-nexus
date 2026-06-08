@@ -124,6 +124,7 @@ Idempotent — safe to re-run. `NO_COLOR=1 ./scripts/setup.sh` kills ANSI output
 | `--burp` | verify Burp Pro REST API + write `MNEXUS_BURP_URL` / `_API_KEY` to env |
 | `--burp-rest-api` | install `vmware-archive/burp-rest-api` (jar + `run.sh` wrapper) |
 | `--moxy` | start [Moxy](https://github.com/matank001/Moxy) in Docker, extract the mitmproxy CA, push it to the connected device via `adb`, write `MNEXUS_MOXY_*` to env. Details in [`docs/MOXY.md`](docs/MOXY.md). |
+| `--ios-tools` | install **bagbak + ldid + frida-ios-dump** in one shot. Idempotent; reports per-tool success at the end. Details in [`docs/IOS.md`](docs/IOS.md). |
 | `--doctor` | only run `mnexus doctor` |
 | `--help` | print usage |
 
@@ -272,15 +273,18 @@ If you're testing an iOS app off the App Store you need a different
 toolchain than Android. MedusaNexus wraps the established ecosystem:
 
 ```bash
-# IPA decryption — pulls the FairPlay-decrypted Mach-O off a JB device.
-npm install -g bagbak           # preferred
-# or:
+# One flag, three tools, idempotent:
+./scripts/setup.sh --ios-tools
+# Installs:
+#   bagbak              — npm install -g (preferred IPA decryptor)
+#   ldid                — brew on macOS / apt on Linux (preferred signer)
+#   frida-ios-dump      — git clone under ~/.mnexus/tools/ + pip install requirements
+
+# Manual install if you'd rather skip the script:
+npm install -g bagbak
+brew install ldid
 git clone https://github.com/AloneMonkey/frida-ios-dump ~/.mnexus/tools/frida-ios-dump
 (cd ~/.mnexus/tools/frida-ios-dump && pip install -r requirements.txt)
-
-# Re-signing patched IPAs.
-brew install ldid               # preferred; works on JB devices
-# (codesign --force --sign - <Mach-O> is the Apple alternative; ships with Xcode)
 ```
 
 Then drive the full workflow from the REPL:

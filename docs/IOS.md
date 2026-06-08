@@ -23,6 +23,10 @@ Memory Inspector) see [`RUNTIME.md`](RUNTIME.md).
 | `ldid` (preferred) **or** `codesign` | Re-sign patched IPA | `brew install ldid` on macOS; `codesign` ships with Xcode |
 | `apktool` / `apksigner` | Only for the Android side — not used by iOS flow | — |
 
+**One-shot install:** `./scripts/setup.sh --ios-tools` installs
+bagbak + ldid + frida-ios-dump in one go and writes per-tool status
+at the end. Idempotent — safe to re-run.
+
 Check what's wired:
 
 ```bash
