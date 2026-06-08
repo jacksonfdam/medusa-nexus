@@ -1432,6 +1432,13 @@ function view_project_dynamic(ctx) {
         <section class="panel" style="width:280px;flex:none;min-width:0">
           <div class="panel-head">// AUTO-HOOKS</div>
           <div class="panel-body col" style="gap:6px" id="dyn-hooks">loading…</div>
+          <div class="panel-head" style="margin-top:10px">// MEDUSA RECIPES</div>
+          <div class="panel-body col" style="gap:6px" id="dyn-recipes">
+            <div class="row" style="align-items:center;gap:6px">
+              <input id="dyn-recipes-filter" placeholder="filter / SSL / encryption / …" style="flex:1;background:transparent;color:var(--cyan);border:1px solid var(--border);padding:3px 6px;font-family:inherit;font-size:11px">
+            </div>
+            <div class="muted small">loading…</div>
+          </div>
         </section>
         <section class="panel grow" style="min-width:0">
           <div class="panel-head">
@@ -3623,6 +3630,64 @@ async function mount_project_dynamic(ctx) {
         }
     }
 
+    // ── Medusa recipes picker ─────────────────────────────────────────
+    const recipesPanel = $("#dyn-recipes");
+    if (recipesPanel) {
+        try {
+            const all = await getJSON("/v1/recipes");
+            // Filter to recipes that target this project's platform.
+            const platform = (project && project.platform) || "android";
+            const matching = (all || []).filter((r) => {
+                const p = r.platform || "android";
+                return p === platform || p === "both";
+            });
+            const _renderRecipeList = (filter = "") => {
+                const needle = filter.toLowerCase().trim();
+                const filtered = needle
+                    ? matching.filter((r) =>
+                        (r.name || "").toLowerCase().includes(needle)
+                        || (r.category || "").toLowerCase().includes(needle)
+                        || (r.description || "").toLowerCase().includes(needle))
+                    : matching;
+                const filterRow = recipesPanel.querySelector(".row");
+                const body = filtered.length
+                    ? filtered.slice(0, 30).map((r) => `
+                        <label class="row" data-recipe="${escapeHtml(r.name)}" style="padding:4px 8px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;cursor:pointer;align-items:center">
+                          <input type="checkbox" style="accent-color:var(--acid)">
+                          <span class="t-mono small" style="color:var(--cyan);flex:1;overflow:hidden;text-overflow:ellipsis">${escapeHtml(r.name)}</span>
+                          <span class="muted small" title="${escapeHtml(r.description || "")}">${escapeHtml((r.category || "?").toLowerCase())}</span>
+                        </label>`).join("")
+                      + (filtered.length > 30 ? `<div class="muted small">+${filtered.length - 30} more — narrow with filter</div>` : "")
+                    : `<div class="muted small">no recipes match</div>`;
+                recipesPanel.innerHTML = "";
+                if (filterRow) recipesPanel.appendChild(filterRow);
+                else {
+                    // Rebuild the filter row — happens after the first render.
+                    const row = document.createElement("div");
+                    row.className = "row";
+                    row.style.cssText = "align-items:center;gap:6px";
+                    row.innerHTML = `<input id="dyn-recipes-filter" placeholder="filter / SSL / encryption / …" style="flex:1;background:transparent;color:var(--cyan);border:1px solid var(--border);padding:3px 6px;font-family:inherit;font-size:11px">`;
+                    recipesPanel.appendChild(row);
+                }
+                const listWrap = document.createElement("div");
+                listWrap.className = "col";
+                listWrap.style.cssText = "gap:4px;max-height:280px;overflow:auto";
+                listWrap.innerHTML = body;
+                recipesPanel.appendChild(listWrap);
+            };
+            _renderRecipeList("");
+            // Wire the filter input — re-rendered on every keystroke,
+            // but matching is in-memory so it's cheap.
+            recipesPanel.addEventListener("input", (e) => {
+                if (e.target && e.target.id === "dyn-recipes-filter") {
+                    _renderRecipeList(e.target.value || "");
+                }
+            });
+        } catch (e) {
+            recipesPanel.innerHTML = `<div class="muted small">recipes unavailable: ${escapeHtml(e.message || String(e))}</div>`;
+        }
+    }
+
     // Console — empty until session starts.
     const consoleEl = $("#dyn-console");
     if (consoleEl) {
@@ -3693,11 +3758,17 @@ async function mount_project_dynamic(ctx) {
             const cb = label.querySelector('input[type="checkbox"]');
             if (cb && cb.checked) selected.push(label.dataset.hook);
         });
+        const recipesSelected = [];
+        $$('label[data-recipe]').forEach((label) => {
+            const cb = label.querySelector('input[type="checkbox"]');
+            if (cb && cb.checked) recipesSelected.push(label.dataset.recipe);
+        });
         const btn = $("#dyn-start");
         btn.textContent = "[ STARTING… ]";
         btn.disabled = true;
         const fd = new FormData();
         fd.append("hooks", selected.join(","));
+        fd.append("recipes", recipesSelected.join(","));
         fd.append("spawn", "true");
         try {
             const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/dynamic/start`, { method: "POST", body: fd });
