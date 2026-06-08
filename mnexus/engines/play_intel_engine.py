@@ -84,6 +84,12 @@ class PlayIntelEngine(BaseEngine):
 
     @property
     def name(self) -> str:
+        # Historical name kept for back-compat with stored payloads,
+        # finding.source_engine matches in older databases, and tests
+        # that look for 'playintel' verbatim. The canonical engine
+        # registration in the orchestrator uses both 'firebase' (new)
+        # and 'playintel' (legacy alias) so /doctor surfaces the new
+        # name without breaking anything downstream.
         return "playintel"
 
     @property
@@ -342,6 +348,33 @@ class PlayIntelEngine(BaseEngine):
                 )
             )
         return out
+
+
+class FirebaseIntelEngine(PlayIntelEngine):
+    """Canonical name for the Firebase-focused engine.
+
+    Started life as 'PlayIntelEngine' because the streaming-from-Play
+    path was the headline feature; in practice the analysis is dominated
+    by Firebase config recovery + active probes against RTDB /
+    Firestore / Storage. This subclass is the surface name analysts see
+    in /doctor, the Recipes panel, and reports going forward.
+
+    Internally identical to PlayIntelEngine — same scan code path, same
+    artefact store rows (channel/table names not renamed; that's a
+    separate DB migration if anyone ever needs it).
+
+    Engine.name still returns 'playintel' for back-compat with stored
+    Finding.source_engine values + tests that match the legacy string.
+    Override .name on a subclass instance if you want the new label on
+    findings going forward.
+    """
+
+    # Capabilities advertised to /doctor — narrower than the parent's
+    # because 'play-stream' is one path among several. Listed first to
+    # signal the focus.
+    @property
+    def capabilities(self) -> list[str]:
+        return ["firebase", "credentials", "active-probes", "play-stream"]
 
 
 def _redact(value: str) -> str:

@@ -12,7 +12,7 @@ from mnexus.engines.ipatool_engine import IPAToolEngine
 from mnexus.engines.jadx_engine import JADXEngine
 from mnexus.engines.mobsf_engine import MobSFEngine
 from mnexus.engines.moxy_engine import MoxyEngine
-from mnexus.engines.play_intel_engine import PlayIntelEngine
+from mnexus.engines.play_intel_engine import FirebaseIntelEngine, PlayIntelEngine
 from mnexus.engines.vphone_engine import VPhoneEngine
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "BurpEngine",
     "CaidoEngine",
     "EngineStatus",
+    "FirebaseIntelEngine",
     "FridaEngine",
     "GhidraEngine",
     "IPAToolEngine",

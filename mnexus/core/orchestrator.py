@@ -25,6 +25,7 @@ from mnexus.engines import (
     BaseEngine,
     BurpEngine,
     CaidoEngine,
+    FirebaseIntelEngine,
     FridaEngine,
     GhidraEngine,
     IPAToolEngine,
@@ -66,13 +67,33 @@ class MedusaNexus:
             "caido": CaidoEngine(self.config),
             "moxy": MoxyEngine(self.config),
             "frida": FridaEngine(self.config),
-            "playintel": PlayIntelEngine(self.config),
+            # 'firebase' is the new canonical key (FirebaseIntelEngine);
+            # 'playintel' remains as a back-compat alias pointing at the
+            # SAME instance so existing static-fan-out call sites
+            # (orchestrator line below + pipeline_executor handler)
+            # don't have to change in lockstep. The doctor iterates
+            # engines.values() so duplicate keys would double-render —
+            # filtered out in doctor() via a dedupe-by-id pass.
+            "firebase": (firebase_intel := FirebaseIntelEngine(self.config)),
+            "playintel": firebase_intel,
             "vphone": VPhoneEngine(self.config),
         }
 
     async def doctor(self) -> list[dict[str, object]]:
-        """Run health_check across every engine. Used by `mnexus doctor`."""
-        results = await asyncio.gather(*(e.health_check() for e in self.engines.values()))
+        """Run health_check across every engine. Used by `mnexus doctor`.
+
+        Multiple keys may point at the same engine instance (the
+        'firebase' / 'playintel' alias pair); we dedupe by object id
+        so the doctor table doesn't render the same row twice.
+        """
+        seen_ids: set[int] = set()
+        unique_engines = []
+        for engine in self.engines.values():
+            if id(engine) in seen_ids:
+                continue
+            seen_ids.add(id(engine))
+            unique_engines.append(engine)
+        results = await asyncio.gather(*(e.health_check() for e in unique_engines))
         return [
             {
                 "name": r.name,
