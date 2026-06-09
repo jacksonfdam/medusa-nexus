@@ -21,9 +21,7 @@
 
 ## Docs
 
-📚 **Full documentation lives at [mnexus.vercel.app](https://mnexus.vercel.app)**
-(Vercel deploy of [`docs-site/`](docs-site/) — Nextra 4 + auto-generated
-CLI / REPL / API reference at build time).
+📚 **Full documentation lives at [mnexus.vercel.app](https://mnexus.vercel.app)**.
 
 | Read | When |
 | ---- | ---- |
@@ -32,46 +30,8 @@ CLI / REPL / API reference at build time).
 | [Integrations](docs-site/content/integrations/index.mdx) — Burp, Caido, Moxy, super-tart-vphone, MCP | Per-tool wiring + auth + pitfalls. |
 | [Reference](docs-site/content/reference/index.mdx) — architecture, env vars, CLI, REPL, HTTP API (136+ endpoints) | The matrix when you need a flag or a route. |
 
-All markdown lives in [`docs-site/content/`](docs-site/content/) so an
-AI assistant reading the repo sees byte-identical content as this site.
-The CLI / REPL / API reference pages are *generated from the Python
-source at build time* — they cannot drift.
-
-Code:
-- 31-screen Pencil UI deck — every screen wired to the API
-  ([`design/INDEX.md`](design/INDEX.md)).
-- Python package: `Finding` / `AttackSurface` / `Project` models;
-  `BaseEngine` ABC with 12 engines (adb, apkeep, apktool, ipatool,
-  jadx, ghidra, mobsf, burp, caido, **moxy**, frida, playintel, vphone);
-  orchestrator with a 4-phase pipeline; SQLite artifact store; runtime
-  layer (`mnexus.runtime` — FridaSession, APKPatcher, IPAPatcher,
-  IPADecryptor, MemoryOps, PipelineExecutor); intelligence layer
-  (correlator, auto-hook generator, traffic_findings, manifest_diff,
-  findings_diff, android_flags, runtime_scripts); reporting with
-  mandatory Mitigation Playbook (markdown / json / **HTML** / **PDF**);
-  interactive Click + Rich + prompt_toolkit REPL with 30+ slash
-  commands; FastAPI server with 120+ endpoints.
-- **Live dynamic loop** — `POST /v1/projects/{id}/dynamic/start` actually
-  spawns + attaches Frida, loads N scripts/recipes (each IIFE-isolated),
-  fans `send({...})` events out via SSE (`/v1/projects/{id}/dynamic/stream`)
-  AND into a durable `dynamic_events` table. Memory Inspector
-  (`/v1/dynamic/sessions/{sid}/memory/{scan,read,write,modules}`)
-  auto-injected per session for the token-swap workflow.
-- **iOS toolkit** — IPA decryption via bagbak / frida-ios-dump
-  (`POST /v1/ios/decrypt`); Mach-O byte patcher with re-sign via
-  ldid / codesign (`POST /v1/projects/{id}/ios/patch`); full workflow
-  documented in [`docs-site/content/workflows/ios.mdx`](docs-site/content/workflows/ios.mdx).
-- **Proxy traffic → Findings** — Moxy / Burp / Caido `execute()` now
-  emits structured Findings (cleartext HTTP, JWT leak in body,
-  insecure cookies, API key in URL, hosts discovered live, 5xx runs).
-- **Real reports** — Jinja2 HTML template (single-file, inline CSS,
-  cyberpunk palette), WeasyPrint-backed PDF with graceful fallback
-  to printable HTML when WeasyPrint is missing.
-- **Diff workflow** — manifest-diff (surface delta) + findings-diff
-  (security delta) between two scans of the same package.
-- **460+ passing tests** across API routes, upload/data flow, mitigation
-  invariants, report generation, frida session lifecycle, memory ops,
-  patchers, pipeline executor, manifest/findings diff.
+All markdown lives in [`docs-site/content/`](docs-site/content/) so an AI assistant reading the repo sees byte-identical content as this site.
+The CLI / REPL / API reference pages are *generated from the Python source at build time* — they cannot drift.
 
 ## Requirements
 
@@ -93,9 +53,7 @@ cd medusa-nexus
 ./scripts/dev.sh             # bootstrap → doctor → server (auto-reload + browser open)
 ```
 
-`dev.sh` ensures the venv exists, installs the package in editable mode, runs
-`mnexus doctor`, starts uvicorn with `--reload`, and watches `/v1/health` so
-every reload prints a `✓` or `✕`. If you'd rather see the full installer with
+`dev.sh` ensures the venv exists, installs the package in editable mode, runs `mnexus doctor`, starts uvicorn with `--reload`, and watches `/v1/health` so every reload prints a `✓` or `✕`. If you'd rather see the full installer with
 brews / apts / Ghidra / MobSF docker / Stheno / frida-server staging:
 
 ```bash
@@ -230,9 +188,7 @@ source ~/.mnexus/env.sh && mnexus doctor
 
 ### Capturing mobile traffic with Moxy (no Burp / Caido license needed)
 
-[Moxy](https://github.com/matank001/Moxy) is an open-source MITM proxy + web
-UI built on mitmproxy. Same role as Burp for HTTP/HTTPS interception, but
-free, scriptable from a browser, and docker-friendly. The installer wires it
+[Moxy](https://github.com/matank001/Moxy) is an open-source MITM proxy + web UI built on mitmproxy. Same role as Burp for HTTP/HTTPS interception, but free, scriptable from a browser, and docker-friendly. The installer wires it
 up end-to-end:
 
 ```bash
@@ -269,14 +225,12 @@ source ~/.mnexus/env.sh
 mnexus doctor                    # moxy row should flip to OK
 ```
 
-Device-side setup, common pitfalls (Network Security Config, certificate
-pinning, the intercept-mode "No response available" trap), and the diagnosis
+Device-side setup, common pitfalls (Network Security Config, certificate pinning, the intercept-mode "No response available" trap), and the diagnosis
 tree are all in [`docs-site/content/integrations/moxy.mdx`](docs-site/content/integrations/moxy.mdx).
 
 ### iOS workflow (decrypt → patch → memory-swap)
 
-If you're testing an iOS app off the App Store you need a different
-toolchain than Android. MedusaNexus wraps the established ecosystem:
+If you're testing an iOS app off the App Store you need a different toolchain than Android. MedusaNexus wraps the established ecosystem:
 
 ```bash
 # One flag, three tools, idempotent:
