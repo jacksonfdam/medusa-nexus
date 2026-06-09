@@ -12,13 +12,13 @@ For the docs side of things, see [`../docs-site/`](../docs-site/).
 | # | Title | Audience | Status |
 | - | ----- | -------- | ------ |
 | 01 | [Who attacks your mobile app — and who defends it](01-who-attacks-your-mobile-app.md) | Developers entering mobile security | Drafted |
-| 02 | The vocabulary — every term you need to read a mobile threat report | Developers + first-time auditors | Outlined |
-| 03 | Your first APK scan, end to end — in 10 minutes | Developers | Outlined |
-| 04 | Five tools, one truth — how MedusaNexus orchestrates static analysis | Engineers curious about orchestration | Outlined |
-| 05 | Five small bugs, one critical chain — anatomy of a 1-click account takeover | Security-curious devs | Outlined |
-| 06 | Shift-left mobile security — block bad commits with one YAML | DevSec / platform engineers | Outlined |
-| 07 | Let your AI assistant run the security review — MCP for mobile audits | AI-curious engineers | Outlined |
-| 08 | iOS without a jailbroken iPhone — what's possible and what isn't | iOS developers | Outlined |
+| 02 | [The vocabulary — every term you need to read a mobile threat report](02-the-vocabulary.md) | Developers + first-time auditors | Drafted |
+| 03 | [Your first APK scan, end to end — in 10 minutes](03-your-first-apk-scan.md) | Developers | Drafted |
+| 04 | [Five tools, one truth — how MedusaNexus orchestrates static analysis](04-five-tools-one-truth.md) | Engineers curious about orchestration | Drafted |
+| 05 | [Five small bugs, one critical chain — anatomy of a 1-click account takeover](05-five-small-bugs-one-critical-chain.md) | Security-curious devs | Drafted |
+| 06 | [Shift-left mobile security — block bad commits with one YAML](06-shift-left-block-bad-commits.md) | DevSec / platform engineers | Drafted |
+| 07 | [Let your AI assistant run the security review — MCP for mobile audits](07-ai-assistant-mobile-security-review.md) | AI-curious engineers | Drafted |
+| 08 | [iOS without a jailbroken iPhone — what's possible and what isn't](08-ios-without-a-jailbroken-iphone.md) | iOS developers | Drafted |
 
 ## Voice
 
