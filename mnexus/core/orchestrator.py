@@ -313,6 +313,14 @@ class MedusaNexus:
         except Exception as exc:  # noqa: BLE001
             log.warning("deeplink_audit raised: %s", exc)
 
+        try:
+            from mnexus.intelligence.webview_audit import audit_webviews
+            project.attack_surface.findings.extend(
+                audit_webviews(self.config.workspace / project.id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("webview_audit raised: %s", exc)
+
         # Phase 3 — auto-hooks from the surface.
         try:
             hooks = HookGenerator().for_attack_surface(project.attack_surface)
