@@ -29,12 +29,13 @@ We start with the cast. Then we'll look at why mobile is a genuinely different p
 
 The industry talks about "security" as if it were one job. It isn't. There are at least four distinct roles people play around your mobile app, and the differences between them matter.
 
-| Role | What they do | Who pays them | Their relationship to your app |
-| ---- | ------------ | ------------- | ------------------------------ |
-| **Black Team** | Independent attackers. Motivated by money, ideology, curiosity, or some mix of the three. No contractual scope. | Themselves, or whoever buys the result on a market. | Adversarial. Treats your app as a target. |
-| **Red Team** | Paid attackers. Contractual scope. Goal is to model what a Black Team would actually do. | Your company, or a client your company hired. | Contracted adversarial. Treats your app as a target *within agreed limits*. |
-| **Blue Team** | Defenders inside the company. Watches telemetry, hunts intrusions, ships patches. | Your company. | Defensive. Treats your app as something to protect. |
-| **Purple Team** | The bridge — Red and Blue working together, sharing findings in real time. Sometimes a real team, sometimes a workshop format. | Your company. | Collaborative. |
+**Black Team** — Independent attackers. Motivated by money, ideology, curiosity, or some mix of the three. No contractual scope. Paid by themselves, or by whoever buys the result on a market. Adversarial: treats your app as a target.
+
+**Red Team** — Paid attackers. Contractual scope. Goal is to model what a Black Team would actually do. Paid by your company, or by a client your company hired. Contracted adversarial: treats your app as a target *within agreed limits*.
+
+**Blue Team** — Defenders inside the company. Watches telemetry, hunts intrusions, ships patches. Paid by your company. Defensive: treats your app as something to protect.
+
+**Purple Team** — The bridge. Red and Blue working together, sharing findings in real time. Sometimes a real team, sometimes a workshop format. Paid by your company. Collaborative.
 
 This taxonomy isn't legal — it's operational. The same person can do all four jobs in their career; the rules change with the role.
 

@@ -9,6 +9,11 @@ The articles are kept here as plain Markdown (not MDX) so they paste
 directly into Medium, LinkedIn, or any blog importer without conversion.
 For the docs side of things, see [`../docs-site/`](../docs-site/).
 
+> **Format note:** Medium and LinkedIn do not render Markdown tables.
+> Article bodies use bullet lists with bold-prefix leads instead — the
+> same structure tables provided, in a format both platforms render.
+> This README itself keeps its inventory tables because it's GitHub-only.
+
 | # | Title | Audience | Status |
 | - | ----- | -------- | ------ |
 | 01 | [Who attacks your mobile app — and who defends it](01-who-attacks-your-mobile-app.md) | Developers entering mobile security | Drafted |

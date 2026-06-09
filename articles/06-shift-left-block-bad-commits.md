@@ -232,13 +232,15 @@ When this shows up in the PR comment, the developer often closes the loop in the
 
 The layer-1 workflow above covers the per-PR gate. The natural follow-up is what to put in the nightly job and what stays manual. A pragmatic split:
 
-| Workflow | Frequency | What it does |
-| -------- | --------- | ------------ |
-| **PR gate** (this article) | Every PR | Fast static scan, `--fail-on high --against $BASELINE`, comment on failure. |
-| **Nightly full scan** | Daily on `main` | `./scripts/setup.sh` (full install, including Ghidra), full pipeline, HTML + PDF report uploaded to the team's report store. |
-| **Recon cron** | Weekly | PlayIntel `play-scan` against the watchlist of competitor / partner / dependency apps. Track regressions in *other people's* security posture. |
-| **Pre-release audit** | Per release | Manual review of the nightly report, dynamic Frida confirmation of the top findings, sign-off. |
-| **Annual external Red Team** | Yearly | Outside firm replicates the chain from article 5 on the production build, with scope-of-engagement letter and remediation timeline. |
+**PR gate** (this article) — runs on every PR. Fast static scan, `--fail-on high --against $BASELINE`, comment on failure.
+
+**Nightly full scan** — runs daily on `main`. `./scripts/setup.sh` full install (including Ghidra), full pipeline, HTML + PDF report uploaded to the team's report store.
+
+**Recon cron** — runs weekly. PlayIntel `play-scan` against the watchlist of competitor / partner / dependency apps. Tracks regressions in *other people's* security posture.
+
+**Pre-release audit** — runs per release. Manual review of the nightly report, dynamic Frida confirmation of the top findings, sign-off.
+
+**Annual external Red Team** — runs yearly. Outside firm replicates the chain from article 5 on the production build, with scope-of-engagement letter and remediation timeline.
 
 Each layer reduces the load on the next. The PR gate catches the bulk; the nightly catches what static-skipping-Ghidra missed; the manual audit catches the chains the automation can't see; the external Red Team catches the chains the manual audit missed. Defence in depth at the *workflow* level, not just at the code level.
 

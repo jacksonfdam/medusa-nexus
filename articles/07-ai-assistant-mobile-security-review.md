@@ -47,28 +47,24 @@ The MCP server in MedusaNexus (`mnexus/mcp_server.py`) advertises ten tools toda
 
 ### Read-only tools (always available)
 
-| Tool | What it does |
-| ---- | ------------ |
-| `list_projects` | Every Project in the workspace with risk scores and finding counts. |
-| `get_project` | One project's full overview: risk score, severity counts, attack surface summary. |
-| `list_findings` | Findings for a project, filtered by severity / category. |
-| `get_finding` | Fetch one finding by id including evidence and remediation. |
-| `list_recipes` | Browse the built-in + Medusa recipe catalogue. |
-| `decode_android_flag` | Decode an Android Intent / Receiver flag integer into symbolic names. |
-| `manifest_diff` | Diff a project's static surface against a prior scan. |
-| `findings_diff` | Diff a project's findings against a prior scan. |
-| `firebase_probe` | Run RTDB / Firestore / Storage probes against a Firebase config (standalone, no project). |
-| `doctor` | Engine health check — which engines are installed and reachable. |
+- **`list_projects`** — every Project in the workspace with risk scores and finding counts.
+- **`get_project`** — one project's full overview: risk score, severity counts, attack surface summary.
+- **`list_findings`** — findings for a project, filtered by severity / category.
+- **`get_finding`** — fetch one finding by id including evidence and remediation.
+- **`list_recipes`** — browse the built-in + Medusa recipe catalogue.
+- **`decode_android_flag`** — decode an Android Intent / Receiver flag integer into symbolic names.
+- **`manifest_diff`** — diff a project's static surface against a prior scan.
+- **`findings_diff`** — diff a project's findings against a prior scan.
+- **`firebase_probe`** — run RTDB / Firestore / Storage probes against a Firebase config (standalone, no project).
+- **`doctor`** — engine health check; which engines are installed and reachable.
 
 These cover the entire read path of the audit. With just these, an assistant can describe the surface, walk the findings, correlate evidence, diff against prior scans, and propose remediations. It cannot trigger a new scan, cannot patch the APK, cannot start a Frida session.
 
 ### Write tools (opt-in, recently added)
 
-| Tool | What it does |
-| ---- | ------------ |
-| `scan_apk` | Upload an APK and run the full static pipeline. Returns the new project_id. Blocking call (~30-60s). |
-| `run_pipeline` | Execute a named pipeline against an existing project. |
-| `analyze_native_lib` | Run Ghidra headless against a specific `.so` in a project. |
+- **`scan_apk`** — upload an APK and run the full static pipeline. Returns the new project_id. Blocking call (~30-60s).
+- **`run_pipeline`** — execute a named pipeline against an existing project.
+- **`analyze_native_lib`** — run Ghidra headless against a specific `.so` in a project.
 
 These three close the loop end to end. With them, the assistant can take an APK path from the user, scan it, run the full chain correlator, fetch the resulting findings, and produce the audit. The blast radius is bounded — none of these mutate the device, re-sign binaries, or fire active network probes without explicit confirmation.
 

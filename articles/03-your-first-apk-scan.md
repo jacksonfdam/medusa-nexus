@@ -119,15 +119,13 @@ Each finding has a deterministic id (`FND-…`) and a backing engine. The CLI sh
 
 The REPL's `/help` lists every command. The ones you'll use most in this article:
 
-| Command | Purpose |
-| ------- | ------- |
-| `/findings [sev]` | List findings, optionally filtered by severity. |
-| `/projects` | List every project in the database. |
-| `/use <id>` | Switch the active project. |
-| `/rescan` | Re-run the pipeline on the active project in place. |
-| `/report [format]` | Generate a report (`md`/`json`/`html`/`pdf`/`png`). |
-| `/serve` | Start the FastAPI backend in the background. |
-| `/open` | Open the web UI in the browser. |
+- `/findings [sev]` — list findings, optionally filtered by severity.
+- `/projects` — list every project in the database.
+- `/use <id>` — switch the active project.
+- `/rescan` — re-run the pipeline on the active project in place.
+- `/report [format]` — generate a report (`md`/`json`/`html`/`pdf`/`png`).
+- `/serve` — start the FastAPI backend in the background.
+- `/open` — open the web UI in the browser.
 
 The slash-command catalogue is generated from the source at build time and lives in [`docs-site/content/reference/repl.mdx`](../docs-site/content/reference/repl.mdx) of the docs site; the version printed by `/help` is always current.
 
