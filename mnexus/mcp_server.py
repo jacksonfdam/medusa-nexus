@@ -93,6 +93,69 @@ def _api(method: str, path: str, *, body: Any = None, form: dict | None = None, 
         return 0, f"Nexus API not reachable at {_api_base()}: {exc.reason}"
 
 
+def _api_upload(path: str, file_path: str, *, fields: dict | None = None, timeout: float = 600.0) -> tuple[int, Any]:
+    """POST a file to ``path`` as multipart/form-data.
+
+    Hand-crafted multipart since we don't want a `requests` dep. The
+    file is read into memory once — fine for APKs/IPAs in the
+    hundreds-of-MB range; if you're scanning multi-GB game binaries
+    you have bigger problems than mcp overhead.
+    """
+    import os
+    import uuid
+
+    if not os.path.isfile(file_path):
+        return 0, f"file not found: {file_path}"
+
+    boundary = f"----mnexus{uuid.uuid4().hex}"
+    crlf = b"\r\n"
+    body_parts: list[bytes] = []
+    for k, v in (fields or {}).items():
+        if v is None:
+            continue
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(f'Content-Disposition: form-data; name="{k}"'.encode())
+        body_parts.append(b"")
+        body_parts.append(str(v).encode())
+    body_parts.append(f"--{boundary}".encode())
+    body_parts.append(
+        f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(file_path)}"'.encode()
+    )
+    body_parts.append(b"Content-Type: application/octet-stream")
+    body_parts.append(b"")
+    try:
+        with open(file_path, "rb") as fh:
+            file_bytes = fh.read()
+    except OSError as exc:
+        return 0, f"read failed: {exc}"
+    body_parts.append(file_bytes)
+    body_parts.append(f"--{boundary}--".encode())
+    body_parts.append(b"")
+    body = crlf.join(body_parts)
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    }
+    req = urllib.request.Request(_api_base() + path, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            payload = r.read().decode("utf-8", errors="replace")
+            try:
+                return r.status, json.loads(payload)
+            except json.JSONDecodeError:
+                return r.status, payload
+    except urllib.error.HTTPError as exc:
+        payload = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        try:
+            return exc.code, json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            return exc.code, payload or str(exc)
+    except urllib.error.URLError as exc:
+        return 0, f"Nexus API not reachable at {_api_base()}: {exc.reason}"
+
+
 # ─── tool catalogue ────────────────────────────────────────────────────
 
 
@@ -204,6 +267,57 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Engine health check — which engines are installed, configured, and reachable.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
+    {
+        "name": "scan_apk",
+        "description": (
+            "Upload an APK and run the full static pipeline (apktool + jadx + ghidra + "
+            "mobsf + deeplink_audit + webview_audit + chain_correlator). Blocking; "
+            "30–60s on a 20 MB APK. Returns the new project_id ready for list_findings / "
+            "get_finding lookups. Pass force=true to bypass dedup."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "apk_path":     {"type": "string", "description": "Absolute path on the Nexus host."},
+                "package_name": {"type": "string", "description": "Override the auto-detected package."},
+                "version":      {"type": "string", "description": "Override the auto-detected version name."},
+                "force":        {"type": "boolean", "default": False, "description": "Bypass SHA-256 dedup."},
+            },
+            "required": ["apk_path"],
+        },
+    },
+    {
+        "name": "run_pipeline",
+        "description": (
+            "Execute a named pipeline against an existing project. Pipelines stack "
+            "multiple engines (e.g. 'full-static-android' chains jadx + ghidra + mobsf "
+            "+ chain correlator). Discover available pipelines via GET /v1/pipelines."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name":       {"type": "string", "description": "Pipeline slug from /v1/pipelines."},
+                "project_id": {"type": "string", "description": "Project id (PRJ-…) to run against."},
+            },
+            "required": ["name", "project_id"],
+        },
+    },
+    {
+        "name": "analyze_native_lib",
+        "description": (
+            "Run the native-lib analyser against a specific .so in a project. Returns "
+            "JNI exports, hardcoded URLs, crypto routines, and the elf/macho format. "
+            "Falls back gracefully when Ghidra isn't installed (string-scan-only mode)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "lib_path":   {"type": "string", "description": "e.g. lib/arm64-v8a/libtarget.so"},
+            },
+            "required": ["project_id", "lib_path"],
+        },
+    },
 ]
 
 
@@ -283,6 +397,36 @@ def _handle_doctor(_: dict[str, Any]) -> dict[str, Any]:
     return {"status": status, "doctor": body}
 
 
+def _handle_scan_apk(args: dict[str, Any]) -> dict[str, Any]:
+    apk_path = args["apk_path"]
+    fields: dict[str, Any] = {}
+    if args.get("package_name"):
+        fields["package"] = args["package_name"]
+    if args.get("version"):
+        fields["version"] = args["version"]
+    if args.get("force"):
+        fields["force"] = "true"
+    status, body = _api_upload("/v1/apks/upload", apk_path, fields=fields)
+    return {"status": status, "ingest": body}
+
+
+def _handle_run_pipeline(args: dict[str, Any]) -> dict[str, Any]:
+    name = urllib.parse.quote(args["name"])
+    status, body = _api(
+        "POST", f"/v1/pipelines/{name}/run",
+        form={"project_id": args["project_id"]},
+        timeout=600.0,
+    )
+    return {"status": status, "run": body}
+
+
+def _handle_analyze_native_lib(args: dict[str, Any]) -> dict[str, Any]:
+    pid = urllib.parse.quote(args["project_id"])
+    qs = "?" + urllib.parse.urlencode({"lib": args["lib_path"]})
+    status, body = _api("GET", f"/v1/projects/{pid}/native/analyze{qs}", timeout=300.0)
+    return {"status": status, "analysis": body}
+
+
 _HANDLERS = {
     "list_projects":       _handle_list_projects,
     "get_project":         _handle_get_project,
@@ -294,6 +438,10 @@ _HANDLERS = {
     "findings_diff":       _handle_findings_diff,
     "firebase_probe":      _handle_firebase_probe,
     "doctor":              _handle_doctor,
+    # write tools — let the assistant drive a full inspection
+    "scan_apk":            _handle_scan_apk,
+    "run_pipeline":        _handle_run_pipeline,
+    "analyze_native_lib":  _handle_analyze_native_lib,
 }
 
 

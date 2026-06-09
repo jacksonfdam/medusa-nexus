@@ -205,6 +205,57 @@ def test_doctor_hits_v1_doctor(api_recorder) -> None:
     assert calls[-1]["path"] == "/v1/doctor"
 
 
+# ─── write-tools — agent-drivable inspection ───────────────────────────
+
+
+def test_scan_apk_posts_multipart_to_apks_upload(monkeypatch, tmp_path) -> None:
+    """scan_apk uses the multipart helper, not the JSON _api(). Record
+    what it sent so we know the wire shape stayed compatible with
+    /v1/apks/upload."""
+    apk = tmp_path / "fixture.apk"
+    apk.write_bytes(b"PK\x03\x04stubapkfixture")
+
+    sent: list[dict] = []
+    def fake_upload(path, file_path, *, fields=None, timeout=600.0):
+        sent.append({"path": path, "file_path": file_path, "fields": fields or {}})
+        return 200, {"project_id": "PRJ-FAKE0001", "dedup": False}
+
+    monkeypatch.setattr(mcp_server, "_api_upload", fake_upload)
+    res = _call("scan_apk", {"apk_path": str(apk), "package_name": "com.x.y", "version": "1.2"})
+
+    assert sent[-1]["path"] == "/v1/apks/upload"
+    assert sent[-1]["file_path"] == str(apk)
+    assert sent[-1]["fields"] == {"package": "com.x.y", "version": "1.2"}
+    payload = json.loads(res["result"]["content"][0]["text"])
+    assert payload["ingest"]["project_id"] == "PRJ-FAKE0001"
+
+
+def test_scan_apk_force_flag_forwards(monkeypatch, tmp_path) -> None:
+    apk = tmp_path / "f.apk"
+    apk.write_bytes(b"x")
+    sent: list[dict] = []
+    monkeypatch.setattr(mcp_server, "_api_upload",
+                        lambda p, fp, *, fields=None, timeout=600.0: (sent.append({"fields": fields}) or (200, {})))
+    _call("scan_apk", {"apk_path": str(apk), "force": True})
+    assert sent[-1]["fields"].get("force") == "true"
+
+
+def test_run_pipeline_posts_to_named_route(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("run_pipeline", {"name": "full-static-android", "project_id": "PRJ-1"})
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["path"] == "/v1/pipelines/full-static-android/run"
+    assert calls[-1]["form"] == {"project_id": "PRJ-1"}
+
+
+def test_analyze_native_lib_quotes_lib_path(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("analyze_native_lib", {"project_id": "PRJ-1", "lib_path": "lib/arm64-v8a/libtarget.so"})
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["path"].startswith("/v1/projects/PRJ-1/native/analyze?")
+    assert "lib%2Farm64-v8a%2Flibtarget.so" in calls[-1]["path"]
+
+
 # ─── error paths ───────────────────────────────────────────────────────
 
 
