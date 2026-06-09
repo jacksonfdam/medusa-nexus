@@ -43,6 +43,20 @@ Verify every engine is installed, reachable, and not lying about its version.
 mnexus doctor
 ```
 
+### `mnexus findings`
+
+List findings on a project. Pair with --json for CI consumption.
+
+```bash
+mnexus findings
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--project` | TEXT | `Sentinel.UNSET` | Project id (PRJ-…). |
+| `--severity` | CHOICE | — | Filter by severity floor (everything at or above). |
+| `--json` | BOOLEAN | `False` | Emit a JSON array on stdout. |
+
 ### `mnexus mcp-serve`
 
 Run as an MCP (Model Context Protocol) stdio server — wire MedusaNexus into Claude Desktop / Cursor / Zed.
@@ -126,6 +140,18 @@ mnexus play-scan <package>
 | `--account` / `-A` | TEXT | — | Stored Play identity to scan as (default: the one flagged default). |
 | `--no-probes` | BOOLEAN | `False` | Skip the active Firebase / Firestore / Storage probes (offline mode). |
 
+### `mnexus projects`
+
+List stored projects. Pair with --json for CI consumption.
+
+```bash
+mnexus projects
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--json` | BOOLEAN | `False` | Emit a JSON array on stdout. |
+
 ### `mnexus repl`
 
 Open the interactive REPL (default when run with no args).
@@ -161,6 +187,9 @@ mnexus scan <apk_path>
 | ---- | ---- | ------- | ----------- |
 | `--package` | TEXT | — | Target package name (auto-detected if omitted). |
 | `--version` | TEXT | — | Version name (auto-detected if omitted). |
+| `--json` | BOOLEAN | `False` | Emit a machine-readable JSON summary on stdout. Suppresses the Rich-formatted panel. |
+| `--fail-on` | CHOICE | — | Exit non-zero if any finding at or above this severity exists. Pair with --against to fail only on *new* findings vs a prior scan. |
+| `--against` | TEXT | — | Prior project id to diff against when applying --fail-on. Without it, --fail-on counts every finding on the new scan. |
 
 ### `mnexus serve`
 

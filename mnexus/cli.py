@@ -1789,15 +1789,219 @@ def doctor(ctx: click.Context) -> None:
 @click.argument("apk_path", type=click.Path(exists=True, path_type=Path))
 @click.option("--package", "package_name", default="", help="Target package name (auto-detected if omitted).")
 @click.option("--version", "version_name", default="", help="Version name (auto-detected if omitted).")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit a machine-readable JSON summary on stdout. Suppresses the Rich-formatted panel.")
+@click.option("--fail-on",
+              type=click.Choice(["critical", "high", "medium", "low", "info"], case_sensitive=False),
+              default=None,
+              help="Exit non-zero if any finding at or above this severity exists. "
+                   "Pair with --against to fail only on *new* findings vs a prior scan.")
+@click.option("--against", "against_project", default="",
+              help="Prior project id to diff against when applying --fail-on. "
+                   "Without it, --fail-on counts every finding on the new scan.")
 @click.pass_context
-def scan(ctx: click.Context, apk_path: Path, package_name: str, version_name: str) -> None:
+def scan(
+    ctx: click.Context,
+    apk_path: Path,
+    package_name: str,
+    version_name: str,
+    as_json: bool,
+    fail_on: str | None,
+    against_project: str,
+) -> None:
+    """CI-friendly flat scan.
+
+    Without flags, behaves exactly like the REPL `/scan` command.
+    With `--json`, prints a JSON summary suitable for `jq` piping.
+    With `--fail-on critical`, returns exit 1 if any CRITICAL finding lands
+    (or any *new* CRITICAL when `--against` is set).
+    """
     state = ReplState(ctx.obj["config"])
-    args = [str(apk_path)]
-    if package_name:
-        args += ["--package", package_name]
-    if version_name:
-        args += ["--version", version_name]
-    _scan(state, args)
+
+    # Fast path: no flags → identical to the REPL /scan output.
+    if not as_json and not fail_on:
+        args = [str(apk_path)]
+        if package_name:
+            args += ["--package", package_name]
+        if version_name:
+            args += ["--version", version_name]
+        _scan(state, args)
+        return
+
+    # CI path: run the pipeline ourselves so we have direct access to the
+    # Project object and can compute exit codes + emit JSON.
+    package = package_name or ""
+    if not package:
+        engine = state.nexus.engines.get("apktool")
+        if engine is not None:
+            try:
+                meta = asyncio.run(engine.extract_manifest(apk_path))
+                package = meta.get("package", "") or ""
+                if not version_name:
+                    version_name = meta.get("version_name") or "unknown"
+            except Exception:
+                pass
+    if not package:
+        msg = "package not specified and could not be auto-detected from manifest"
+        if as_json:
+            console.print_json(data={"error": msg})
+        else:
+            console.print(f"[red]{msg}[/red]")
+        sys.exit(2)
+
+    project = asyncio.run(state.nexus.ingest_apk(apk_path, package_name=package, version=version_name or "unknown"))
+
+    surface = project.attack_surface
+    counts = surface.findings_by_severity() if surface else {}
+    summary = {
+        "project_id": project.id,
+        "package": project.package_name,
+        "version": project.version_name,
+        "risk_score": surface.risk_score() if surface else 0.0,
+        "findings_total": len(surface.findings) if surface else 0,
+        "findings_by_severity": counts,
+        "components": len(surface.exported_components) if surface else 0,
+        "deeplinks": len(surface.deeplinks) if surface else 0,
+        "native_libraries": len(surface.native_libraries) if surface else 0,
+        "hooks_generated": len(project.suggested_hooks),
+    }
+
+    # Optional diff for the --against path. Only matters when --fail-on
+    # is set with --against; we include the delta in JSON output either
+    # way so users can pipe it into jq for custom gates.
+    delta: dict | None = None
+    if against_project:
+        try:
+            from mnexus.intelligence.findings_diff import findings_diff as compute_diff
+            base = state.nexus.db.load_project(against_project)
+            if base is None:
+                msg = f"--against project not found: {against_project}"
+                if as_json:
+                    import json
+                    click.echo(json.dumps({"error": msg, **summary}, default=str, indent=2))
+                else:
+                    console.print(f"[red]{msg}[/red]")
+                sys.exit(2)
+            base_findings = base.attack_surface.findings if base.attack_surface else []
+            head_findings = surface.findings if surface else []
+            delta = compute_diff(base_findings, head_findings)
+            summary["diff"] = {
+                "base_project_id": against_project,
+                "added":      len(delta.get("added", [])),
+                "removed":    len(delta.get("removed", [])),
+                "changed":    len(delta.get("changed", [])),
+            }
+        except Exception as exc:  # noqa: BLE001
+            summary["diff_error"] = f"{exc.__class__.__name__}: {exc}"
+
+    # Compute the exit code from --fail-on.
+    exit_code = 0
+    if fail_on:
+        from mnexus.models.finding import Severity
+        gate = Severity(fail_on.lower())
+        order = [Severity.INFO, Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+        triggers = order[order.index(gate):]
+        offending: list[str] = []
+        if delta is not None:
+            # PR-style gate: only count findings that *appeared* in head or
+            # where severity escalated. Counts `added` outright, and `changed`
+            # entries where head severity is at/above the gate AND base
+            # severity was below it.
+            candidates: list[dict] = list(delta.get("added", []))
+            for ch in delta.get("changed", []):
+                before = (ch.get("before") or {}).get("severity")
+                after = (ch.get("after") or {}).get("severity")
+                if before != after and after in [s.value for s in triggers]:
+                    candidates.append(ch.get("after") or {})
+        else:
+            candidates = [f.model_dump(mode="json") if hasattr(f, "model_dump") else f
+                          for f in (surface.findings if surface else [])]
+        trigger_set = {s.value for s in triggers}
+        for f in candidates:
+            sev = f.get("severity") if isinstance(f, dict) else getattr(f, "severity", None)
+            sev_str = sev.value if hasattr(sev, "value") else sev
+            if sev_str in trigger_set:
+                fid = f.get("id") if isinstance(f, dict) else getattr(f, "id", "?")
+                offending.append(f"{(sev_str or '?').upper()}:{fid}")
+        summary["fail_on"] = {
+            "gate": gate.value,
+            "diff_mode": delta is not None,
+            "offending": offending,
+            "triggered": bool(offending),
+        }
+        exit_code = 1 if offending else 0
+
+    if as_json:
+        import json
+        click.echo(json.dumps(summary, default=str, indent=2))
+    else:
+        # Human-readable fallback for --fail-on without --json.
+        verdict = "PASS" if exit_code == 0 else "FAIL"
+        color = "green" if exit_code == 0 else "red"
+        console.print(f"[bold {color}]{verdict}[/bold {color}] · {project.id} · risk {summary['risk_score']}/100 · {summary['findings_total']} findings")
+        if fail_on and summary.get("fail_on", {}).get("triggered"):
+            console.print(f"[red]gate=[bold]{fail_on}[/bold] tripped on {len(summary['fail_on']['offending'])} finding(s)[/red]")
+
+    sys.exit(exit_code)
+
+
+@cli.command(name="projects", help="List stored projects. Pair with --json for CI consumption.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit a JSON array on stdout.")
+@click.pass_context
+def projects_cmd(ctx: click.Context, as_json: bool) -> None:
+    state = ReplState(ctx.obj["config"])
+    rows = state.nexus.db.list_projects()
+    if not as_json:
+        _projects(state, [])
+        return
+    import json
+    payload = []
+    for r in rows:
+        proj = state.nexus.db.load_project(r["id"])
+        surface = proj.attack_surface if proj else None
+        payload.append({
+            "id": r["id"],
+            "package": r["package_name"],
+            "version": r["version_name"],
+            "risk_score": surface.risk_score() if surface else 0.0,
+            "findings_total": len(surface.findings) if surface else 0,
+            "findings_by_severity": surface.findings_by_severity() if surface else {},
+            "updated_at": r.get("updated_at"),
+        })
+    click.echo(json.dumps(payload, default=str, indent=2))
+
+
+@cli.command(name="findings", help="List findings on a project. Pair with --json for CI consumption.")
+@click.option("--project", "project_id", required=True, help="Project id (PRJ-…).")
+@click.option("--severity",
+              type=click.Choice(["critical", "high", "medium", "low", "info"], case_sensitive=False),
+              default=None,
+              help="Filter by severity floor (everything at or above).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit a JSON array on stdout.")
+@click.pass_context
+def findings_cmd(ctx: click.Context, project_id: str, severity: str | None, as_json: bool) -> None:
+    state = ReplState(ctx.obj["config"])
+    proj = state.nexus.db.load_project(project_id)
+    if not proj or not proj.attack_surface:
+        msg = f"no project or empty surface: {project_id}"
+        if as_json:
+            click.echo("[]")
+            sys.exit(2)
+        console.print(f"[red]{msg}[/red]")
+        sys.exit(2)
+    findings = proj.attack_surface.findings
+    if severity:
+        from mnexus.models.finding import Severity
+        gate = Severity(severity.lower())
+        order = [Severity.INFO, Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+        allowed = {s.value for s in order[order.index(gate):]}
+        findings = [f for f in findings if f.severity.value in allowed]
+    if not as_json:
+        state.active_project_id = project_id
+        _findings(state, [severity] if severity else [])
+        return
+    import json
+    click.echo(json.dumps([f.model_dump(mode="json") for f in findings], default=str, indent=2))
 
 
 @cli.group(name="play-account", help="Manage stored Play identities (the account manager that backs `play-scan`).")
