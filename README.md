@@ -26,12 +26,23 @@
 | Read | When |
 | ---- | ---- |
 | [Getting started](docs-site/content/getting-started/index.mdx) — install, requirements, env vars, first scan, 60-second tour | First-day setup. |
-| [Workflows](docs-site/content/workflows/index.mdx) — Android static, iOS, dynamic Frida, Memory Inspector, PlayIntel, diff, pipelines, reporting | "I want to do X" — analyst stories. |
+| [Workflows](docs-site/content/workflows/index.mdx) — Android static, iOS, dynamic Frida, Memory Inspector, PlayIntel, diff, pipelines, **CI/CD**, reporting | "I want to do X" — analyst stories. |
 | [Integrations](docs-site/content/integrations/index.mdx) — Burp, Caido, Moxy, super-tart-vphone, MCP | Per-tool wiring + auth + pitfalls. |
 | [Reference](docs-site/content/reference/index.mdx) — architecture, env vars, CLI, REPL, HTTP API (136+ endpoints) | The matrix when you need a flag or a route. |
 
 All markdown lives in [`docs-site/content/`](docs-site/content/) so an AI assistant reading the repo sees byte-identical content as this site.
 The CLI / REPL / API reference pages are *generated from the Python source at build time* — they cannot drift.
+
+### CI/CD in one block
+
+`mnexus scan` ships CI-shaped flags — `--json` for machine output and `--fail-on critical|high|medium|low|info` for the severity gate. Pair `--against PRJ-PREV` to count only *new* findings vs a baseline (PR-style check):
+
+```bash
+mnexus scan ./app-release.apk --json --fail-on high --against $BASELINE_PID > scan.json
+# Exit 0 → safe to merge.  Exit 1 → a new HIGH+ finding landed; review the PR.
+```
+
+Full walkthrough — GitHub Actions YAML, exit-code matrix, what NOT to put in CI — in [`docs-site/content/workflows/ci-cd.mdx`](docs-site/content/workflows/ci-cd.mdx).
 
 ## Requirements
 

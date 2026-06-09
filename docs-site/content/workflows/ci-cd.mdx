@@ -1,0 +1,229 @@
+---
+title: CI / CD
+---
+
+import { Callout } from 'nextra/components';
+
+# CI / CD
+
+What parts of MedusaNexus belong in a pipeline, and what doesn't.
+Split by layer: PR gate → release artefacts → recon cron → device-only
+flows (skip in CI).
+
+<Callout type="info" emoji="⚡">
+The `mnexus scan` Click subcommand ships two CI-shaped flags:
+**`--json`** (machine-readable output, suppresses Rich panel) and
+**`--fail-on critical|high|medium|low|info`** (non-zero exit if the
+severity gate trips). Pair `--fail-on` with `--against PRJ-PREV` to
+gate only on *new* findings vs a baseline — the PR-style check.
+</Callout>
+
+## Layer 1 — Pre-merge gate (every PR / push)
+
+Fast, no device, no third-party network. Block merge when it regresses
+risk.
+
+| Step | Command | Why on the PR |
+|---|---|---|
+| **Engine doctor** | `mnexus doctor` (exit non-zero on missing engines) | Confirms the runner has the toolchain. ~5s. |
+| **Static scan** | `mnexus scan ./app-release.apk --json` | Same pipeline an analyst runs. Detects a new secret, new deeplink, new permission, removed pinning lib. |
+| **Findings-diff gate** | `mnexus scan ./app-release.apk --fail-on high --against $PRJ_BASELINE --json` | The single highest-ROI check. Fails the PR if *any* new finding ≥ HIGH appears vs the baseline. |
+| **Manifest-diff** | `GET /v1/projects/{id}/manifest-diff` | Catches `usesCleartextTraffic=true` reintroduced, `exported=true` slipped onto a Service, new `READ_PHONE_STATE`. |
+| **Mitigation invariant** | Already a model-layer check (`mnexus.models.finding.Finding._validate_remediation`) | Recipe-level — model refuses to save a CRITICAL/HIGH finding without `remediation`. If the pipeline runs at all, every finding has a fix. |
+| **Exporters** | `mnexus export postman/burp/moxy/caido/deeplinks` | Drop the test collections as build artifacts — downstream QA / red team pick them up. |
+
+### GitHub Actions example
+
+```yaml
+# .github/workflows/mobile-threat-scan.yml
+name: Mobile threat scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      - name: Bootstrap mnexus
+        run: |
+          pip install -e .
+          ./scripts/setup.sh --minimal      # adb + jadx + apktool only
+
+      - name: Resolve baseline project id
+        id: baseline
+        run: |
+          BASE=$(mnexus projects --json | jq -r '.[0].id // empty')
+          echo "id=$BASE" >> $GITHUB_OUTPUT
+
+      - name: Scan + gate
+        run: |
+          mnexus scan ./build/outputs/apk/release/app-release.apk \
+            --json \
+            --fail-on high \
+            ${{ steps.baseline.outputs.id && format('--against {0}', steps.baseline.outputs.id) || '' }} \
+            > scan.json
+          cat scan.json | jq '.fail_on, .diff'
+
+      - name: Upload report + scan summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-report
+          path: |
+            scan.json
+            ~/.mnexus/workspace/reports/*.html
+```
+
+Wall-clock: ~5 min on a stock `ubuntu-latest` runner. Bloqueia merge
+quando piora. Anexa o report HTML + o JSON do gate ao PR.
+
+## Layer 2 — Per-release / nightly
+
+Heavy, generates deliverables.
+
+| Step | Command | Output |
+|---|---|---|
+| **Full report (PDF)** | `mnexus report --project $PID --template technical --format pdf --output ./report.pdf` | Cliente / GitHub Release / Jira. |
+| **Executive PNG** | `mnexus report --template executive --format png` | Single-image summary for Slack / decks. |
+| **OWASP MASVS matrix** | `mnexus report --template owasp-matrix --format markdown` | Compliance + audit trail (M1–M10). |
+| **Pipeline executor** | `POST /v1/pipelines/full-static-android/run` | Runs the predefined chain (scan + diff + exports + report) in one HTTP call. |
+| **Native lib triage** | `POST /v1/projects/{id}/native/analyze` (Ghidra headless) | JNI exports + hardcoded URLs per `.so` — auto-issues for suspect strings. |
+
+## Layer 3 — Recon cron (separate runner, separate cadence)
+
+Watchlist mode — outside the app's own CI.
+
+```yaml
+# Separate workflow, daily cron, runs against COMPETITOR / partner apks.
+on:
+  schedule: [{ cron: '0 6 * * *' }]
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for pkg in com.bank.target com.competitor.x com.partner.y; do
+            mnexus play-scan "$pkg" --account watchlist --no-probes
+          done
+      - run: |
+          # Alert if any CRITICAL Firebase config appeared in the last 24h.
+          mnexus findings --project "$LATEST" --severity critical --json \
+            | jq -e 'length == 0'
+```
+
+<Callout type="warning" emoji="⚠">
+**`--probe` (active Firebase / RTDB / Storage)** hits the target's
+infrastructure. Only enable with explicit consent. CI pública: sempre
+`--no-probes`.
+</Callout>
+
+## Layer 4 — Patcher pipelines (DevSec / red team builds)
+
+Ship QA builds with pinning bypass / debuggable / cleartext baked in,
+re-signed.
+
+```yaml
+- name: Build patched QA APK
+  run: |
+    mnexus scan ./app-release.apk --json > scan.json
+    PID=$(jq -r .project_id scan.json)
+    curl -sX POST "http://127.0.0.1:8765/v1/projects/$PID/patch" \
+      -d 'patches=debuggable,cleartext_traffic,user_ca_trust'
+    # The patched APK lands in workspace/<pid>/patched/
+```
+
+IPA patcher analogously: byte patch + re-sign via `ldid`.
+
+## What NOT to put in CI
+
+| Skip | Why |
+|---|---|
+| `/dynamic start` (Frida session) | Needs a real device, rooted/JB. Hosted runners don't have one. Workable on a self-hosted runner physically wired to a Pixel rooted dedicado. |
+| **Memory Inspector** | Live Frida session required. Same constraint. |
+| **IPA decrypt (bagbak / frida-ios-dump)** | Jailbroken iPhone required. |
+| **super-tart-vphone** | Apple Silicon + SIP/AMFI disabled. Cloud CI doesn't have it. Self-hosted Mac mini M-series can host it. |
+| **Burp Pro REST** | Commercial licence + desktop GUI session. Use **Moxy** in CI instead — Docker, free, scriptable. |
+| **MobSF Docker on PR-time** | Cold-start ~30s, scan ~2 min. Move to nightly. |
+| **Active Firebase probes without consent** | You're hitting the target's infra. Compliance issue. |
+
+## Flag reference (paste into your runner)
+
+| Flag | Behaviour | Exit code matrix |
+|---|---|---|
+| `--json` | Emits a JSON summary to stdout. Suppresses the Rich panel. | `0` always (unless `--fail-on` also passed). |
+| `--fail-on critical` | Trips when any **finding at or above CRITICAL** exists. | `0` clean / `1` triggered / `2` invalid args. |
+| `--fail-on high` | Same, severity floor = HIGH (catches HIGH + CRITICAL). | Same. |
+| `--against PRJ-…` | Pairs with `--fail-on`. Switches to **diff mode**: only counts findings that are NEW or REGRESSED vs the named prior project. | `0` if no new offenders / `1` if any / `2` if base id not found. |
+
+JSON shape (when `--json` is set):
+
+```json
+{
+  "project_id": "PRJ-355151DF",
+  "package": "com.target.app",
+  "version": "1.0.0",
+  "risk_score": 67.5,
+  "findings_total": 42,
+  "findings_by_severity": { "critical": 3, "high": 12, "medium": 18, "low": 9 },
+  "components": 24,
+  "deeplinks": 8,
+  "native_libraries": 3,
+  "hooks_generated": 7,
+  "diff": {
+    "base_project_id": "PRJ-OLD",
+    "added": 4,
+    "removed": 2,
+    "changed": 1
+  },
+  "fail_on": {
+    "gate": "high",
+    "diff_mode": true,
+    "offending": ["HIGH:FND-7B22A91C", "HIGH:FND-12C5A4F0"],
+    "triggered": true
+  }
+}
+```
+
+## Minimum-viable CI (paste-ready)
+
+```yaml
+# .github/workflows/nexus.yml
+name: Mobile threat scan
+on: [pull_request, push]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -e . && ./scripts/setup.sh --minimal
+      - run: |
+          mnexus scan ./app-release.apk \
+            --json --fail-on high > scan.json
+          cat scan.json | jq .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nexus-scan
+          path: scan.json
+```
+
+That's the whole loop. Block merge when it tripa. Anexa o JSON ao PR
+pra revisão manual quando sair certo mas precisar de contexto.
+
+## Code references
+
+* CLI command: `mnexus/cli.py` → `scan()`, `projects_cmd()`, `findings_cmd()`
+* Diff engine: `mnexus/intelligence/findings_diff.py`
+* Severity gate logic: lives inline in `scan()`; uses `mnexus.models.finding.Severity`
+* Tests covering the gate matrix: `tests/test_cli_ci_flags.py` (9 cases)
