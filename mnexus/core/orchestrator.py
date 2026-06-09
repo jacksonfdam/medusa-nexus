@@ -321,6 +321,18 @@ class MedusaNexus:
         except Exception as exc:  # noqa: BLE001
             log.warning("webview_audit raised: %s", exc)
 
+        # Chain correlator runs LAST in the intelligence phase so it
+        # sees every individual detector's findings. Each chain emits
+        # one CRITICAL finding with the contributing links as evidence;
+        # individuals stay in the list for drilldown.
+        try:
+            from mnexus.intelligence.chain_correlator import correlate_chains
+            project.attack_surface.findings.extend(
+                correlate_chains(project.attack_surface.findings)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chain_correlator raised: %s", exc)
+
         # Phase 3 — auto-hooks from the surface.
         try:
             hooks = HookGenerator().for_attack_surface(project.attack_surface)
