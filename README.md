@@ -26,7 +26,7 @@
 | Read | When |
 | ---- | ---- |
 | [Getting started](docs-site/content/getting-started/index.mdx) — install, requirements, env vars, first scan, 60-second tour | First-day setup. |
-| [Workflows](docs-site/content/workflows/index.mdx) — Android static, iOS, dynamic Frida, Memory Inspector, PlayIntel, diff, pipelines, **CI/CD**, reporting | "I want to do X" — analyst stories. |
+| [Workflows](docs-site/content/workflows/index.mdx) — Android static, iOS, dynamic Frida, Memory Inspector, PlayIntel, diff, **chain detection**, pipelines, **CI/CD**, reporting | "I want to do X" — analyst stories. |
 | [Integrations](docs-site/content/integrations/index.mdx) — Burp, Caido, Moxy, super-tart-vphone, MCP | Per-tool wiring + auth + pitfalls. |
 | [Reference](docs-site/content/reference/index.mdx) — architecture, env vars, CLI, REPL, HTTP API (136+ endpoints) | The matrix when you need a flag or a route. |
 
@@ -43,6 +43,24 @@ mnexus scan ./app-release.apk --json --fail-on high --against $BASELINE_PID > sc
 ```
 
 Full walkthrough — GitHub Actions YAML, exit-code matrix, what NOT to put in CI — in [`docs-site/content/workflows/ci-cd.mdx`](docs-site/content/workflows/ci-cd.mdx).
+
+### Chain detection in one block
+
+Most mobile bugs are MEDIUM in isolation, CRITICAL in combination. The chain correlator promotes a set of independently-MEDIUM findings into one CRITICAL chain finding with a per-link mitigation playbook. Catalogued today: the **1-click account takeover via deeplink → WebView → intent-redirect chain** — four contributing detectors (`deeplink_audit` × `webview_audit`) feed `chain_correlator` automatically on every static scan.
+
+```bash
+mnexus scan ./target.apk --json | jq '.findings_by_severity'
+# If "critical" >= 1 and the chain matched, drill into it:
+PID=$(mnexus projects --json | jq -r '.[0].id')
+mnexus findings --project $PID --severity critical --json \
+  | jq '.[] | select(.source_engine == "chain_correlator")'
+```
+
+Walkthrough — every link, every detector, how to add a new chain shape — in [`docs-site/content/workflows/chain-detection.mdx`](docs-site/content/workflows/chain-detection.mdx).
+
+### MCP — drive a full inspection from your AI assistant
+
+`mnexus mcp-serve` now ships **read + write** tools. The write set (`scan_apk`, `run_pipeline`, `analyze_native_lib`) lets Claude Desktop / Cursor / Zed run a full APK ingest → pipeline → finding walkthrough from a single prompt. Wire-up + tool reference + agentic loop example in [`docs-site/content/integrations/mcp.mdx`](docs-site/content/integrations/mcp.mdx).
 
 ## Requirements
 

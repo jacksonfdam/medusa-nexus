@@ -37,6 +37,8 @@ The assistant calls `list_findings` → `get_finding` → reads the
 
 ## Exposed tools
 
+### Read tools — inspect what's already in the workspace
+
 | tool | purpose | underlying route |
 | ---- | ------- | ---------------- |
 | `list_projects` | Every Project in the workspace with risk + counts. | `GET /v1/projects` |
@@ -50,9 +52,38 @@ The assistant calls `list_findings` → `get_finding` → reads the
 | `firebase_probe` | Standalone RTDB / Firestore / Storage probe. | `POST /v1/firebase/probe` |
 | `doctor` | Engine health check — what's installed, what's missing. | `GET /v1/doctor` |
 
+### Write tools — let the assistant drive a full inspection
+
+| tool | purpose | underlying route |
+| ---- | ------- | ---------------- |
+| `scan_apk` | Upload an APK + run the full static pipeline (apktool + jadx + ghidra + mobsf + deeplink_audit + webview_audit + chain_correlator). Returns the new project_id. Blocking 30–60s. | `POST /v1/apks/upload` (multipart) |
+| `run_pipeline` | Execute a named pipeline against an existing project (stacks engines). | `POST /v1/pipelines/{name}/run` |
+| `analyze_native_lib` | Per-`.so` analyser — JNI exports + hardcoded URLs + crypto routines. | `GET /v1/projects/{id}/native/analyze?lib=…` |
+
 Mitigation is first-class: `get_finding` always returns the
 `remediation` block, so any assistant-generated plan starts from
 ground truth rather than fabricated advice.
+
+### The agentic inspection loop
+
+The write tools unlock this end-to-end conversation:
+
+```
+You ▸ "Scan ~/Downloads/target.apk and explain any 1-click chains
+       it has, with code paths and fix per link."
+
+Claude ▸ calls scan_apk(apk_path="~/Downloads/target.apk")        → PRJ-A5B7C291
+       ▸ calls run_pipeline(name="full-static-android",            (waits)
+                            project_id="PRJ-A5B7C291")
+       ▸ calls list_findings(project_id="PRJ-A5B7C291",
+                             severity="critical")
+       ▸ for each chain finding:
+           get_finding(finding_id=…) → reads evidence + remediation
+       ▸ synthesises a written report citing each link's code path.
+```
+
+This is the [chain-detection workflow](/workflows/chain-detection)
+driven entirely by the assistant — you don't touch a CLI.
 
 ## Claude Desktop wiring
 
@@ -133,10 +164,13 @@ Three reasons:
 
 ## Limits
 
-* The driver doesn't expose write operations yet (no
-  `start_dynamic_session`, no `patch_apk`). Those touch live devices
-  and re-sign artifacts; we want an explicit confirmation flow before
-  letting an assistant trigger them.
+* Write tools cover **inspection** (scan_apk, run_pipeline, analyze_native_lib)
+  but NOT **mutation** of live state. Specifically not exposed:
+  `start_dynamic_session` (Frida attach), `patch_apk` / `patch_ipa`
+  (byte-patch + re-sign), `decrypt_ios` (bagbak / frida-ios-dump).
+  Those touch live devices and re-sign artifacts; we want an explicit
+  human-in-the-loop confirmation flow before letting an assistant
+  trigger them. Use the REPL or HTTP API directly for those.
 * `tools/call` text payloads are truncated at 60 000 chars to fit
   comfortably in the assistant's context. Large project dumps still
   fit — the truncation only kicks in on pathological cases.

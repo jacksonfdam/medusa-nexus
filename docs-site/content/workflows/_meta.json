@@ -6,6 +6,7 @@
   "memory-inspector": "Memory Inspector",
   "playintel": "PlayIntel",
   "diff": "Diff reports",
+  "chain-detection": "Chain detection",
   "pipelines": "Pipelines",
   "ci-cd": "CI / CD",
   "reporting": "Reporting",

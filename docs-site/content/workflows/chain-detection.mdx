@@ -1,0 +1,167 @@
+---
+title: Chain detection
+---
+
+import { Callout } from 'nextra/components';
+
+# Chain detection
+
+Most mobile bugs are MEDIUM in isolation and CRITICAL in combination.
+Chain detection is the layer that promotes a set of "annoying but not
+shippable" findings into a single ATO-grade finding the analyst can
+take straight to a PR.
+
+The motivating example: the canonical 1-click ATO write-up describes
+a chain of five MEDIUM/HIGH bugs that combine into a one-click
+account takeover. Each link by itself is "we should fix that
+someday." Together they are a working PoC.
+
+MedusaNexus runs three layers automatically on every static scan:
+
+```
+static engines  →  individual detectors  →  chain correlator
+   (jadx /                  ↓                      ↓
+    apktool /          MEDIUM / HIGH         CRITICAL chain
+    mobsf /              findings              findings
+    ghidra)
+```
+
+## The 1-click ATO chain (catalogued)
+
+Template name: `1-click_account_takeover_via_deeplink_chain` — defined
+in [`mnexus/intelligence/chain_correlator.py`](https://github.com/jacksonfdam/medusa-nexus/blob/main/mnexus/intelligence/chain_correlator.py).
+
+Each link is a contributing finding emitted by an upstream detector.
+The chain fires when **all** are present.
+
+| # | Link | Detector | Severity isolated |
+|---|---|---|---|
+| 1 | **Entry** — App Link bridge OR permissive deeplink router | `deeplink_audit` | HIGH / MEDIUM |
+| 2 | **Execution** — dangerous scheme allowlisted in WebView (`javascript`, `file`, `intent`, `data`, `content`) | `webview_audit` | HIGH |
+| 3 | **Redirection** — `Intent.parseUri` inside `shouldOverrideUrlLoading` | `webview_audit` | HIGH |
+| 4 | **Sink** — authenticated WebView attaches auth headers without host validation | `webview_audit` | HIGH |
+
+When all four match, the correlator emits **one CRITICAL finding** —
+`1-click account takeover via deeplink → WebView → intent-redirect chain` —
+with every contributing finding ID listed in the evidence block and a
+per-link remediation in the mitigation playbook.
+
+<Callout type="info" emoji="💡">
+Individual findings stay in the list alongside the chain finding —
+they're not replaced. The CRITICAL chain is the headline; the individual
+HIGHs let the analyst drill down into the exact code path.
+</Callout>
+
+## Individual detectors (what runs)
+
+### Layer 1 — Deeplink router (`mnexus/intelligence/deeplink_audit.py`)
+
+| Rule | When it fires | Severity |
+|---|---|---|
+| `detect_permissive_routers` | Custom-scheme handler count >> manifest-declared host count | MEDIUM (15+ hosts) / HIGH (50+ hosts) |
+| `detect_applink_bridges` | Exported `https://*/open\|deeplink\|redirect\|…` activity that re-parses an inner-deeplink query param | HIGH |
+
+Pure surface-based — no bytecode access needed. Runs in well under a millisecond.
+
+### Layer 2 — WebView audit (`mnexus/intelligence/webview_audit.py`)
+
+Scans the workspace's decompiled `.java` tree (jadx output). Bounded
+by file count (8000), per-file size (512 KB), and wall-clock (30s).
+
+| Rule | When it fires | Severity |
+|---|---|---|
+| `detect_intent_redirect_in_webview_client` | `Intent.parseUri` within 2 KB of `shouldOverrideUrlLoading` | HIGH |
+| `detect_dangerous_scheme_allowlist` | Scheme allowlist accepts `javascript` / `file` / `data` / `intent` / `content` | MEDIUM (1) / HIGH (2+ or javascript) |
+| `detect_authenticated_webview_load` | `loadUrl(url, headers)` + `Authorization` keyword + `WebView` in same file | HIGH |
+
+### Layer 3 — Chain correlator (`mnexus/intelligence/chain_correlator.py`)
+
+Pure logic over the finding set. Each `ChainTemplate` is:
+
+```python
+ATO_1CLICK_CHAIN = ChainTemplate(
+    name="1-click_account_takeover_via_deeplink_chain",
+    severity=Severity.CRITICAL,
+    requires=(
+        any_of(
+            ChainLink(title_contains="App Link bridge",          source_engine="deeplink_audit"),
+            ChainLink(title_contains="Permissive deeplink router",source_engine="deeplink_audit"),
+        ),
+        ChainLink(title_contains="Dangerous scheme",      source_engine="webview_audit"),
+        ChainLink(title_contains="Intent redirection",    source_engine="webview_audit"),
+        ChainLink(title_contains="auth headers",          source_engine="webview_audit"),
+    ),
+    remediation="""
+        Break the chain at any one of these links — each break neutralises
+        the entire attack:
+        1. Bridge/router — validate inner deeplinks against an allowlist.
+        2. WebView allowlist — drop javascript/file/intent/data/content.
+        3. WebView intent redirect — replace parseUri with explicit map.
+        4. Authenticated WebView — host-check before attaching headers.
+    """,
+)
+```
+
+## Adding a new chain shape
+
+Adding a chain is **one literal** in `chain_correlator.py` + one test.
+The existing detectors stay untouched.
+
+Example skeleton for a future `TASK_HIJACKING_CHAIN`:
+
+```python
+TASK_HIJACKING_CHAIN = ChainTemplate(
+    name="task_hijacking_via_singletask_taskaffinity",
+    title="Task hijacking via taskAffinity + launchMode=singleTask",
+    description="...",
+    severity=Severity.HIGH,
+    category=FindingCategory.IPC,
+    requires=(
+        ChainLink(title_contains="exported activity with singleTask"),
+        ChainLink(title_contains="taskAffinity matches another app"),
+        # ...
+    ),
+    remediation="...",
+)
+```
+
+Then add it to `DEFAULT_CHAINS` and write a test in
+`tests/test_chain_correlator.py`. The orchestrator picks it up
+automatically on the next scan.
+
+Chains planned for the roadmap (open issues to claim):
+
+* `TASK_HIJACKING_CHAIN` — exported activity + singleTask + spoofable
+  taskAffinity
+* `CLEARTEXT_TOKEN_LEAK_CHAIN` — `usesCleartextTraffic=true` + http
+  URL hardcoded + Authorization header on the same host
+* `PROVIDER_TRAVERSAL_CHAIN` — exported ContentProvider +
+  `grantUriPermissions` + path-traversal-able `openFile`
+* `PENDINGINTENT_HIJACK_CHAIN` — mutable PendingIntent + exposed action
+  + ComponentName not set
+
+## Verifying chain detection on your own APK
+
+```bash
+mnexus scan ./target.apk --json | jq '.findings_by_severity'
+# If you see "critical": >= 1 and the project has the right ingredients,
+# the chain almost certainly fired. Drill into it:
+
+PID=$(mnexus projects --json | jq -r '.[0].id')
+mnexus findings --project $PID --severity critical --json \
+  | jq '.[] | select(.source_engine == "chain_correlator")'
+```
+
+The chain finding's `evidence` field lists every contributing finding
+ID; pipe those into `mnexus findings --project $PID` to read the
+individual code paths.
+
+## Where to look in the code
+
+| Layer | File |
+|---|---|
+| Deeplink audit | [`mnexus/intelligence/deeplink_audit.py`](https://github.com/jacksonfdam/medusa-nexus/blob/main/mnexus/intelligence/deeplink_audit.py) |
+| WebView audit | [`mnexus/intelligence/webview_audit.py`](https://github.com/jacksonfdam/medusa-nexus/blob/main/mnexus/intelligence/webview_audit.py) |
+| Chain correlator | [`mnexus/intelligence/chain_correlator.py`](https://github.com/jacksonfdam/medusa-nexus/blob/main/mnexus/intelligence/chain_correlator.py) |
+| Tests | `tests/test_deeplink_audit.py` · `tests/test_webview_audit.py` · `tests/test_chain_correlator.py` |
+| Orchestration entry | [`mnexus/core/orchestrator.py`](https://github.com/jacksonfdam/medusa-nexus/blob/main/mnexus/core/orchestrator.py) — Phase 2.5 in `ingest_apk()` |
