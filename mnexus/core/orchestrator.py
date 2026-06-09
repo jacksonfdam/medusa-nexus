@@ -303,6 +303,16 @@ class MedusaNexus:
             findings=all_findings,
         )
 
+        # Phase 2.5 — chain-detection primitives over the freshly-built
+        # surface. Each detector is a pure function that emits Findings;
+        # the chain correlator (next pass) stitches them into one
+        # CRITICAL finding when the canonical 1-click-ATO shape matches.
+        try:
+            from mnexus.intelligence.deeplink_audit import audit_deeplinks
+            project.attack_surface.findings.extend(audit_deeplinks(project.attack_surface))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deeplink_audit raised: %s", exc)
+
         # Phase 3 — auto-hooks from the surface.
         try:
             hooks = HookGenerator().for_attack_surface(project.attack_surface)
