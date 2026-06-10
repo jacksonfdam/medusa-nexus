@@ -116,6 +116,14 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         >
           {children}
         </Layout>
+        {/*
+          Vercel Analytics — pageview + visitor counters surfaced in the
+          Vercel dashboard. Renders as a near-zero-size script tag; injects
+          its own `<script>` only when running on Vercel infrastructure
+          (the client checks `VERCEL_ENV` at runtime, so local dev stays
+          telemetry-free).
+        */}
+        <Analytics />
       </body>
     </html>
   );
