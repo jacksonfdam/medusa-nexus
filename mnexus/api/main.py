@@ -2350,6 +2350,175 @@ async def device_ios_screen(serial: str) -> Response:
     )
 
 
+# ─── iOS device control (lockdown / usbmux — no tunnel needed) ──────────────
+# These mirror the adb-backed Android panel for iPhones. Everything here goes
+# through plain lockdown, so it works without the developer tunnel that the
+# screen mirror needs. We shell out to pymobiledevice3 (resolved by _pmd3_argv)
+# and parse its JSON where it emits any.
+
+async def _run_pmd3(args: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
+    """Run a pymobiledevice3 subcommand; return (rc, stdout, stderr)."""
+    base = _pmd3_argv()
+    if not base:
+        return 127, "", "pymobiledevice3 not found (scripts/setup.sh --ios-tools)"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *base, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return 124, "", "pymobiledevice3 timed out"
+    except OSError as exc:
+        return 126, "", f"spawn failed: {exc}"
+    return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
+def _pmd3_json(text: str) -> Any:
+    """Best-effort: strip ANSI and parse the first JSON value in *text*."""
+    import json
+    import re
+
+    cleaned = re.sub(r"\x1b\[[0-9;]*m", "", text).strip()
+    start = next((i for i, ch in enumerate(cleaned) if ch in "{["), -1)
+    if start < 0:
+        return None
+    try:
+        return json.loads(cleaned[start:])
+    except (ValueError, TypeError):
+        return None
+
+
+@app.post("/v1/devices/{serial}/ios/power/{action}")
+async def device_ios_power(serial: str, action: str) -> dict[str, Any]:
+    """Reboot / shutdown / sleep an iOS device via the diagnostics relay."""
+    if action not in ("restart", "shutdown", "sleep"):
+        raise HTTPException(400, "action must be restart | shutdown | sleep")
+    rc, out, err = await _run_pmd3(["diagnostics", action, "--udid", serial], timeout=20)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": f"ios_{action}_failed", "stderr": (err or out).strip()[:300]})
+    return {"ok": True, "action": action}
+
+
+@app.get("/v1/devices/{serial}/ios/info")
+async def device_ios_info(serial: str) -> dict[str, Any]:
+    """Lockdown device facts (name / model / iOS version / serial / …)."""
+    rc, out, err = await _run_pmd3(["lockdown", "info", "--udid", serial], timeout=20)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_info_failed", "stderr": (err or out).strip()[:300]})
+    data = _pmd3_json(out) or {}
+    keys = [
+        "DeviceName", "ProductType", "ProductName", "ProductVersion", "BuildVersion",
+        "ModelNumber", "HardwareModel", "SerialNumber", "UniqueDeviceID",
+        "CPUArchitecture", "PhoneNumber", "WiFiAddress", "BluetoothAddress",
+    ]
+    summary = {k: data[k] for k in keys if isinstance(data, dict) and k in data}
+    return {"ok": True, "info": summary or data}
+
+
+@app.get("/v1/devices/{serial}/ios/apps")
+async def device_ios_apps(serial: str, kind: str = "User") -> dict[str, Any]:
+    """List installed apps (defaults to user apps)."""
+    kind = kind if kind in ("System", "User", "Hidden", "Any") else "User"
+    rc, out, err = await _run_pmd3(["apps", "list", "--type", kind, "--udid", serial], timeout=60)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_apps_failed", "stderr": (err or out).strip()[:300]})
+    data = _pmd3_json(out)
+    apps: list[dict[str, Any]] = []
+    if isinstance(data, dict):
+        for bid, meta in data.items():
+            meta = meta if isinstance(meta, dict) else {}
+            apps.append({
+                "bundle_id": bid,
+                "name": meta.get("CFBundleDisplayName") or meta.get("CFBundleName") or bid,
+                "version": meta.get("CFBundleShortVersionString", ""),
+                "type": meta.get("ApplicationType", ""),
+            })
+    apps.sort(key=lambda a: a["name"].lower())
+    return {"ok": True, "count": len(apps), "apps": apps}
+
+
+@app.post("/v1/devices/{serial}/ios/apps/install")
+async def device_ios_install(serial: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    """Install an IPA over lockdown (installation_proxy)."""
+    import os
+    import tempfile
+
+    suffix = os.path.splitext(file.filename or "app.ipa")[1] or ".ipa"
+    fd, path = tempfile.mkstemp(prefix="mnexus-ipa-", suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(await file.read())
+        rc, out, err = await _run_pmd3(["apps", "install", path, "--udid", serial], timeout=600)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_install_failed", "stderr": (err or out).strip()[:400]})
+    return {"ok": True}
+
+
+@app.post("/v1/devices/{serial}/ios/apps/{bundle_id}/uninstall")
+async def device_ios_uninstall(serial: str, bundle_id: str) -> dict[str, Any]:
+    """Uninstall an app by bundle id."""
+    rc, out, err = await _run_pmd3(["apps", "uninstall", bundle_id, "--udid", serial], timeout=120)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_uninstall_failed", "stderr": (err or out).strip()[:300]})
+    return {"ok": True, "bundle_id": bundle_id}
+
+
+@app.get("/v1/devices/{serial}/ios/syslog")
+async def device_ios_syslog(serial: str) -> StreamingResponse:
+    """Stream the live device log (the iOS logcat). Plain-text, tail-friendly."""
+    base = _pmd3_argv()
+    if not base:
+        raise HTTPException(503, "pymobiledevice3 not found (scripts/setup.sh --ios-tools)")
+
+    async def gen() -> AsyncIterator[bytes]:
+        proc = await asyncio.create_subprocess_exec(
+            *base, "syslog", "live", "--udid", serial,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            assert proc.stdout is not None
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                yield line
+        finally:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+
+    return StreamingResponse(
+        gen(), media_type="text/plain",
+        headers={"Cache-Control": "no-cache, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@app.get("/v1/devices/{serial}/ios/crashes")
+async def device_ios_crashes(serial: str) -> dict[str, Any]:
+    """List crash-report entries on the device."""
+    rc, out, err = await _run_pmd3(["crash", "ls", "--udid", serial], timeout=40)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_crashes_failed", "stderr": (err or out).strip()[:300]})
+    entries = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return {"ok": True, "count": len(entries), "entries": entries}
+
+
+@app.get("/v1/devices/{serial}/ios/afc")
+async def device_ios_afc(serial: str, path: str = "/") -> dict[str, Any]:
+    """List a directory on the device's media partition (AFC)."""
+    rc, out, err = await _run_pmd3(["afc", "ls", path, "--udid", serial], timeout=30)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_afc_failed", "stderr": (err or out).strip()[:300]})
+    entries = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return {"ok": True, "path": path, "count": len(entries), "entries": entries}
+
+
 @app.get("/v1/devices/{serial}/screencap.png")
 async def device_screencap(serial: str) -> Response:
     """Single PNG. Tries exec-out fast path first, falls back to temp-file.
