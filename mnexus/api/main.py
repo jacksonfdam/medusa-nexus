@@ -2248,9 +2248,12 @@ async def _ios_screenshot_pmd3(udid: str, out_path: str) -> tuple[bytes, str]:
     base = _pmd3_argv()
     if not base:
         return b"", "pymobiledevice3 not found (scripts/setup.sh --ios-tools)"
-    # CLI shape moved around between releases; try the DVT form then the flat one.
+    # iOS 17+ developer services (incl. screenshot) only answer over an RSD
+    # tunnel, selected with `--tunnel <udid>` against the running tunneld —
+    # `--udid` goes through plain lockdown and fails on modern iOS. Try the
+    # tunnel path first, then the deprecated lockdown path for older devices.
     variants = [
-        [*base, "developer", "dvt", "screenshot", out_path, "--udid", udid],
+        [*base, "developer", "dvt", "screenshot", out_path, "--tunnel", udid],
         [*base, "developer", "screenshot", out_path, "--udid", udid],
     ]
     diag = "no variant ran"
@@ -2340,8 +2343,7 @@ async def device_ios_screen(serial: str) -> Response:
             "idevicescreenshot": diag2,
             "hint": (
                 "Install tools: scripts/setup.sh --ios-tools. Pair + trust the device. "
-                "On iOS 17+, start a developer tunnel first: "
-                "sudo python -m pymobiledevice3 remote tunneld"
+                "On iOS 17+, start the developer tunnel first: mnexus ios-tunnel"
             ),
         },
     )

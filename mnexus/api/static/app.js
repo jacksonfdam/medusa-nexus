@@ -3271,12 +3271,19 @@ function openDeviceDetail(serial, d) {
                 const r = await fetch(`/v1/devices/${encodeURIComponent(serial)}/ios-screen.png?t=${Date.now()}`, { cache: "no-store" });
                 if (!r.ok) {
                     fails++;
-                    let hint = "";
-                    try { const j = await r.json(); hint = (j.detail && j.detail.hint) || ""; } catch (_) { /* non-JSON */ }
+                    let hint = "", diag = "";
+                    try {
+                        const j = await r.json();
+                        const d = j.detail || {};
+                        hint = d.hint || "";
+                        // Surface the actual capture error so failures are debuggable.
+                        diag = [d.pymobiledevice3, d.idevicescreenshot].filter(Boolean).join(" · ");
+                    } catch (_) { /* non-JSON */ }
                     setSt(`unavailable · ${r.status}`, "var(--sev-high)");
                     const stage = imgEl && imgEl.parentElement;
-                    if (fails === 1 && stage && !$("#ios-mirror-msg")) {
-                        stage.insertAdjacentHTML("beforeend", `<div id="ios-mirror-msg" class="muted small" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:18px;line-height:1.5">iOS screenshot unavailable.<br>${escapeHtml(hint || "Run scripts/setup.sh --ios-tools, pair + trust the device, and on iOS 17+ start the developer tunnel.")}</div>`);
+                    if (stage) {
+                        const prev = $("#ios-mirror-msg"); if (prev) prev.remove();
+                        stage.insertAdjacentHTML("beforeend", `<div id="ios-mirror-msg" class="muted small" style="position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;justify-content:center;text-align:center;padding:18px;line-height:1.5"><div>iOS screenshot unavailable.</div>${diag ? `<div class="t-mono" style="font-size:10px;color:var(--sev-high);max-width:90%;word-break:break-word">${escapeHtml(diag)}</div>` : ""}<div>${escapeHtml(hint || "Run scripts/setup.sh --ios-tools, pair + trust the device, and on iOS 17+ start the developer tunnel.")}</div></div>`);
                     }
                     return;
                 }
