@@ -117,7 +117,7 @@ Idempotent — safe to re-run. `NO_COLOR=1 ./scripts/setup.sh` kills ANSI output
 | `--burp` | verify Burp Pro REST API + write `MNEXUS_BURP_URL` / `_API_KEY` to env |
 | `--burp-rest-api` | install `vmware-archive/burp-rest-api` (jar + `run.sh` wrapper) |
 | `--moxy` | start [Moxy](https://github.com/matank001/Moxy) in Docker, extract the mitmproxy CA, push it to the connected device via `adb`, write `MNEXUS_MOXY_*` to env. Details in [`docs-site/content/integrations/moxy.mdx`](docs-site/content/integrations/moxy.mdx). |
-| `--ios-tools` | install **bagbak + ldid + frida-ios-dump** in one shot. Idempotent; reports per-tool success at the end. Details in [`docs-site/content/workflows/ios.mdx`](docs-site/content/workflows/ios.mdx). |
+| `--ios-tools` | install **bagbak + ldid + frida-ios-dump + libimobiledevice + pymobiledevice3** in one shot (the last two power the read-only iOS screen mirror). Idempotent; reports per-tool success at the end. Details in [`docs-site/content/workflows/ios.mdx`](docs-site/content/workflows/ios.mdx). |
 | `--doctor` | only run `mnexus doctor` |
 | `--help` | print usage |
 
@@ -262,19 +262,29 @@ tree are all in [`docs-site/content/integrations/moxy.mdx`](docs-site/content/in
 If you're testing an iOS app off the App Store you need a different toolchain than Android. MedusaNexus wraps the established ecosystem:
 
 ```bash
-# One flag, three tools, idempotent:
+# One flag, idempotent:
 ./scripts/setup.sh --ios-tools
 # Installs:
 #   bagbak              — npm install -g (preferred IPA decryptor)
 #   ldid                — brew on macOS / apt on Linux (preferred signer)
 #   frida-ios-dump      — git clone under ~/.mnexus/tools/ + pip install requirements
+#   libimobiledevice    — idevicescreenshot fallback + device info
+#   pymobiledevice3     — pip into venv (read-only screen mirror, iOS 17+ friendly)
 
 # Manual install if you'd rather skip the script:
 npm install -g bagbak
-brew install ldid
+brew install ldid libimobiledevice
+pip install pymobiledevice3
 git clone https://github.com/AloneMonkey/frida-ios-dump ~/.mnexus/tools/frida-ios-dump
 (cd ~/.mnexus/tools/frida-ios-dump && pip install -r requirements.txt)
 ```
+
+You can also just **watch the screen** without any of that: plug in the
+iPhone, open `/#/devices`, click it, and the panel renders a read-only
+mirror (screenshot poll over lockdownd — no jailbreak, no decryption).
+Live control stays Android-only. On iOS 17+ the developer tunnel the
+mirror needs is started for you on server launch; if sudo creds aren't
+cached, run `mnexus ios-tunnel` once. Opt out with `MNEXUS_IOS_TUNNEL=0`.
 
 Then drive the full workflow from the REPL:
 

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake Ghidra install root: point MNEXUS_GHIDRA_PATH at scripts/shims/ghidra-home.
+# The ghidra_engine resolves <ghidra_path>/support/analyzeHeadless and runs it —
+# so this file must live at exactly support/analyzeHeadless and be executable.
+# Satisfies health_check today; ready for the engine's _run() wiring tomorrow.
+set -Eeuo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$DIR/../../_docker_tool.sh" analyzeHeadless "$@"

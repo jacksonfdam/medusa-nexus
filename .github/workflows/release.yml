@@ -1,0 +1,95 @@
+# MEDUSA NEXUS — release pipeline.
+#
+# Fires on a version tag (v*). Two parallel deliverables, one contract:
+#   • bundle  → native installers (.dmg / .deb / .AppImage) → GitHub Release
+#   • images  → ghidra-tools dependency image            → GHCR (public)
+# Both get the SAME tag, so the app pulls the stack version it was built for.
+#
+# Proprietary code, PUBLIC runtime image: users `docker pull` with no auth,
+# so "download and run" survives. The source repo stays private.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write       # create the Release + upload installers
+  packages: write       # push images to GHCR
+
+jobs:
+  # ── 1. Native bundle, per OS. Windows omitted on purpose (WSL2-only backend) ──
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # arm64
+          - os: macos-13          # x86_64
+          - os: ubuntu-22.04      # x86_64 (.deb/.AppImage)
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm, cache-dependency-path: desktop/pnpm-lock.yaml }
+
+      - name: Linux Tauri/WebKit deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Freeze sidecar + fetch adb
+        run: |
+          chmod +x scripts/build-bundle.sh
+          scripts/build-bundle.sh --sidecar
+          scripts/build-bundle.sh --tools
+
+      # tauri-action builds the frontend, runs tauri build, and attaches the
+      # installers to a (draft) GitHub Release keyed on the tag.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing + notarization — set these secrets to ship outside Gatekeeper.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "MedusaNexus ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+
+  # ── 2. Dependency image: build once, multi-arch, push to GHCR with the tag ──
+  images:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/ghidra-tools.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/jacksonfdam/medusa-nexus/ghidra-tools:${{ github.ref_name }}
+            ghcr.io/jacksonfdam/medusa-nexus/ghidra-tools:latest

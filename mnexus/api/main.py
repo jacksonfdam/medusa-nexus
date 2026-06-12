@@ -38,10 +38,88 @@ _TEMPLATES = _API_DIR / "templates"
 _STATIC = _API_DIR / "static"
 
 
+def _maybe_start_ios_tunnel(config: NexusConfig) -> None:
+    """Best-effort: bring up the pymobiledevice3 RemoteXPC tunnel daemon.
+
+    iOS 17+ exposes its developer services (screenshot, dvt, …) only over a
+    userspace tunnel that must be created by root. Without it the read-only
+    screen mirror can't capture. We start it here so it comes up with the
+    project instead of being a manual step the analyst forgets.
+
+    Rules of engagement:
+      * macOS only, and only when pymobiledevice3 is importable (installed by
+        ``scripts/setup.sh --ios-tools`` into this venv).
+      * We run the daemon with **this** interpreter (``sys.executable``) so the
+        venv's pymobiledevice3 is on the path even under sudo — the usual
+        "No module named pymobiledevice3" comes from sudo'ing the *system*
+        python, which we sidestep.
+      * ``sudo -n`` never blocks on a password prompt. If creds aren't cached
+        we log the exact one-liner to run and move on; nothing fatal.
+      * Opt out entirely with ``MNEXUS_IOS_TUNNEL=0``.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+
+    log = logging.getLogger("mnexus.api.ios_tunnel")
+    if sys.platform != "darwin":
+        return
+    if os.environ.get("MNEXUS_IOS_TUNNEL", "").lower() in ("0", "off", "false", "no"):
+        return
+    base = _pmd3_argv()
+    if base is None:
+        log.info("ios-tunnel: pymobiledevice3 not found — skip (scripts/setup.sh --ios-tools)")
+        return
+
+    logs_dir = config.workspace.parent / "logs"
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logs_dir = config.workspace
+    pidfile = logs_dir / "ios-tunneld.pid"
+
+    # Already running? (pid alive)
+    try:
+        if pidfile.exists():
+            pid = int((pidfile.read_text().strip() or "0"))
+            if pid > 0:
+                os.kill(pid, 0)
+                log.info("ios-tunnel: already running (pid %s)", pid)
+                return
+    except (ValueError, OSError):
+        pass  # stale/garbage pidfile — fall through and (re)start
+
+    manual = "mnexus ios-tunnel"
+    try:
+        logf = open(logs_dir / "ios-tunneld.log", "ab", buffering=0)
+        proc = subprocess.Popen(
+            ["sudo", "-n", *base, "remote", "tunneld"],
+            stdout=logf, stderr=logf, stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError as exc:
+        log.warning("ios-tunnel: could not spawn (%s). Run manually: %s", exc, manual)
+        return
+
+    try:
+        pidfile.write_text(str(proc.pid))
+    except OSError:
+        pass
+    time.sleep(0.4)  # sudo -n bounces fast when creds aren't cached
+    if proc.poll() is not None and proc.returncode != 0:
+        log.warning(
+            "ios-tunnel: needs root and sudo creds aren't cached. Start it once with:\n  %s\n"
+            "  (or add a NOPASSWD sudoers entry; set MNEXUS_IOS_TUNNEL=0 to silence)", manual,
+        )
+    else:
+        log.info("ios-tunnel: started (pid %s) → %s", proc.pid, logs_dir / "ios-tunneld.log")
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     nexus = MedusaNexus(NexusConfig.from_env())
     app.state.nexus = nexus
+    _maybe_start_ios_tunnel(nexus.config)
     # VPhone calls go through the same audit log as adb calls. Wire the
     # engine's `recorder` to our `_record_external_run` shim so the UI can
     # render `transport="vphone"` rows alongside `transport="adb"`.
@@ -2130,6 +2208,323 @@ async def _silent_rm(adb_path: str, serial: str, path: str) -> None:
     await proc.communicate()
 
 
+# ─── iOS screen capture (read-only mirror source) ──────────────────────────
+# iOS has no adb; we shell out to an on-host capture tool. Both paths are
+# best-effort and return (bytes, diagnostic). pymobiledevice3 is preferred
+# (modern, iOS 17+ over a developer tunnel); idevicescreenshot is the
+# libimobiledevice fallback. Install both with `scripts/setup.sh --ios-tools`.
+
+def _pmd3_argv() -> list[str] | None:
+    """Resolve how to invoke pymobiledevice3 from *this* process.
+
+    The server may run under a different interpreter than the one
+    ``--ios-tools`` installed the package into (e.g. system python vs the
+    project venv), so we don't assume ``sys.executable`` has it. Order:
+    console script on PATH → the project venv's console script → an
+    interpreter that imports it. Returns the argv prefix, or None.
+    """
+    import importlib.util
+    import shutil
+    import sys
+
+    on_path = shutil.which("pymobiledevice3")
+    if on_path:
+        return [on_path]
+    venv_bin = Path(__file__).resolve().parent.parent.parent / ".venv" / "bin" / "pymobiledevice3"
+    if venv_bin.exists():
+        return [str(venv_bin)]
+    if importlib.util.find_spec("pymobiledevice3") is not None:
+        return [sys.executable, "-m", "pymobiledevice3"]
+    return None
+
+
+async def _ios_screenshot_pmd3(udid: str, out_path: str) -> tuple[bytes, str]:
+    """Preferred iOS capture — pymobiledevice3 developer screenshot.
+
+    No jailbreak required. On iOS 17+ a developer tunnel must be running
+    (`mnexus ios-tunnel`) for the developer services to answer; that shows
+    up here as a non-zero exit we pass back.
+    """
+    base = _pmd3_argv()
+    if not base:
+        return b"", "pymobiledevice3 not found (scripts/setup.sh --ios-tools)"
+    # iOS 17+ developer services (incl. screenshot) only answer over an RSD
+    # tunnel, selected with `--tunnel <udid>` against the running tunneld —
+    # `--udid` goes through plain lockdown and fails on modern iOS. Try the
+    # tunnel path first, then the deprecated lockdown path for older devices.
+    variants = [
+        ("dvt --tunnel", [*base, "developer", "dvt", "screenshot", out_path, "--tunnel", udid]),
+        ("lockdown --udid", [*base, "developer", "screenshot", out_path, "--udid", udid]),
+    ]
+    diags: list[str] = []
+    for label, cmd in variants:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            diags.append(f"[{label}] timed out (is the tunnel up?)")
+            continue
+        except OSError as exc:
+            diags.append(f"[{label}] spawn failed: {exc}")
+            continue
+        if proc.returncode != 0:
+            diags.append(f"[{label}] exit={proc.returncode} {stderr.decode('utf-8', 'replace').strip()[:200]}")
+            continue
+        try:
+            data = Path(out_path).read_bytes()
+        except OSError:
+            err = stderr.decode("utf-8", "replace").strip()[:200]
+            diags.append(f"[{label}] ran but wrote no file{(' · ' + err) if err else ''}")
+            continue
+        if data.startswith(_PNG_MAGIC):
+            return data, "ok"
+        diags.append(f"[{label}] output was not PNG")
+    return b"", " | ".join(diags) or "no variant ran"
+
+
+async def _ios_screenshot_libimobile(udid: str, out_path: str) -> tuple[bytes, str]:
+    """Fallback iOS capture — libimobiledevice idevicescreenshot."""
+    import shutil
+
+    exe = shutil.which("idevicescreenshot")
+    if not exe:
+        return b"", "idevicescreenshot not on PATH (brew install libimobiledevice)"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            exe, "-u", udid, out_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        return b"", "idevicescreenshot timed out"
+    except OSError as exc:
+        return b"", f"idevicescreenshot spawn failed: {exc}"
+    if proc.returncode != 0:
+        return b"", f"idevicescreenshot exit={proc.returncode} {stderr.decode('utf-8', 'replace').strip()[:180]}"
+    try:
+        data = Path(out_path).read_bytes()
+    except OSError as exc:
+        return b"", f"idevicescreenshot wrote no file: {exc}"
+    if not data.startswith(_PNG_MAGIC):
+        return b"", "idevicescreenshot output was not PNG (older devices emit TIFF)"
+    return data, "ok"
+
+
+@app.get("/v1/devices/{serial}/ios-screen.png")
+async def device_ios_screen(serial: str) -> Response:
+    """Single PNG screenshot of an iOS device — the read-only mirror source.
+
+    Tries pymobiledevice3 then idevicescreenshot. The UI polls this exactly
+    like the Android screencap fallback (no live control, view only).
+    """
+    import os
+    import tempfile
+
+    diag1 = diag2 = "not attempted"
+    with tempfile.TemporaryDirectory(prefix="mnexus-ios-") as tmp:
+        png, diag1 = await _ios_screenshot_pmd3(serial, os.path.join(tmp, "a.png"))
+        if png:
+            return Response(
+                content=png, media_type="image/png",
+                headers={"Cache-Control": "no-cache", "X-MNexus-Path": "pymobiledevice3"},
+            )
+        png2, diag2 = await _ios_screenshot_libimobile(serial, os.path.join(tmp, "b.png"))
+        if png2:
+            return Response(
+                content=png2, media_type="image/png",
+                headers={"Cache-Control": "no-cache", "X-MNexus-Path": "idevicescreenshot"},
+            )
+    # Log the real reason to the server console so it's visible without
+    # digging into the browser — these failures are otherwise opaque 503s.
+    logging.getLogger("mnexus.api.ios").warning(
+        "ios-screen %s failed:\n  pymobiledevice3: %s\n  idevicescreenshot: %s",
+        serial, diag1, diag2,
+    )
+    raise HTTPException(
+        503,
+        detail={
+            "error": "ios_screencap_failed",
+            "pymobiledevice3": diag1,
+            "idevicescreenshot": diag2,
+            "hint": (
+                "Install tools: scripts/setup.sh --ios-tools. Pair + trust the device. "
+                "On iOS 17+, start the developer tunnel first: mnexus ios-tunnel"
+            ),
+        },
+    )
+
+
+# ─── iOS device control (lockdown / usbmux — no tunnel needed) ──────────────
+# These mirror the adb-backed Android panel for iPhones. Everything here goes
+# through plain lockdown, so it works without the developer tunnel that the
+# screen mirror needs. We shell out to pymobiledevice3 (resolved by _pmd3_argv)
+# and parse its JSON where it emits any.
+
+async def _run_pmd3(args: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
+    """Run a pymobiledevice3 subcommand; return (rc, stdout, stderr)."""
+    base = _pmd3_argv()
+    if not base:
+        return 127, "", "pymobiledevice3 not found (scripts/setup.sh --ios-tools)"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *base, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return 124, "", "pymobiledevice3 timed out"
+    except OSError as exc:
+        return 126, "", f"spawn failed: {exc}"
+    return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
+def _pmd3_json(text: str) -> Any:
+    """Best-effort: strip ANSI and parse the first JSON value in *text*."""
+    import json
+    import re
+
+    cleaned = re.sub(r"\x1b\[[0-9;]*m", "", text).strip()
+    start = next((i for i, ch in enumerate(cleaned) if ch in "{["), -1)
+    if start < 0:
+        return None
+    try:
+        return json.loads(cleaned[start:])
+    except (ValueError, TypeError):
+        return None
+
+
+@app.post("/v1/devices/{serial}/ios/power/{action}")
+async def device_ios_power(serial: str, action: str) -> dict[str, Any]:
+    """Reboot / shutdown / sleep an iOS device via the diagnostics relay."""
+    if action not in ("restart", "shutdown", "sleep"):
+        raise HTTPException(400, "action must be restart | shutdown | sleep")
+    rc, out, err = await _run_pmd3(["diagnostics", action, "--udid", serial], timeout=20)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": f"ios_{action}_failed", "stderr": (err or out).strip()[:300]})
+    return {"ok": True, "action": action}
+
+
+@app.get("/v1/devices/{serial}/ios/info")
+async def device_ios_info(serial: str) -> dict[str, Any]:
+    """Lockdown device facts (name / model / iOS version / serial / …)."""
+    rc, out, err = await _run_pmd3(["lockdown", "info", "--udid", serial], timeout=20)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_info_failed", "stderr": (err or out).strip()[:300]})
+    data = _pmd3_json(out) or {}
+    keys = [
+        "DeviceName", "ProductType", "ProductName", "ProductVersion", "BuildVersion",
+        "ModelNumber", "HardwareModel", "SerialNumber", "UniqueDeviceID",
+        "CPUArchitecture", "PhoneNumber", "WiFiAddress", "BluetoothAddress",
+    ]
+    summary = {k: data[k] for k in keys if isinstance(data, dict) and k in data}
+    return {"ok": True, "info": summary or data}
+
+
+@app.get("/v1/devices/{serial}/ios/apps")
+async def device_ios_apps(serial: str, kind: str = "User") -> dict[str, Any]:
+    """List installed apps (defaults to user apps)."""
+    kind = kind if kind in ("System", "User", "Hidden", "Any") else "User"
+    rc, out, err = await _run_pmd3(["apps", "list", "--type", kind, "--udid", serial], timeout=60)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_apps_failed", "stderr": (err or out).strip()[:300]})
+    data = _pmd3_json(out)
+    apps: list[dict[str, Any]] = []
+    if isinstance(data, dict):
+        for bid, meta in data.items():
+            meta = meta if isinstance(meta, dict) else {}
+            apps.append({
+                "bundle_id": bid,
+                "name": meta.get("CFBundleDisplayName") or meta.get("CFBundleName") or bid,
+                "version": meta.get("CFBundleShortVersionString", ""),
+                "type": meta.get("ApplicationType", ""),
+            })
+    apps.sort(key=lambda a: a["name"].lower())
+    return {"ok": True, "count": len(apps), "apps": apps}
+
+
+@app.post("/v1/devices/{serial}/ios/apps/install")
+async def device_ios_install(serial: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    """Install an IPA over lockdown (installation_proxy)."""
+    import os
+    import tempfile
+
+    suffix = os.path.splitext(file.filename or "app.ipa")[1] or ".ipa"
+    fd, path = tempfile.mkstemp(prefix="mnexus-ipa-", suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(await file.read())
+        rc, out, err = await _run_pmd3(["apps", "install", path, "--udid", serial], timeout=600)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_install_failed", "stderr": (err or out).strip()[:400]})
+    return {"ok": True}
+
+
+@app.post("/v1/devices/{serial}/ios/apps/{bundle_id}/uninstall")
+async def device_ios_uninstall(serial: str, bundle_id: str) -> dict[str, Any]:
+    """Uninstall an app by bundle id."""
+    rc, out, err = await _run_pmd3(["apps", "uninstall", bundle_id, "--udid", serial], timeout=120)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_uninstall_failed", "stderr": (err or out).strip()[:300]})
+    return {"ok": True, "bundle_id": bundle_id}
+
+
+@app.get("/v1/devices/{serial}/ios/syslog")
+async def device_ios_syslog(serial: str) -> StreamingResponse:
+    """Stream the live device log (the iOS logcat). Plain-text, tail-friendly."""
+    base = _pmd3_argv()
+    if not base:
+        raise HTTPException(503, "pymobiledevice3 not found (scripts/setup.sh --ios-tools)")
+
+    async def gen() -> AsyncIterator[bytes]:
+        proc = await asyncio.create_subprocess_exec(
+            *base, "syslog", "live", "--udid", serial,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            assert proc.stdout is not None
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                yield line
+        finally:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+
+    return StreamingResponse(
+        gen(), media_type="text/plain",
+        headers={"Cache-Control": "no-cache, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@app.get("/v1/devices/{serial}/ios/crashes")
+async def device_ios_crashes(serial: str) -> dict[str, Any]:
+    """List crash-report entries on the device."""
+    rc, out, err = await _run_pmd3(["crash", "ls", "--udid", serial], timeout=40)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_crashes_failed", "stderr": (err or out).strip()[:300]})
+    entries = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return {"ok": True, "count": len(entries), "entries": entries}
+
+
+@app.get("/v1/devices/{serial}/ios/afc")
+async def device_ios_afc(serial: str, path: str = "/") -> dict[str, Any]:
+    """List a directory on the device's media partition (AFC)."""
+    rc, out, err = await _run_pmd3(["afc", "ls", path, "--udid", serial], timeout=30)
+    if rc != 0:
+        raise HTTPException(502, detail={"error": "ios_afc_failed", "stderr": (err or out).strip()[:300]})
+    entries = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return {"ok": True, "path": path, "count": len(entries), "entries": entries}
+
+
 @app.get("/v1/devices/{serial}/screencap.png")
 async def device_screencap(serial: str) -> Response:
     """Single PNG. Tries exec-out fast path first, falls back to temp-file.
@@ -3093,11 +3488,15 @@ async def generate_report(
     if not project:
         raise HTTPException(404, f"no project with id {project_id}")
 
-    suffix = {"markdown": "md", "json": "json", "html": "html", "pdf": "pdf"}.get(fmt.lower(), "txt")
+    suffix = {"markdown": "md", "json": "json", "html": "html", "pdf": "pdf", "png": "png"}.get(fmt.lower(), "txt")
     out_path = nexus.config.workspace / "reports" / f"{project_id}.{suffix}"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        ReportGenerator(project).generate(
+        # generate() may graceful-degrade (PDF→HTML when WeasyPrint is missing,
+        # PNG→HTML when no Chromium). It returns the path it actually wrote,
+        # which can differ from out_path — serve *that* file, not the one we
+        # asked for, otherwise we FileResponse a path that was never created.
+        produced = ReportGenerator(project).generate(
             ReportTemplate(template),
             ReportFormat(fmt.lower()),
             str(out_path),
@@ -3107,13 +3506,18 @@ async def generate_report(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"{exc.__class__.__name__}: {exc}") from exc
 
+    produced_path = Path(produced)
+    if not produced_path.is_file():
+        raise HTTPException(500, f"report generation produced no file at {produced_path}")
+
     media = {
         "md": "text/markdown",
         "json": "application/json",
         "html": "text/html",
         "pdf": "application/pdf",
-    }.get(suffix, "application/octet-stream")
-    return FileResponse(str(out_path), media_type=media, filename=out_path.name)
+        "png": "image/png",
+    }.get(produced_path.suffix.lstrip("."), "application/octet-stream")
+    return FileResponse(str(produced_path), media_type=media, filename=produced_path.name)
 
 
 # ─── project sub-views (screens 09 / 10 / 11 / 15 / 16 / 17 / 18 / 19 / 20) ─

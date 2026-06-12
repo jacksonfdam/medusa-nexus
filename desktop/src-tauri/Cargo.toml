@@ -1,0 +1,31 @@
+[package]
+name = "medusa-nexus-desktop"
+version = "0.1.0"
+description = "MedusaNexus desktop shell — orchestrates the Docker stack + host sidecar"
+edition = "2021"
+rust-version = "1.77"
+
+# The lib is what tauri::generate_context wires into; main.rs is a thin shim.
+[lib]
+name = "medusa_nexus_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Minimal plugin set — the opposite of the kitchen-sink list. We add a plugin
+# only when a concrete need lands. No tray, no autostart, no deep-link.
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"     # spawn the frozen mnexus sidecar + the adb sidecar
+tauri-plugin-process = "2"   # clean restart/exit
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "process", "time", "rt", "macros"] }
+anyhow = "1"
+log = "0.4"
+
+[features]
+# default to no custom features; devtools toggled via tauri's own build profile
+default = []

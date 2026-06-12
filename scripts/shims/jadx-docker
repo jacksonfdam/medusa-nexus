@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Point MNEXUS_JADX_PATH at this file. `shutil.which()` resolves it (executable,
+# absolute) and the jadx_engine spawns it exactly like the real jadx CLI.
+set -Eeuo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$DIR/_docker_tool.sh" jadx "$@"

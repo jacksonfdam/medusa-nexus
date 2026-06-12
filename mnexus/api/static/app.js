@@ -2544,6 +2544,18 @@ function view_project_report(ctx) {
  *  SCREEN 22 — Report Generator
  * ═══════════════════════════════════════════════════════════════════════════ */
 function view_report() {
+    const tmpls = [
+        ["technical", "TECHNICAL"],
+        ["executive", "EXECUTIVE"],
+        ["owasp-matrix", "OWASP MATRIX"],
+        ["diff", "DIFF (v4.11 → v4.12)"],
+    ];
+    const includes = [
+        ["playbook", "Mitigation Playbook", true],
+        ["evidence", "Evidence snippets", false],
+        ["frida", "Frida scripts used", false],
+        ["traffic", "Traffic captures (sanitized)", false],
+    ];
     return h`
     <div class="main">
       ${sectionHeader("R", "22 // FINDING + REPORT", "REPORT GENERATOR")}
@@ -2551,29 +2563,36 @@ function view_report() {
         <section class="panel" style="width:320px;flex:none">
           <div class="panel-head">// TEMPLATE</div>
           <div class="panel-body col" style="gap:8px">
-            <div class="row" style="padding:10px;background:var(--bg-accent-panel);border:1px solid var(--border-accent);border-radius:2px"><span style="color:var(--acid)">●</span><span class="t-mono" style="color:var(--acid);font-weight:700">TECHNICAL</span></div>
-            <div class="row" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="muted">○</span><span class="t-mono">EXECUTIVE</span></div>
-            <div class="row" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="muted">○</span><span class="t-mono">OWASP MATRIX</span></div>
-            <div class="row" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="muted">○</span><span class="t-mono">DIFF (v4.11 → v4.12)</span></div>
+            <label class="row small muted" style="gap:6px;align-items:center">project
+              <select id="report-project" style="flex:1;background:var(--bg-panel);color:inherit;border:1px solid var(--border);border-radius:2px;padding:6px"></select>
+            </label>
+            <div id="report-templates" class="col" style="gap:8px">
+              ${tmpls.map(([id, label]) => `
+                <div class="tmpl-row row" data-tmpl="${id}" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;cursor:pointer">
+                  <span class="tmpl-dot muted">○</span><span class="t-mono">${label}</span>
+                </div>`).join("")}
+            </div>
             <div style="height:1px;background:var(--border);margin:8px 0"></div>
             <div class="panel-head" style="background:transparent;border:0;padding:0">// INCLUDE</div>
-            <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span style="color:var(--acid);flex:1">Mitigation Playbook</span><span class="small" style="color:var(--magenta)">mandatory</span></div>
-            <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span>Evidence snippets</span></div>
-            <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span>Frida scripts used</span></div>
-            <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span>Traffic captures (sanitized)</span></div>
+            <div id="report-includes" class="col" style="gap:6px">
+              ${includes.map(([id, label, locked]) => `
+                <div class="incl-row row" data-incl="${id}" data-locked="${locked}" style="cursor:${locked ? "default" : "pointer"}">
+                  <span class="incl-box" style="font-weight:700;color:var(--acid)">[x]</span>
+                  <span style="flex:1${locked ? ";color:var(--acid)" : ""}">${label}</span>
+                  ${locked ? '<span class="small" style="color:var(--magenta)">mandatory</span>' : ""}
+                </div>`).join("")}
+            </div>
             <div style="height:1px;background:var(--border);margin:8px 0"></div>
             <div class="panel-head" style="background:transparent;border:0;padding:0">// EXPORT</div>
-            <div class="row" style="gap:8px"><button class="btn primary">[ PDF ]</button><button class="btn">[ HTML ]</button></div>
-            <div class="row" style="gap:8px"><button class="btn">[ .MD ]</button><button class="btn">[ JSON ]</button></div>
+            <div class="row" style="gap:8px"><button class="btn primary export-btn" data-fmt="pdf">[ PDF ]</button><button class="btn export-btn" data-fmt="html">[ HTML ]</button></div>
+            <div class="row" style="gap:8px"><button class="btn export-btn" data-fmt="markdown">[ .MD ]</button><button class="btn export-btn" data-fmt="json">[ JSON ]</button></div>
+            <div id="report-export-status" class="small muted"></div>
           </div>
         </section>
         <section class="panel grow">
           <div class="panel-head" id="report-preview-head">// PREVIEW</div>
           <div class="panel-body col" style="gap:12px;background:#050505" id="report-preview">
-            <div class="empty-state">
-              <span class="muted small uppercase">no project picked yet</span>
-              <div class="muted small" style="margin-top:6px">scan an APK at <a href="#/scan">/#/scan</a>, then come back to render its real Mitigation Playbook here.</div>
-            </div>
+            <div class="empty-state"><span class="muted small uppercase">loading…</span></div>
           </div>
         </section>
       </div>
@@ -2943,6 +2962,7 @@ function view_devices() {
 
 let _devicesPollTimer = null;
 let _mirrorTimer = null;
+let _iosSyslogCtl = null;   // AbortController for the live iOS syslog stream
 let _activeSerial = null;
 
 async function mount_devices() {
@@ -3141,15 +3161,24 @@ async function refreshDevices() {
 
 function deviceCardHtml(d) {
     const ok = d.state === "device";
-    const stateColor = ok ? "var(--acid)" : (d.state === "unauthorized" ? "var(--sev-high)" : "var(--sev-crit)");
+    const isIos = d.platform === "ios";
+    const stateColor = isIos ? "var(--cyan)" : (ok ? "var(--acid)" : (d.state === "unauthorized" ? "var(--sev-high)" : "var(--sev-crit)"));
+    const badge = isIos ? "iOS" : d.state.toUpperCase();
     return `
     <div class="device-card ${d.serial === _activeSerial ? "active" : ""}" data-serial="${d.serial}">
       <div class="head">
         <span class="t-mono" style="font-weight:700;flex:1">${d.model || d.product || d.serial}</span>
-        <span class="badge" style="color:${stateColor};border-color:${stateColor}">${d.state.toUpperCase()}</span>
+        <span class="badge" style="color:${stateColor};border-color:${stateColor}">${badge}</span>
       </div>
       <div class="muted small t-mono">${d.serial}</div>
-      ${ok ? `
+      ${isIos ? `
+      <div class="grid">
+        <span class="key">PLATFORM</span><span class="val" style="color:var(--cyan)">iOS</span>
+        <span class="key">VERSION</span><span class="val">${d.ios_version || "?"}</span>
+        <span class="key">ARCH</span><span class="val">${d.arch || "?"}</span>
+        <span class="key">UDID</span><span class="val t-mono" style="font-size:9px">${escapeHtml(d.udid || d.serial)}</span>
+        <span class="key">FRIDA</span><span class="val" style="color:var(--${d.frida_visible ? "acid" : "muted"})">${d.frida_visible ? "visible · lockdownd" : "—"}</span>
+      </div>` : ok ? `
       <div class="grid">
         <span class="key">ANDROID</span><span class="val">${d.android_release || "?"} (SDK ${d.android_sdk || "?"})</span>
         <span class="key">ABI</span><span class="val">${d.abi || "?"}</span>
@@ -3170,6 +3199,264 @@ function openDeviceDetail(serial, d) {
     if (!panel || !host) return;
     panel.style.display = "";
     title.textContent = `// DEVICE :: ${d?.model || serial}`;
+
+    // iOS devices are discovered via Frida/lockdownd, but every live-control
+    // path below (mirror, shell, keyevents, install, frida-server push) is
+    // adb-only. Rather than firing adb at an iPhone and surfacing "?" /
+    // endless polling, render an iOS-specific panel that's honest about what
+    // is and isn't supported.
+    if (d?.platform === "ios") {
+        if (_mirrorTimer) { clearInterval(_mirrorTimer); _mirrorTimer = null; }
+        host.innerHTML = `
+          <div class="device-detail">
+            <div class="device-mirror" id="ios-mirror">
+              <div class="mirror-stage">
+                <img id="ios-mirror-img" alt="iOS screen mirror" />
+              </div>
+              <div class="mirror-foot">
+                <span>MIRROR · iOS</span>
+                <span>·</span>
+                <span>read-only · poll</span>
+                <span class="spacer"></span>
+                <span id="ios-mirror-status" style="color:var(--acid)">connecting…</span>
+              </div>
+            </div>
+            <div class="col">
+              <section class="panel">
+                <div class="panel-head">// iOS DEVICE</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div style="display:grid;grid-template-columns:84px 1fr;gap:6px 14px;font-size:11px;align-items:baseline">
+                    <span class="muted" style="letter-spacing:1px">NAME</span><span class="t-mono" style="color:var(--cyan)">${escapeHtml(d.model || "iOS device")}</span>
+                    <span class="muted" style="letter-spacing:1px">UDID</span><span class="t-mono" style="color:var(--cyan);word-break:break-all">${escapeHtml(d.udid || serial)}</span>
+                    <span class="muted" style="letter-spacing:1px">VERSION</span><span class="t-mono" style="color:var(--cyan)">${escapeHtml(d.ios_version || "?")}</span>
+                    <span class="muted" style="letter-spacing:1px">ARCH</span><span class="t-mono" style="color:var(--cyan)">${escapeHtml(d.arch || "?")}</span>
+                    <span class="muted" style="letter-spacing:1px">FRIDA</span><span class="t-mono" style="color:var(--${d.frida_visible ? "acid" : "muted"})">${d.frida_visible ? "visible · lockdownd" : "not visible"}</span>
+                  </div>
+                  <div class="row" style="gap:8px">
+                    <button class="btn" id="ios-copy-udid">[ COPY UDID ]</button>
+                    <span id="ios-copy-status" class="muted small"></span>
+                  </div>
+                </div>
+              </section>
+              <section class="panel">
+                <div class="panel-head">// QUICK ACTIONS · lockdown</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div class="row" style="gap:8px;flex-wrap:wrap">
+                    <button class="btn" data-ios-power="restart">[ REBOOT ]</button>
+                    <button class="btn" data-ios-power="shutdown">[ SHUTDOWN ]</button>
+                    <button class="btn" data-ios-power="sleep">[ SLEEP ]</button>
+                  </div>
+                  <span id="ios-power-status" class="muted small"></span>
+                </div>
+              </section>
+              <section class="panel">
+                <div class="panel-head">// APPS · install / list / uninstall</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+                    <input type="file" id="ios-ipa-file" accept=".ipa" style="display:none">
+                    <button class="btn" id="ios-install-btn">[ ↑ INSTALL IPA ]</button>
+                    <button class="btn" id="ios-apps-refresh">[ ⟳ LIST APPS ]</button>
+                    <span id="ios-apps-status" class="muted small grow"></span>
+                  </div>
+                  <div id="ios-apps-list" class="col" style="gap:4px;max-height:220px;overflow:auto"></div>
+                </div>
+              </section>
+              <section class="panel">
+                <div class="panel-head">// SYSLOG · live device log</div>
+                <div class="panel-body col" style="gap:6px">
+                  <div class="row" style="gap:8px;align-items:center">
+                    <button class="btn" id="ios-syslog-toggle">[ ▶ START ]</button>
+                    <button class="btn" id="ios-syslog-clear">[ CLEAR ]</button>
+                    <span id="ios-syslog-status" class="muted small"></span>
+                  </div>
+                  <pre id="ios-syslog-out" class="code" style="max-height:240px;overflow:auto"></pre>
+                </div>
+              </section>
+              <section class="panel">
+                <div class="panel-head">// CRASHES + FILES</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div class="row" style="gap:8px;align-items:center">
+                    <button class="btn" id="ios-crashes-btn">[ ⟳ CRASH REPORTS ]</button>
+                    <span id="ios-crashes-status" class="muted small"></span>
+                  </div>
+                  <pre id="ios-crashes-out" class="code" style="max-height:150px;overflow:auto"></pre>
+                  <div class="row" style="gap:8px;align-items:center">
+                    <span class="muted small">AFC</span>
+                    <input id="ios-afc-path" value="/" style="flex:1;background:var(--bg-panel);color:inherit;border:1px solid var(--border);border-radius:2px;padding:4px 8px">
+                    <button class="btn" id="ios-afc-btn">[ LS ]</button>
+                  </div>
+                  <pre id="ios-afc-out" class="code" style="max-height:150px;overflow:auto"></pre>
+                </div>
+              </section>
+              <section class="panel">
+                <div class="panel-head">// ANALYSIS</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div class="muted small">The mirror is <b>read-only</b>; full screen control (taps / swipes / key events) is Android-only. The actions above run over lockdown. For deeper work, analyse the app binary:</div>
+                  <div class="row" style="gap:8px;flex-wrap:wrap">
+                    <a class="btn primary" href="#/scan">[ ↑ UPLOAD IPA TO SCAN ]</a>
+                    <a class="btn" href="#/recipes?platform=ios">[ iOS RECIPES ]</a>
+                  </div>
+                  <div class="muted small">Decrypt + analyse a signed app with <code>frida-ios-dump</code>, then run the iOS static pipeline. ${d.frida_visible ? "Frida sees this device, so on-device instrumentation is possible from the CLI (<code>mnexus</code> + Frida)." : "Pair the device and ensure Frida is installed to enable on-device instrumentation."}</div>
+                </div>
+              </section>
+            </div>
+          </div>`;
+        const copyBtn = $("#ios-copy-udid");
+        if (copyBtn) copyBtn.addEventListener("click", async () => {
+            const st = $("#ios-copy-status");
+            try { await navigator.clipboard.writeText(d.udid || serial); if (st) { st.textContent = "copied"; st.style.color = "var(--acid)"; } }
+            catch { if (st) { st.textContent = d.udid || serial; } }
+        });
+
+        const iosBase = `/v1/devices/${encodeURIComponent(serial)}/ios`;
+
+        // ── power: reboot / shutdown / sleep ──
+        $$("[data-ios-power]").forEach((b) => b.addEventListener("click", async () => {
+            const action = b.dataset.iosPower;
+            const st = $("#ios-power-status");
+            if (!confirm(`iOS ${action}?`)) return;
+            if (st) { st.textContent = `${action}…`; st.style.color = ""; }
+            try {
+                const r = await fetch(`${iosBase}/power/${action}`, { method: "POST" });
+                if (!r.ok) throw new Error((await r.text()).slice(0, 160));
+                if (st) { st.textContent = `${action} sent`; st.style.color = "var(--acid)"; }
+            } catch (e) { if (st) { st.textContent = `failed: ${e.message}`; st.style.color = "var(--sev-crit)"; } }
+        }));
+
+        // ── apps: list / install / uninstall ──
+        const appsList = $("#ios-apps-list"), appsStatus = $("#ios-apps-status");
+        const loadApps = async () => {
+            if (appsStatus) { appsStatus.textContent = "loading…"; appsStatus.style.color = ""; }
+            try {
+                const j = await getJSON(`${iosBase}/apps`);
+                if (appsStatus) appsStatus.textContent = `${j.count} app(s)`;
+                appsList.innerHTML = (j.apps || []).map((a) => `<div class="row" style="gap:8px;align-items:center"><span class="t-mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(a.bundle_id)}">${escapeHtml(a.name)} <span class="muted small">${escapeHtml(a.version)}</span></span><button class="btn" data-ios-uninstall="${escapeHtml(a.bundle_id)}" style="padding:1px 8px">✕</button></div>`).join("") || `<div class="muted small">no apps</div>`;
+                $$("[data-ios-uninstall]").forEach((b) => b.addEventListener("click", async () => {
+                    const bid = b.dataset.iosUninstall;
+                    if (!confirm(`Uninstall ${bid}?`)) return;
+                    b.textContent = "…";
+                    try {
+                        const r = await fetch(`${iosBase}/apps/${encodeURIComponent(bid)}/uninstall`, { method: "POST" });
+                        if (!r.ok) throw new Error((await r.text()).slice(0, 120));
+                        loadApps();
+                    } catch (e) { b.textContent = "✕"; if (appsStatus) { appsStatus.textContent = "uninstall failed: " + e.message; appsStatus.style.color = "var(--sev-crit)"; } }
+                }));
+            } catch (e) { if (appsStatus) { appsStatus.textContent = "failed: " + e.message; appsStatus.style.color = "var(--sev-crit)"; } }
+        };
+        $("#ios-apps-refresh")?.addEventListener("click", loadApps);
+        const ipaFile = $("#ios-ipa-file");
+        $("#ios-install-btn")?.addEventListener("click", () => ipaFile?.click());
+        ipaFile?.addEventListener("change", async () => {
+            const f = ipaFile.files?.[0]; if (!f) return;
+            if (appsStatus) { appsStatus.textContent = `installing ${f.name}…`; appsStatus.style.color = ""; }
+            const fd = new FormData(); fd.append("file", f);
+            try {
+                const r = await fetch(`${iosBase}/apps/install`, { method: "POST", body: fd });
+                if (!r.ok) throw new Error((await r.text()).slice(0, 200));
+                if (appsStatus) { appsStatus.textContent = "installed ✓"; appsStatus.style.color = "var(--acid)"; }
+                loadApps();
+            } catch (e) { if (appsStatus) { appsStatus.textContent = "install failed: " + e.message; appsStatus.style.color = "var(--sev-crit)"; } }
+            finally { ipaFile.value = ""; }
+        });
+
+        // ── syslog: live stream (the iOS logcat) ──
+        if (_iosSyslogCtl) { _iosSyslogCtl.abort(); _iosSyslogCtl = null; }
+        const syslogOut = $("#ios-syslog-out"), syslogToggle = $("#ios-syslog-toggle"), syslogStatus = $("#ios-syslog-status");
+        $("#ios-syslog-clear")?.addEventListener("click", () => { if (syslogOut) syslogOut.textContent = ""; });
+        syslogToggle?.addEventListener("click", async () => {
+            if (_iosSyslogCtl) { _iosSyslogCtl.abort(); _iosSyslogCtl = null; syslogToggle.textContent = "[ ▶ START ]"; if (syslogStatus) syslogStatus.textContent = ""; return; }
+            _iosSyslogCtl = new AbortController();
+            syslogToggle.textContent = "[ ■ STOP ]";
+            if (syslogStatus) { syslogStatus.textContent = "streaming…"; syslogStatus.style.color = "var(--acid)"; }
+            try {
+                const r = await fetch(`${iosBase}/syslog`, { signal: _iosSyslogCtl.signal });
+                if (!r.ok) throw new Error(`${r.status}`);
+                const reader = r.body.getReader(); const dec = new TextDecoder();
+                for (;;) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    syslogOut.textContent += dec.decode(value, { stream: true });
+                    if (syslogOut.textContent.length > 200000) syslogOut.textContent = syslogOut.textContent.slice(-150000);
+                    syslogOut.scrollTop = syslogOut.scrollHeight;
+                }
+            } catch (e) {
+                if (e.name !== "AbortError" && syslogStatus) { syslogStatus.textContent = "error: " + e.message; syslogStatus.style.color = "var(--sev-crit)"; }
+            } finally {
+                if (syslogToggle) syslogToggle.textContent = "[ ▶ START ]";
+            }
+        });
+
+        // ── crash reports + AFC file listing ──
+        $("#ios-crashes-btn")?.addEventListener("click", async () => {
+            const out = $("#ios-crashes-out"), st = $("#ios-crashes-status");
+            if (st) { st.textContent = "loading…"; st.style.color = ""; }
+            try {
+                const j = await getJSON(`${iosBase}/crashes`);
+                if (st) st.textContent = `${j.count} entries`;
+                out.textContent = (j.entries || []).join("\n") || "(none)";
+            } catch (e) { if (st) { st.textContent = "failed: " + e.message; st.style.color = "var(--sev-crit)"; } }
+        });
+        $("#ios-afc-btn")?.addEventListener("click", async () => {
+            const out = $("#ios-afc-out"), p = $("#ios-afc-path")?.value || "/";
+            out.textContent = "…";
+            try {
+                const j = await getJSON(`${iosBase}/afc?path=${encodeURIComponent(p)}`);
+                out.textContent = (j.entries || []).join("\n") || "(empty)";
+            } catch (e) { out.textContent = "failed: " + e.message; }
+        });
+
+        // ── read-only mirror: poll the iOS screenshot endpoint ──
+        // No adb here — the server captures via pymobiledevice3 / idevicescreenshot.
+        // iOS screenshots are slower than adb screencap, so poll at ~1.5s.
+        const imgEl = $("#ios-mirror-img");
+        const stEl = $("#ios-mirror-status");
+        let inFlight = false, fails = 0, lastUrl = null;
+        const setSt = (t, c) => { if (stEl) { stEl.textContent = t; stEl.style.color = c || "var(--acid)"; } };
+        const iosPoll = async () => {
+            if (inFlight) return;
+            inFlight = true;
+            try {
+                const r = await fetch(`/v1/devices/${encodeURIComponent(serial)}/ios-screen.png?t=${Date.now()}`, { cache: "no-store" });
+                if (!r.ok) {
+                    fails++;
+                    let hint = "", diag = "";
+                    try {
+                        const j = await r.json();
+                        const d = j.detail || {};
+                        hint = d.hint || "";
+                        // Surface the actual capture error so failures are debuggable.
+                        diag = [d.pymobiledevice3, d.idevicescreenshot].filter(Boolean).join(" · ");
+                    } catch (_) { /* non-JSON */ }
+                    setSt(`unavailable · ${r.status}`, "var(--sev-high)");
+                    const stage = imgEl && imgEl.parentElement;
+                    if (stage) {
+                        const prev = $("#ios-mirror-msg"); if (prev) prev.remove();
+                        stage.insertAdjacentHTML("beforeend", `<div id="ios-mirror-msg" class="muted small" style="position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;justify-content:center;text-align:center;padding:18px;line-height:1.5"><div>iOS screenshot unavailable.</div>${diag ? `<div class="t-mono" style="font-size:10px;color:var(--sev-high);max-width:90%;word-break:break-word">${escapeHtml(diag)}</div>` : ""}<div>${escapeHtml(hint || "Run scripts/setup.sh --ios-tools, pair + trust the device, and on iOS 17+ start the developer tunnel.")}</div></div>`);
+                    }
+                    return;
+                }
+                const blob = await r.blob();
+                const url = URL.createObjectURL(blob);
+                if (imgEl) { imgEl.src = url; imgEl.style.opacity = "1"; }
+                const msg = $("#ios-mirror-msg"); if (msg) msg.remove();
+                if (lastUrl) URL.revokeObjectURL(lastUrl);
+                lastUrl = url; fails = 0;
+                setSt(`live · poll · ${r.headers.get("X-MNexus-Path") || "?"}`);
+            } catch (e) {
+                fails++;
+                setSt("network error", "var(--sev-crit)");
+            } finally {
+                inFlight = false;
+            }
+        };
+        iosPoll();
+        _mirrorTimer = setInterval(() => {
+            if (!location.hash.startsWith("#/devices")) { clearInterval(_mirrorTimer); return; }
+            if (_activeSerial !== serial) { clearInterval(_mirrorTimer); return; }
+            iosPoll();
+        }, 1500);
+        return;
+    }
 
     const ok = d?.state === "device";
     if (!ok) {
@@ -3551,6 +3838,7 @@ async function bindInstall(serial) {
 function closeDeviceDetail() {
     _activeSerial = null;
     clearInterval(_mirrorTimer);
+    if (_iosSyslogCtl) { _iosSyslogCtl.abort(); _iosSyslogCtl = null; }
     const panel = $("#device-detail-panel");
     if (panel) panel.style.display = "none";
     document.querySelectorAll(".device-card").forEach((c) => c.classList.remove("active"));
@@ -4437,9 +4725,45 @@ async function mount_project_network(ctx) {
         }
     }
 
-    const renderRows = (rows) => {
+    // Android emits a constant drip of captive-portal / connectivity probes
+    // (gen_204 · generate_204 to Google hosts, empty 204s). With no active
+    // capture these flood the table with thousands of meaningless rows. Treat
+    // them as noise: filter them out, and if nothing else remains show the
+    // idle empty-state instead of a wall of probes.
+    const CONNECTIVITY_DOMAINS = ["gstatic.com", "google.com", "googleapis.com", "googleusercontent.com"];
+    const isConnectivityNoise = (row) => {
+        const path = String(row.path || "").split("?")[0];
+        if (!(path.endsWith("/gen_204") || path.endsWith("/generate_204"))) return false;
+        const host = String(row.host || "").toLowerCase();
+        const onProbeHost = CONNECTIVITY_DOMAINS.some((d) => host === d || host.endsWith("." + d));
+        const status = Number(row.status) || 0;
+        const emptyBody = !(Number(row.size) > 0);
+        return onProbeHost && (status === 204 || status === 0) && emptyBody;
+    };
+
+    const renderRows = (allRows) => {
+        const rows = allRows.filter((r) => !isConnectivityNoise(r));
+        const hidden = allRows.length - rows.length;
+        // Keep the top metric + subtitle in sync with what's actually shown,
+        // so the panel reads "idle" (not "1000") when only probes came in.
+        const countEl = $("#net-traffic-count");
+        if (countEl) {
+            countEl.textContent = String(rows.length).padStart(2, "0");
+            countEl.className = "metric-value " + (rows.length ? "acid" : "");
+        }
+        const subEl = $("#net-traffic-sub");
+        if (subEl) {
+            const burp = rows.filter((r) => (r.origin || "burp") !== "moxy").length;
+            subEl.textContent = rows.length ? `${burp} burp · ${rows.length - burp} moxy` : "no proxy data yet";
+        }
+        const metaEl = $("#net-traffic-meta");
+        if (metaEl) {
+            metaEl.textContent = rows.length
+                ? `${rows.length} request(s)${hidden ? ` · ${hidden} probe(s) hidden` : ""}`
+                : (hidden ? `no active capture · ${hidden} connectivity probe(s) hidden` : "no traffic captured yet");
+        }
         if (!rows.length) {
-            tEl.innerHTML = `<div class="empty-state">no captured traffic — start a Burp / Moxy session and proxy the device through it. The events will surface here.</div>`;
+            tEl.innerHTML = `<div class="empty-state">no active capture${hidden ? ` — ${hidden} connectivity probe(s) filtered out` : ""}. Start a Burp / Moxy session and proxy the device through it; real flows will surface here.</div>`;
             return;
         }
         const sevColor = (status) => {
@@ -4471,7 +4795,7 @@ async function mount_project_network(ctx) {
                 <span class="t-muted">${row.ms || "—"}</span>
                 <span style="font-size:9px;color:var(--sev-info);font-weight:700">${(row.flags || []).map((f) => "[" + escapeHtml(f) + "]").join("")}${matched && row.origin === "moxy" ? "[✓]" : ""}</span>
               </div>`;
-        }).join("");
+        }).join("") + (hidden ? `<div class="muted small" style="padding:6px 10px">+ ${hidden} connectivity probe(s) hidden (gen_204 / generate_204)</div>` : "");
     };
 
     // Initial render: Burp rows on top, Moxy rows underneath. Sort by timestamp
@@ -5981,106 +6305,210 @@ async function mount_report(ctx) {
     const queryProj = (ctx.hash || "").split("?")[1]?.split("project=")[1];
     let targetId = (queryProj && decodeURIComponent(queryProj))
         || ctx.params.id
-        || projects[0]?.id;
-    let activeTemplate = "technical";
-    if (!targetId && !projects.length) {
-        const main = $(".main");
-        if (main) main.insertAdjacentHTML("afterbegin", `<div class="empty-state" style="margin-bottom:8px;color:var(--sev-high)">no projects yet — <a href="#/scan">ingest one</a></div>`);
+        || projects[0]?.id
+        || null;
+
+    const state = {
+        template: "technical",
+        includes: { playbook: true, evidence: false, frida: false, traffic: false },
+        project: null,
+    };
+    const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+    const sevClass = (sev) => (sev === "critical" ? "crit" : sev === "medium" ? "med" : sev);
+
+    // ── project picker ──
+    const sel = $("#report-project");
+    if (sel) {
+        if (!projects.length) {
+            sel.innerHTML = `<option value="">— no projects —</option>`;
+        } else {
+            sel.innerHTML = projects
+                .map((p) => `<option value="${p.id}">${escapeHtml(p.package_name || p.id)} (${p.id})</option>`)
+                .join("");
+            if (targetId) sel.value = targetId;
+            targetId = sel.value || targetId;
+        }
+        sel.addEventListener("change", async () => {
+            targetId = sel.value || null;
+            await loadProject();
+            renderPreview();
+        });
     }
 
-    // ── live report preview from the chosen project ──
-    const previewHead = $("#report-preview-head");
-    const preview = $("#report-preview");
-    if (preview) {
-        if (!targetId) {
-            preview.innerHTML = `<div class="empty-state"><span class="muted small uppercase">no project picked yet</span></div>`;
-        } else {
-            try {
-                const project = await getJSON(`/v1/projects/${encodeURIComponent(targetId)}`);
-                const findings = (project.attack_surface?.findings || []);
-                const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-                const top = findings
-                    .filter((f) => f.remediation && f.remediation.trim())
-                    .sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9))
-                    .slice(0, 8);
-
-                if (previewHead) previewHead.textContent = `// PREVIEW · ${project.package_name} v${project.version_name} · ${findings.length} findings`;
-
-                preview.innerHTML = `
-                  <div style="font-size:20px;color:var(--cyan);font-weight:700;letter-spacing:2px">MEDUSA NEXUS // ${activeTemplate.toUpperCase()} ASSESSMENT</div>
-                  <div class="muted small">target: ${project.package_name} v${project.version_name} · SHA-256 ${(project.apk_sha256 || "").slice(0, 16)}… · ${(project.created_at || "").slice(0, 10)}</div>
-                  <div class="gradient-underline"></div>
-                  <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · EXECUTIVE SUMMARY</div>
-                  <div>Risk ${(project.risk_score ?? 0).toFixed(1)}/100. ${
-                      Object.entries(project.findings_by_severity || {})
-                          .filter(([, n]) => n)
-                          .map(([sev, n]) => `${n} ${sev}`).join(", ") || "no findings"
-                  }.</div>
-                  <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 02 · MITIGATION PLAYBOOK — mandatory section</div>
-                  <div class="mitigation">
-                    ${top.length ? top.map((f) => {
-                        const sev = (f.severity || "info").toLowerCase();
-                        const cls = sev === "critical" ? "crit" : sev === "medium" ? "med" : sev;
-                        const firstLine = f.remediation.split("\n").find((l) => l.trim()) || "";
-                        return `<div class="row" style="align-items:flex-start;gap:10px"><span class="chip ${cls}">${cls.toUpperCase()}</span><div><b>${f.id} · ${f.title}</b><br>→ ${escapeHtml(firstLine)}</div></div>`;
-                    }).join("") : `<div class="muted small">no actionable findings yet — run static engines.</div>`}
-                  </div>
-                  <div class="muted small">§ 03 · FINDINGS DETAIL · § 04 · OWASP MASVS COMPLIANCE MATRIX · § 05 · EVIDENCE PACKAGE · § 06 · REPRO STEPS</div>`;
-            } catch (e) {
-                preview.innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">failed to load project ${targetId}: ${e.message}</span></div>`;
-            }
+    async function loadProject() {
+        if (!targetId) { state.project = null; return; }
+        try {
+            state.project = await getJSON(`/v1/projects/${encodeURIComponent(targetId)}`);
+        } catch (e) {
+            state.project = { _error: e.message };
         }
     }
 
-    // Template selector — make all rows clickable.
-    const tmplRows = $$(".panel:first-of-type .panel-body .row");
-    tmplRows.forEach((row) => {
-        const txt = row.textContent.trim().toLowerCase();
-        const tmpl = txt.includes("executive") ? "executive"
-            : txt.includes("owasp") ? "owasp-matrix"
-            : txt.includes("diff") ? "diff"
-            : txt.includes("technical") ? "technical" : null;
-        if (!tmpl) return;
-        row.style.cursor = "pointer";
-        row.addEventListener("click", () => {
-            activeTemplate = tmpl;
-            tmplRows.forEach((r) => {
-                const t = r.textContent.trim().toLowerCase();
-                const isMine = t.includes(activeTemplate.replace("-matrix", " matrix")) || (activeTemplate === "technical" && t.includes("technical"));
-                r.style.background = isMine ? "var(--bg-accent-panel)" : "var(--bg-panel)";
-                r.style.borderColor = isMine ? "var(--border-accent)" : "var(--border)";
+    function renderPreview() {
+        const head = $("#report-preview-head");
+        const preview = $("#report-preview");
+        if (!preview) return;
+        const p = state.project;
+        if (!targetId) {
+            if (head) head.textContent = "// PREVIEW";
+            preview.innerHTML = `<div class="empty-state"><span class="muted small uppercase">no project — <a href="#/scan">scan one</a></span></div>`;
+            return;
+        }
+        if (!p || p._error) {
+            preview.innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">failed to load ${targetId}${p && p._error ? ": " + escapeHtml(p._error) : ""}</span></div>`;
+            return;
+        }
+        const findings = p.attack_surface?.findings || [];
+        const top = findings
+            .filter((f) => f.remediation && f.remediation.trim())
+            .sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9))
+            .slice(0, 8);
+        const tlabel = { technical: "TECHNICAL", executive: "EXECUTIVE", "owasp-matrix": "OWASP MASVS MATRIX", diff: "DIFF" }[state.template] || state.template.toUpperCase();
+        if (head) head.textContent = `// PREVIEW · ${p.package_name} v${p.version_name} · ${state.template} · ${findings.length} findings`;
+
+        const out = [];
+        out.push(`<div style="font-size:20px;color:var(--cyan);font-weight:700;letter-spacing:2px">MEDUSA NEXUS // ${tlabel} ASSESSMENT</div>`);
+        out.push(`<div class="muted small">target: ${escapeHtml(p.package_name || "")} v${escapeHtml(p.version_name || "")} · SHA-256 ${(p.apk_sha256 || "").slice(0, 16)}… · ${(p.created_at || "").slice(0, 10)}</div>`);
+        out.push(`<div class="gradient-underline"></div>`);
+        out.push(`<div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · EXECUTIVE SUMMARY</div>`);
+        out.push(`<div>Risk ${(p.risk_score ?? 0).toFixed(1)}/100. ${
+            Object.entries(p.findings_by_severity || {}).filter(([, n]) => n).map(([s, n]) => `${n} ${s}`).join(", ") || "no findings"
+        }.</div>`);
+
+        let sn = 1; // running section number after the executive summary
+        if (state.template === "owasp-matrix") {
+            const byTag = {};
+            findings.forEach((f) => { if (f.masvs) (byTag[f.masvs] = byTag[f.masvs] || []).push(f); });
+            const rows = Object.entries(byTag).sort().map(([tag, fs]) => {
+                const hi = fs.map((x) => x.severity).sort((a, b) => (order[a] ?? 9) - (order[b] ?? 9))[0] || "info";
+                return `<div class="row" style="gap:10px;align-items:center"><span class="chip ${sevClass(hi)}">${hi.toUpperCase()}</span><b>${escapeHtml(tag)}</b><span class="muted small">${fs.length} finding(s)</span></div>`;
             });
+            out.push(`<div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 0${++sn} · OWASP MASVS COMPLIANCE MATRIX</div>`);
+            out.push(`<div class="col" style="gap:6px">${rows.length ? rows.join("") : `<div class="muted small">no MASVS-tagged findings.</div>`}</div>`);
+        }
+
+        if (state.includes.playbook) {
+            out.push(`<div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 0${++sn} · MITIGATION PLAYBOOK — mandatory section</div>`);
+            out.push(`<div class="mitigation col" style="gap:8px">${top.length ? top.map((f) => {
+                const cls = sevClass((f.severity || "info").toLowerCase());
+                const firstLine = (f.remediation || "").split("\n").find((l) => l.trim()) || "";
+                const ev = (state.includes.evidence && f.evidence)
+                    ? `<div class="muted small t-mono" style="margin-top:2px;white-space:pre-wrap">⌗ ${escapeHtml((f.evidence || "").slice(0, 160))}</div>`
+                    : "";
+                return `<div class="row" style="align-items:flex-start;gap:10px"><span class="chip ${cls}">${cls.toUpperCase()}</span><div><b>${f.id} · ${escapeHtml(f.title)}</b><br>→ ${escapeHtml(firstLine)}${ev}</div></div>`;
+            }).join("") : `<div class="muted small">no actionable findings yet — run static engines.</div>`}</div>`);
+        }
+
+        // Remaining section markers reflect the active include toggles.
+        const tail = [`§ 0${++sn} · FINDINGS DETAIL`];
+        if (state.template !== "owasp-matrix") tail.push(`§ 0${++sn} · OWASP MASVS COMPLIANCE MATRIX`);
+        if (state.includes.evidence) tail.push(`§ 0${++sn} · EVIDENCE PACKAGE`);
+        if (state.includes.frida) tail.push(`§ 0${++sn} · FRIDA SCRIPTS`);
+        if (state.includes.traffic) tail.push(`§ 0${++sn} · TRAFFIC CAPTURES (SANITIZED)`);
+        out.push(`<div class="muted small">${tail.join(" · ")}</div>`);
+        preview.innerHTML = out.join("");
+    }
+
+    function syncTemplateUI() {
+        $$(".tmpl-row").forEach((row) => {
+            const on = row.dataset.tmpl === state.template;
+            row.style.background = on ? "var(--bg-accent-panel)" : "var(--bg-panel)";
+            row.style.borderColor = on ? "var(--border-accent)" : "var(--border)";
+            const dot = row.querySelector(".tmpl-dot");
+            if (dot) { dot.textContent = on ? "●" : "○"; dot.style.color = on ? "var(--acid)" : ""; dot.classList.toggle("muted", !on); }
+            const label = row.querySelector(".t-mono");
+            if (label) { label.style.color = on ? "var(--acid)" : ""; label.style.fontWeight = on ? "700" : ""; }
+        });
+    }
+    function syncIncludeUI() {
+        $$(".incl-row").forEach((row) => {
+            const box = row.querySelector(".incl-box");
+            if (box) box.textContent = state.includes[row.dataset.incl] ? "[x]" : "[ ]";
+        });
+    }
+
+    // Template selection → re-render preview live.
+    $$(".tmpl-row").forEach((row) => row.addEventListener("click", () => {
+        state.template = row.dataset.tmpl;
+        syncTemplateUI();
+        renderPreview();
+    }));
+
+    // INCLUDE checkboxes → toggle (Mitigation Playbook is locked on).
+    $$(".incl-row").forEach((row) => {
+        if (row.dataset.locked === "true") return;
+        row.addEventListener("click", () => {
+            const id = row.dataset.incl;
+            state.includes[id] = !state.includes[id];
+            syncIncludeUI();
+            renderPreview();
         });
     });
 
-    $$(".btn.primary, .btn").forEach((btn) => {
-        const t = btn.textContent.trim();
-        const m = t.match(/^\[ (PDF|HTML|\.MD|JSON) \]$/);
-        if (!m) return;
+    // Export buttons → POST + download with inline status feedback.
+    $$(".export-btn").forEach((btn) => {
         btn.addEventListener("click", async () => {
-            if (!targetId) { alert("no project selected — scan one first."); return; }
-            const fmt = { "PDF": "pdf", "HTML": "html", ".MD": "markdown", "JSON": "json" }[m[1]];
-            const fd = new FormData();
-            fd.append("template", activeTemplate);
-            fd.append("fmt", fmt);
-            btn.textContent = "[ … ]";
-            const r = await fetch(`/v1/projects/${encodeURIComponent(targetId)}/report`, { method: "POST", body: fd });
-            if (!r.ok) {
-                const detail = await r.text();
-                btn.textContent = `[ ${m[1]} ✕ ]`; btn.style.color = "var(--sev-crit)";
-                alert(`report failed (${r.status}): ${detail.slice(0, 240)}`);
+            const status = $("#report-export-status");
+            if (!targetId) {
+                if (status) { status.textContent = "no project selected — pick or scan one first."; status.style.color = "var(--sev-high)"; }
                 return;
             }
-            const blob = await r.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url; a.download = `${targetId}.${fmt === "markdown" ? "md" : fmt}`;
-            a.click();
-            URL.revokeObjectURL(url);
-            btn.textContent = `[ ${m[1]} ✓ ]`; btn.style.color = "var(--acid)";
-            setTimeout(() => { btn.textContent = `[ ${m[1]} ]`; btn.style.color = ""; }, 1800);
+            const fmt = btn.dataset.fmt;
+            const orig = btn.textContent;
+            const fd = new FormData();
+            fd.append("template", state.template);
+            fd.append("fmt", fmt);
+            btn.textContent = "[ … ]"; btn.disabled = true;
+            if (status) { status.textContent = `generating ${state.template} · ${fmt}…`; status.style.color = ""; }
+            try {
+                const r = await fetch(`/v1/projects/${encodeURIComponent(targetId)}/report`, { method: "POST", body: fd });
+                if (!r.ok) { const d = await r.text(); throw new Error(`${r.status}: ${d.slice(0, 200)}`); }
+                const blob = await r.blob();
+                // Honour the filename the server actually produced. PDF/PNG
+                // gracefully degrade to HTML when WeasyPrint / Chromium are
+                // missing, so the response may be .html even though we asked
+                // for .pdf — saving the bytes under the requested extension is
+                // exactly what made the "corrupted PDF" (HTML-in-a-.pdf).
+                const wantExt = fmt === "markdown" ? "md" : fmt;
+                const cd = r.headers.get("content-disposition") || "";
+                const fnMatch = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+                const serverName = fnMatch ? decodeURIComponent(fnMatch[1].trim()) : "";
+                const realExt = (serverName.split(".").pop() || wantExt).toLowerCase();
+                const fname = serverName || `${targetId}.${realExt}`;
+                const degraded = realExt !== wantExt;
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url; a.download = fname;
+                document.body.appendChild(a); a.click(); a.remove();
+                URL.revokeObjectURL(url);
+                btn.textContent = orig.replace(" ]", " ✓ ]"); btn.style.color = "var(--acid)";
+                if (status) {
+                    if (degraded && wantExt === "pdf") {
+                        status.innerHTML = `downloaded <b>${fname}</b> — PDF needs WeasyPrint on the API host; served HTML instead.`;
+                        status.style.color = "var(--sev-high)";
+                    } else if (degraded && wantExt === "png") {
+                        status.innerHTML = `downloaded <b>${fname}</b> — PNG needs Chromium on the API host; served HTML instead.`;
+                        status.style.color = "var(--sev-high)";
+                    } else {
+                        status.textContent = `downloaded ${fname}`;
+                        status.style.color = "var(--acid)";
+                    }
+                }
+            } catch (e) {
+                btn.textContent = orig.replace(" ]", " ✕ ]"); btn.style.color = "var(--sev-crit)";
+                if (status) { status.textContent = `report failed — ${e.message}`; status.style.color = "var(--sev-crit)"; }
+            } finally {
+                btn.disabled = false;
+                setTimeout(() => { btn.textContent = orig; btn.style.color = ""; }, 2200);
+            }
         });
     });
+
+    // Initial paint.
+    syncTemplateUI();
+    syncIncludeUI();
+    await loadProject();
+    renderPreview();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

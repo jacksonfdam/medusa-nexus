@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core permissions for the main window: spawn the sidecars, talk to the local API.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "process:default",
+    "shell:allow-execute",
+    "shell:allow-spawn",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        { "name": "bin/mnexus-server", "sidecar": true },
+        { "name": "bin/adb", "sidecar": true, "args": true }
+      ]
+    }
+  ]
+}

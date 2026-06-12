@@ -75,6 +75,12 @@ MedusaNexus enumerates URL schemes during the static scan and flags the same pat
 
 The active-probe equivalent of the Firebase probe is checking whether the Universal Link's `apple-app-site-association` is reachable, whether it advertises the correct bundle identifier, and whether the verified domains match what the IPA expects. Standard HTTPS calls; no device required.
 
+### Watch the screen (read-only)
+
+You can also just see the device screen inside the web UI without a jailbroken iPhone — useful for following along while you drive an app by hand. Plug in the device, open the Devices screen, click the iPhone, and the panel renders a read-only mirror next to the device facts (UDID, iOS version, arch). Under the hood the host captures a PNG screenshot over lockdownd — via `pymobiledevice3` (the modern path, happy on iOS 17+ behind a developer tunnel) or `idevicescreenshot` from `libimobiledevice` as a fallback — and the browser polls it about once a second.
+
+This is a viewer, not a controller: there are no taps, swipes, or key events from the page. Those run over `adb`, which iOS doesn't speak, so live control stays an Android-only feature. But for "show me what the app is doing right now" the mirror is enough, and it needs nothing more than a paired, trusted device.
+
 ## What requires a jailbroken iPhone
 
 The decryption gap, plus three other capabilities, requires a jailbroken iPhone:

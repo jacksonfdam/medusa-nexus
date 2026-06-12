@@ -26,10 +26,12 @@ Memory Inspector) see [`RUNTIME.md`](RUNTIME.md).
 | `bagbak` (preferred) **or** `frida-ios-dump` | Decryption wrapper | `npm install -g bagbak` **or** `git clone https://github.com/AloneMonkey/frida-ios-dump ~/.mnexus/tools/frida-ios-dump && (cd $_ && pip install -r requirements.txt)` |
 | `ldid` (preferred) **or** `codesign` | Re-sign patched IPA | `brew install ldid` on macOS; `codesign` ships with Xcode |
 | `apktool` / `apksigner` | Only for the Android side — not used by iOS flow | — |
+| `pymobiledevice3` / `libimobiledevice` | Read-only screen mirror (no JB) | `pip install pymobiledevice3` · `brew install libimobiledevice` |
 
 **One-shot install:** `./scripts/setup.sh --ios-tools` installs
-bagbak + ldid + frida-ios-dump in one go and writes per-tool status
-at the end. Idempotent — safe to re-run.
+bagbak + ldid + frida-ios-dump **plus** `libimobiledevice` and
+`pymobiledevice3` (for the read-only screen mirror — see below) in one
+go and writes per-tool status at the end. Idempotent — safe to re-run.
 
 Check what's wired:
 
@@ -310,6 +312,74 @@ hardening (cert pinning, JB detection) buys time, not security.
 
 ---
 
+## Read-only screen mirror (no jailbreak)
+
+You don't need a jailbreak — or even decryption — just to **see** the
+device screen inside the web UI. Open `/#/devices`, click the iPhone,
+and the detail panel renders a read-only mirror alongside the device
+facts (name / UDID / iOS version / arch / Frida visibility).
+
+How it works: the API host captures a PNG screenshot over lockdownd and
+the browser polls it (~1.5s). There is no adb; full screen control (taps,
+swipes, key events) stays Android-only — but a set of lockdown-backed
+actions *is* wired into the same panel (see below). The capture path:
+
+```
+GET /v1/devices/{udid}/ios-screen.png
+  → pymobiledevice3 (preferred, iOS 17+ via a developer tunnel)
+  → idevicescreenshot (libimobiledevice fallback)
+  → 503 with per-tool diagnostics if neither is reachable
+```
+
+Setup:
+
+```bash
+./scripts/setup.sh --ios-tools     # installs pymobiledevice3 + libimobiledevice
+# then pair + trust the device on the phone (tap "Trust").
+```
+
+On iOS 17+ the developer services live behind a root-created tunnel. The
+server **starts it for you** on launch (`pymobiledevice3 remote tunneld`,
+via `sudo -n` using the venv interpreter). If sudo creds aren't cached it
+can't, and the startup log prints a one-liner — easiest is to run it once
+in the foreground:
+
+```bash
+mnexus ios-tunnel        # prompts for your sudo password; leave it open
+```
+
+Notes:
+
+- Use `mnexus ios-tunnel` (or the venv's python), **not** the system
+  `python3` — `sudo python3 -m pymobiledevice3 …` fails with
+  *No module named pymobiledevice3* because the package lives in the
+  project venv.
+- Opt out of the auto-start with `MNEXUS_IOS_TUNNEL=0`.
+
+### Device panel actions (lockdown, no tunnel)
+
+Beyond the mirror, the iPhone panel mirrors the adb-backed Android panel
+with actions that run over plain lockdown — so they work even without the
+developer tunnel:
+
+| Action | Endpoint | pymobiledevice3 |
+|---|---|---|
+| Reboot / Shutdown / Sleep | `POST /v1/devices/{udid}/ios/power/{action}` | `diagnostics restart\|shutdown\|sleep` |
+| Device facts | `GET /v1/devices/{udid}/ios/info` | `lockdown info` |
+| List / install / uninstall apps | `GET\|POST .../ios/apps[/install\|/{bundle}/uninstall]` | `apps list\|install\|uninstall` |
+| Live syslog (the logcat equivalent) | `GET .../ios/syslog` (stream) | `syslog live` |
+| Crash reports | `GET .../ios/crashes` | `crash ls` |
+| File browser (media partition) | `GET .../ios/afc?path=` | `afc ls` |
+
+Only the screen mirror (and other DVT/developer services) needs the
+tunnel; everything in the table is lockdown and works as soon as the
+device is paired + trusted.
+
+If the mirror shows "unavailable", the panel prints the exact hint
+returned by the endpoint (missing tool / unpaired device / no tunnel).
+
+---
+
 ## What's NOT implemented yet
 
 - **Virtual address → file offset translation.** You give the patcher
@@ -321,6 +391,5 @@ hardening (cert pinning, JB detection) buys time, not security.
   Tracked for a follow-up.
 - **`MemoryAccessMonitor`** for trace-on-read/write. The Memory
   Inspector ships scan / read / write but not the watchpoint feature.
-- **Setup script for iOS tools** (`scripts/setup.sh --ios-tools`)
-  to install bagbak + ldid + clone frida-ios-dump in one shot.
-  Currently each is a manual `npm` / `brew` / `git clone`.
+- **Live iOS control** (tap / swipe / key events / app install from the
+  UI). The mirror is read-only; control stays Android-only.
