@@ -2253,34 +2253,35 @@ async def _ios_screenshot_pmd3(udid: str, out_path: str) -> tuple[bytes, str]:
     # `--udid` goes through plain lockdown and fails on modern iOS. Try the
     # tunnel path first, then the deprecated lockdown path for older devices.
     variants = [
-        [*base, "developer", "dvt", "screenshot", out_path, "--tunnel", udid],
-        [*base, "developer", "screenshot", out_path, "--udid", udid],
+        ("dvt --tunnel", [*base, "developer", "dvt", "screenshot", out_path, "--tunnel", udid]),
+        ("lockdown --udid", [*base, "developer", "screenshot", out_path, "--udid", udid]),
     ]
-    diag = "no variant ran"
-    for cmd in variants:
+    diags: list[str] = []
+    for label, cmd in variants:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
         except asyncio.TimeoutError:
-            diag = "pymobiledevice3 timed out (is the developer tunnel up?)"
+            diags.append(f"[{label}] timed out (is the tunnel up?)")
             continue
         except OSError as exc:
-            diag = f"pymobiledevice3 spawn failed: {exc}"
+            diags.append(f"[{label}] spawn failed: {exc}")
             continue
         if proc.returncode != 0:
-            diag = f"pymobiledevice3 exit={proc.returncode} {stderr.decode('utf-8', 'replace').strip()[:180]}"
+            diags.append(f"[{label}] exit={proc.returncode} {stderr.decode('utf-8', 'replace').strip()[:200]}")
             continue
         try:
             data = Path(out_path).read_bytes()
-        except OSError as exc:
-            diag = f"pymobiledevice3 wrote no file: {exc}"
+        except OSError:
+            err = stderr.decode("utf-8", "replace").strip()[:200]
+            diags.append(f"[{label}] ran but wrote no file{(' · ' + err) if err else ''}")
             continue
         if data.startswith(_PNG_MAGIC):
             return data, "ok"
-        diag = "pymobiledevice3 output was not PNG"
-    return b"", diag
+        diags.append(f"[{label}] output was not PNG")
+    return b"", " | ".join(diags) or "no variant ran"
 
 
 async def _ios_screenshot_libimobile(udid: str, out_path: str) -> tuple[bytes, str]:
