@@ -1,0 +1,64 @@
+# MEDUSA NEXUS — dependency services only.
+#
+# The Python core (mnexus) runs HOST-SIDE as a Tauri sidecar — it owns the
+# device bridges (adb/usbmux), frida, tart/vphone, the proxies and the SQLite
+# store. Docker holds ONLY the heavy dependency services the engines talk to
+# over a URL (see mnexus/config.py: MNEXUS_*_URL). Nothing here touches USB.
+#
+# Bring up:   docker compose -f docker/docker-compose.yml up -d
+# The Rust core orchestrates this same file via bollard at app boot.
+#
+# Image tag is pinned to the app version on purpose — the app↔stack contract.
+# Override with NEXUS_STACK_TAG to test a mismatched stack.
+
+name: medusa-nexus
+
+x-image-tag: &tag ${NEXUS_STACK_TAG:-latest}
+
+services:
+  # ── MobSF: second-opinion static analysis (REST). config: MNEXUS_MOBSF_URL ──
+  mobsf:
+    image: opensecurity/mobile-security-framework-mobsf:latest
+    container_name: mnexus-mobsf
+    ports:
+      - "8000:8000"            # MNEXUS_MOBSF_URL=http://localhost:8000  (keep API off 8000!)
+    environment:
+      - MOBSF_API_ONLY=1
+    volumes:
+      - mobsf-data:/home/mobsf/.MobSF
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/api/v1/scans"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Moxy: dockerised MITM proxy. config: MNEXUS_MOXY_URL / MNEXUS_MOXY_PROXY_* ──
+  # CA push to the device still rides HOST adb — the container can't see USB.
+  moxy:
+    image: matank001/moxy:latest
+    container_name: mnexus-moxy
+    ports:
+      - "5000:5000"            # web UI  → MNEXUS_MOXY_URL
+      - "8081:8081"            # MITM    → MNEXUS_MOXY_PROXY_PORT
+    volumes:
+      - moxy-data:/root/.mitmproxy
+    restart: unless-stopped
+
+  # ── Ghidra-tools: the binary engines that are too heavy to bundle. ──
+  # Ghidra headless + jadx + apktool + JRE. Invoked via the `ghidra-docker`
+  # shim (scripts/shims/) which the engines call AS IF it were the local binary,
+  # so engines/ stays unmodified. Workspace is bind-mounted so artifacts land
+  # on the host (the cp-the-sqlite portability promise).
+  ghidra-tools:
+    image: ghcr.io/jacksonfdam/medusa-nexus/ghidra-tools:*tag
+    container_name: mnexus-ghidra-tools
+    volumes:
+      - ${MNEXUS_HOME:-~/.mnexus}/workspace:/workspace
+    # No port: driven via `docker exec` from the shim. Long-lived idle container.
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+volumes:
+  mobsf-data:
+  moxy-data:
