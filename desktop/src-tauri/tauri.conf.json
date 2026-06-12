@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MedusaNexus",
+  "version": "0.1.0",
+  "identifier": "com.umain.medusanexus",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "MedusaNexus — every head sees a different angle",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 680
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app", "deb", "appimage"],
+    "category": "DeveloperTool",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "externalBin": ["bin/adb", "bin/mnexus-server"],
+    "resources": {
+      "../../docker/docker-compose.yml": "stack/docker-compose.yml",
+      "../../docker/ghidra-tools.Dockerfile": "stack/ghidra-tools.Dockerfile",
+      "../../scripts/shims/": "shims/"
+    },
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

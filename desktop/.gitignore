@@ -1,0 +1,14 @@
+# node / vite
+node_modules
+dist
+*.tsbuildinfo
+
+# rust / tauri
+src-tauri/target
+src-tauri/gen
+
+# bundled binaries produced by scripts/build-bundle.sh (per target triple)
+src-tauri/bin
+
+# generated icons (run `pnpm tauri icon <logo.png>`)
+src-tauri/icons

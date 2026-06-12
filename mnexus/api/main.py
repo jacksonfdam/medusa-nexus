@@ -38,10 +38,88 @@ _TEMPLATES = _API_DIR / "templates"
 _STATIC = _API_DIR / "static"
 
 
+def _maybe_start_ios_tunnel(config: NexusConfig) -> None:
+    """Best-effort: bring up the pymobiledevice3 RemoteXPC tunnel daemon.
+
+    iOS 17+ exposes its developer services (screenshot, dvt, …) only over a
+    userspace tunnel that must be created by root. Without it the read-only
+    screen mirror can't capture. We start it here so it comes up with the
+    project instead of being a manual step the analyst forgets.
+
+    Rules of engagement:
+      * macOS only, and only when pymobiledevice3 is importable (installed by
+        ``scripts/setup.sh --ios-tools`` into this venv).
+      * We run the daemon with **this** interpreter (``sys.executable``) so the
+        venv's pymobiledevice3 is on the path even under sudo — the usual
+        "No module named pymobiledevice3" comes from sudo'ing the *system*
+        python, which we sidestep.
+      * ``sudo -n`` never blocks on a password prompt. If creds aren't cached
+        we log the exact one-liner to run and move on; nothing fatal.
+      * Opt out entirely with ``MNEXUS_IOS_TUNNEL=0``.
+    """
+    import importlib.util
+    import os
+    import subprocess
+    import sys
+    import time
+
+    log = logging.getLogger("mnexus.api.ios_tunnel")
+    if sys.platform != "darwin":
+        return
+    if os.environ.get("MNEXUS_IOS_TUNNEL", "").lower() in ("0", "off", "false", "no"):
+        return
+    if importlib.util.find_spec("pymobiledevice3") is None:
+        log.info("ios-tunnel: pymobiledevice3 not installed — skip (scripts/setup.sh --ios-tools)")
+        return
+
+    logs_dir = config.workspace.parent / "logs"
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logs_dir = config.workspace
+    pidfile = logs_dir / "ios-tunneld.pid"
+
+    # Already running? (pid alive)
+    try:
+        if pidfile.exists():
+            pid = int((pidfile.read_text().strip() or "0"))
+            if pid > 0:
+                os.kill(pid, 0)
+                log.info("ios-tunnel: already running (pid %s)", pid)
+                return
+    except (ValueError, OSError):
+        pass  # stale/garbage pidfile — fall through and (re)start
+
+    manual = f"sudo {sys.executable} -m pymobiledevice3 remote tunneld"
+    try:
+        logf = open(logs_dir / "ios-tunneld.log", "ab", buffering=0)
+        proc = subprocess.Popen(
+            ["sudo", "-n", sys.executable, "-m", "pymobiledevice3", "remote", "tunneld"],
+            stdout=logf, stderr=logf, stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError as exc:
+        log.warning("ios-tunnel: could not spawn (%s). Run manually: %s", exc, manual)
+        return
+
+    try:
+        pidfile.write_text(str(proc.pid))
+    except OSError:
+        pass
+    time.sleep(0.4)  # sudo -n bounces fast when creds aren't cached
+    if proc.poll() is not None and proc.returncode != 0:
+        log.warning(
+            "ios-tunnel: needs root and sudo creds aren't cached. Start it once with:\n  %s\n"
+            "  (or add a NOPASSWD sudoers entry; set MNEXUS_IOS_TUNNEL=0 to silence)", manual,
+        )
+    else:
+        log.info("ios-tunnel: started (pid %s) → %s", proc.pid, logs_dir / "ios-tunneld.log")
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     nexus = MedusaNexus(NexusConfig.from_env())
     app.state.nexus = nexus
+    _maybe_start_ios_tunnel(nexus.config)
     # VPhone calls go through the same audit log as adb calls. Wire the
     # engine's `recorder` to our `_record_external_run` shim so the UI can
     # render `transport="vphone"` rows alongside `transport="adb"`.

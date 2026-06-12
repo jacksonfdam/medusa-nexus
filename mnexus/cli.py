@@ -2130,6 +2130,33 @@ def serve(host: str, port: int, reload: bool) -> None:
     uvicorn.run("mnexus.api.main:app", host=host, port=port, reload=reload)
 
 
+@cli.command(name="ios-tunnel", help="Start the pymobiledevice3 RemoteXPC tunnel (iOS 17+ developer services). Needs sudo.")
+def ios_tunnel() -> None:
+    """Run the iOS tunnel daemon in the foreground.
+
+    iOS 17+ only exposes developer services (the screen-mirror screenshot,
+    dvt, …) over a userspace tunnel that root has to create. The server tries
+    to start this automatically, but if sudo creds aren't cached it can't —
+    run this once (it prompts for your password) and leave it open.
+
+    Uses *this* interpreter so the venv's pymobiledevice3 is found even under
+    sudo, sidestepping the "No module named pymobiledevice3" you get from
+    sudo'ing the system python.
+    """
+    import subprocess
+    import sys
+
+    cmd = ["sudo", sys.executable, "-m", "pymobiledevice3", "remote", "tunneld"]
+    console.print("[bold cyan]→ iOS tunnel[/bold cyan] · " + " ".join(cmd))
+    console.print("[dim]leave this running; needed for the iOS screen mirror on iOS 17+[/dim]\n")
+    try:
+        raise SystemExit(subprocess.call(cmd))
+    except KeyboardInterrupt:
+        console.print("\n[dim]tunnel stopped[/dim]")
+    except FileNotFoundError:
+        console.print("[red]pymobiledevice3 not installed[/red] — run [bold]scripts/setup.sh --ios-tools[/bold]")
+
+
 @cli.command(name="dev", help="Dev mode: install deps if needed, start server with reload, stream status.")
 @click.option("--host", default="127.0.0.1")
 @click.option("--port", default=8765, type=int)
