@@ -2130,6 +2130,123 @@ async def _silent_rm(adb_path: str, serial: str, path: str) -> None:
     await proc.communicate()
 
 
+# ─── iOS screen capture (read-only mirror source) ──────────────────────────
+# iOS has no adb; we shell out to an on-host capture tool. Both paths are
+# best-effort and return (bytes, diagnostic). pymobiledevice3 is preferred
+# (modern, iOS 17+ over a developer tunnel); idevicescreenshot is the
+# libimobiledevice fallback. Install both with `scripts/setup.sh --ios-tools`.
+
+async def _ios_screenshot_pmd3(udid: str, out_path: str) -> tuple[bytes, str]:
+    """Preferred iOS capture — pymobiledevice3 developer screenshot.
+
+    No jailbreak required. On iOS 17+ a developer tunnel must be running
+    (`sudo python -m pymobiledevice3 remote tunneld`) for the developer
+    services to answer; that shows up here as a non-zero exit we pass back.
+    """
+    import shutil
+
+    exe = shutil.which("pymobiledevice3")
+    if not exe:
+        return b"", "pymobiledevice3 not on PATH (scripts/setup.sh --ios-tools)"
+    # CLI shape moved around between releases; try the DVT form then the flat one.
+    variants = [
+        [exe, "developer", "dvt", "screenshot", out_path, "--udid", udid],
+        [exe, "developer", "screenshot", out_path, "--udid", udid],
+    ]
+    diag = "no variant ran"
+    for cmd in variants:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            diag = "pymobiledevice3 timed out (is the developer tunnel up?)"
+            continue
+        except OSError as exc:
+            diag = f"pymobiledevice3 spawn failed: {exc}"
+            continue
+        if proc.returncode != 0:
+            diag = f"pymobiledevice3 exit={proc.returncode} {stderr.decode('utf-8', 'replace').strip()[:180]}"
+            continue
+        try:
+            data = Path(out_path).read_bytes()
+        except OSError as exc:
+            diag = f"pymobiledevice3 wrote no file: {exc}"
+            continue
+        if data.startswith(_PNG_MAGIC):
+            return data, "ok"
+        diag = "pymobiledevice3 output was not PNG"
+    return b"", diag
+
+
+async def _ios_screenshot_libimobile(udid: str, out_path: str) -> tuple[bytes, str]:
+    """Fallback iOS capture — libimobiledevice idevicescreenshot."""
+    import shutil
+
+    exe = shutil.which("idevicescreenshot")
+    if not exe:
+        return b"", "idevicescreenshot not on PATH (brew install libimobiledevice)"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            exe, "-u", udid, out_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        return b"", "idevicescreenshot timed out"
+    except OSError as exc:
+        return b"", f"idevicescreenshot spawn failed: {exc}"
+    if proc.returncode != 0:
+        return b"", f"idevicescreenshot exit={proc.returncode} {stderr.decode('utf-8', 'replace').strip()[:180]}"
+    try:
+        data = Path(out_path).read_bytes()
+    except OSError as exc:
+        return b"", f"idevicescreenshot wrote no file: {exc}"
+    if not data.startswith(_PNG_MAGIC):
+        return b"", "idevicescreenshot output was not PNG (older devices emit TIFF)"
+    return data, "ok"
+
+
+@app.get("/v1/devices/{serial}/ios-screen.png")
+async def device_ios_screen(serial: str) -> Response:
+    """Single PNG screenshot of an iOS device — the read-only mirror source.
+
+    Tries pymobiledevice3 then idevicescreenshot. The UI polls this exactly
+    like the Android screencap fallback (no live control, view only).
+    """
+    import os
+    import tempfile
+
+    diag1 = diag2 = "not attempted"
+    with tempfile.TemporaryDirectory(prefix="mnexus-ios-") as tmp:
+        png, diag1 = await _ios_screenshot_pmd3(serial, os.path.join(tmp, "a.png"))
+        if png:
+            return Response(
+                content=png, media_type="image/png",
+                headers={"Cache-Control": "no-cache", "X-MNexus-Path": "pymobiledevice3"},
+            )
+        png2, diag2 = await _ios_screenshot_libimobile(serial, os.path.join(tmp, "b.png"))
+        if png2:
+            return Response(
+                content=png2, media_type="image/png",
+                headers={"Cache-Control": "no-cache", "X-MNexus-Path": "idevicescreenshot"},
+            )
+    raise HTTPException(
+        503,
+        detail={
+            "error": "ios_screencap_failed",
+            "pymobiledevice3": diag1,
+            "idevicescreenshot": diag2,
+            "hint": (
+                "Install tools: scripts/setup.sh --ios-tools. Pair + trust the device. "
+                "On iOS 17+, start a developer tunnel first: "
+                "sudo python -m pymobiledevice3 remote tunneld"
+            ),
+        },
+    )
+
+
 @app.get("/v1/devices/{serial}/screencap.png")
 async def device_screencap(serial: str) -> Response:
     """Single PNG. Tries exec-out fast path first, falls back to temp-file.
