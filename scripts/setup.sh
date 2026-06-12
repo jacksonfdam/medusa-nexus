@@ -76,7 +76,8 @@ Usage:
   scripts/setup.sh --burp       verify Burp Pro REST API + write MNEXUS_BURP_URL / _API_KEY to env
   scripts/setup.sh --burp-rest-api   install vmware-archive/burp-rest-api (jar + run.sh wrapper)
   scripts/setup.sh --moxy       start Moxy in Docker, extract the mitmproxy CA, push to attached device
-  scripts/setup.sh --ios-tools  install bagbak + ldid + frida-ios-dump (iOS pentesting toolkit)
+  scripts/setup.sh --ios-tools  install bagbak + ldid + frida-ios-dump + libimobiledevice + pymobiledevice3
+                                (iOS pentesting toolkit + read-only screen mirror)
   scripts/setup.sh --doctor     only run `mnexus doctor`
   scripts/setup.sh --help
 
@@ -733,7 +734,7 @@ _find_burp_suite_jar() {
 # installed; an analyst on macOS without npm can still get ldid + the
 # python clone.
 install_ios_tools() {
-    step "installing iOS pentesting toolkit (bagbak · ldid · frida-ios-dump)"
+    step "installing iOS toolkit (bagbak · ldid · frida-ios-dump · libimobiledevice · pymobiledevice3)"
 
     # bagbak — npm global. Preferred decryptor.
     if command -v bagbak >/dev/null 2>&1; then
@@ -804,6 +805,40 @@ install_ios_tools() {
         fi
     fi
 
+    # ── read-only screen mirror / device info — libimobiledevice + pymobiledevice3 ──
+    # These power the iOS "just view the screen" mirror (no jailbreak needed):
+    #   • pymobiledevice3  — modern, iOS 17+-friendly; screenshots over a
+    #     lockdown/developer tunnel. Preferred. (pip, into the project venv)
+    #   • idevicescreenshot (libimobiledevice) — classic fallback; also gives
+    #     UDID / version / name via ideviceinfo + idevice_id.
+    if command -v idevicescreenshot >/dev/null 2>&1; then
+        ok "libimobiledevice already installed ($(command -v idevicescreenshot))"
+    elif [[ "$PLATFORM" == "darwin" ]] && command -v brew >/dev/null 2>&1; then
+        say "brew install libimobiledevice"
+        brew install libimobiledevice >/dev/null 2>&1 \
+            && ok "libimobiledevice installed" \
+            || warn "brew install libimobiledevice failed."
+    elif [[ "$PLATFORM" == "linux" ]] && command -v apt-get >/dev/null 2>&1; then
+        say "sudo apt-get install -y libimobiledevice-utils usbmuxd"
+        sudo apt-get install -y libimobiledevice-utils usbmuxd >/dev/null 2>&1 \
+            && ok "libimobiledevice installed" \
+            || warn "apt-get install libimobiledevice-utils failed."
+    else
+        warn "no package manager for libimobiledevice on this platform."
+        hint "macOS:  brew install libimobiledevice"
+        hint "Linux:  sudo apt-get install -y libimobiledevice-utils usbmuxd"
+    fi
+
+    # pymobiledevice3 — preferred screenshot path. pip into the project venv.
+    if [[ -x "$VENV_DIR/bin/pip" ]]; then
+        say "pip install pymobiledevice3 (into project venv)"
+        "$VENV_DIR/bin/pip" install --quiet --upgrade pymobiledevice3 \
+            && ok "pymobiledevice3 installed" \
+            || warn "pip install pymobiledevice3 failed (needs Python >= 3.9)."
+    else
+        hint "venv not found — run scripts/setup.sh first, then re-run --ios-tools"
+    fi
+
     # Report what landed so the analyst can paste this into a setup log.
     step "iOS toolkit summary"
     command -v bagbak >/dev/null 2>&1 \
@@ -815,9 +850,19 @@ install_ios_tools() {
     [[ -f "$fid_dir/dump.py" ]] \
         && ok "frida-ios-dump: $fid_dir/dump.py" \
         || warn "frida-ios-dump: NOT installed"
+    command -v idevicescreenshot >/dev/null 2>&1 \
+        && ok "idevicescreenshot: $(command -v idevicescreenshot)" \
+        || warn "idevicescreenshot: NOT installed (screen mirror needs this or pymobiledevice3)"
+    if [[ -x "$VENV_DIR/bin/python" ]] && "$VENV_DIR/bin/python" -c "import pymobiledevice3" >/dev/null 2>&1; then
+        ok "pymobiledevice3: installed in venv"
+    else
+        warn "pymobiledevice3: NOT installed"
+    fi
 
     hint "wire it up: source $MNEXUS_ENV_FILE && mnexus doctor"
     hint "first decrypt: mnexus then /decrypt-ios <bundle_id>"
+    hint "screen view: pair + trust the iPhone first; iOS 17+ may need a developer tunnel"
+    hint "  (sudo python -m pymobiledevice3 remote tunneld) before screenshots work"
 }
 
 
