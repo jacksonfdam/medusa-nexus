@@ -57,7 +57,6 @@ def _maybe_start_ios_tunnel(config: NexusConfig) -> None:
         we log the exact one-liner to run and move on; nothing fatal.
       * Opt out entirely with ``MNEXUS_IOS_TUNNEL=0``.
     """
-    import importlib.util
     import os
     import subprocess
     import sys
@@ -68,8 +67,9 @@ def _maybe_start_ios_tunnel(config: NexusConfig) -> None:
         return
     if os.environ.get("MNEXUS_IOS_TUNNEL", "").lower() in ("0", "off", "false", "no"):
         return
-    if importlib.util.find_spec("pymobiledevice3") is None:
-        log.info("ios-tunnel: pymobiledevice3 not installed — skip (scripts/setup.sh --ios-tools)")
+    base = _pmd3_argv()
+    if base is None:
+        log.info("ios-tunnel: pymobiledevice3 not found — skip (scripts/setup.sh --ios-tools)")
         return
 
     logs_dir = config.workspace.parent / "logs"
@@ -90,11 +90,11 @@ def _maybe_start_ios_tunnel(config: NexusConfig) -> None:
     except (ValueError, OSError):
         pass  # stale/garbage pidfile — fall through and (re)start
 
-    manual = f"sudo {sys.executable} -m pymobiledevice3 remote tunneld"
+    manual = "mnexus ios-tunnel"
     try:
         logf = open(logs_dir / "ios-tunneld.log", "ab", buffering=0)
         proc = subprocess.Popen(
-            ["sudo", "-n", sys.executable, "-m", "pymobiledevice3", "remote", "tunneld"],
+            ["sudo", "-n", *base, "remote", "tunneld"],
             stdout=logf, stderr=logf, stdin=subprocess.DEVNULL, start_new_session=True,
         )
     except OSError as exc:
@@ -2214,22 +2214,44 @@ async def _silent_rm(adb_path: str, serial: str, path: str) -> None:
 # (modern, iOS 17+ over a developer tunnel); idevicescreenshot is the
 # libimobiledevice fallback. Install both with `scripts/setup.sh --ios-tools`.
 
+def _pmd3_argv() -> list[str] | None:
+    """Resolve how to invoke pymobiledevice3 from *this* process.
+
+    The server may run under a different interpreter than the one
+    ``--ios-tools`` installed the package into (e.g. system python vs the
+    project venv), so we don't assume ``sys.executable`` has it. Order:
+    console script on PATH → the project venv's console script → an
+    interpreter that imports it. Returns the argv prefix, or None.
+    """
+    import importlib.util
+    import shutil
+    import sys
+
+    on_path = shutil.which("pymobiledevice3")
+    if on_path:
+        return [on_path]
+    venv_bin = Path(__file__).resolve().parent.parent.parent / ".venv" / "bin" / "pymobiledevice3"
+    if venv_bin.exists():
+        return [str(venv_bin)]
+    if importlib.util.find_spec("pymobiledevice3") is not None:
+        return [sys.executable, "-m", "pymobiledevice3"]
+    return None
+
+
 async def _ios_screenshot_pmd3(udid: str, out_path: str) -> tuple[bytes, str]:
     """Preferred iOS capture — pymobiledevice3 developer screenshot.
 
     No jailbreak required. On iOS 17+ a developer tunnel must be running
-    (`sudo python -m pymobiledevice3 remote tunneld`) for the developer
-    services to answer; that shows up here as a non-zero exit we pass back.
+    (`mnexus ios-tunnel`) for the developer services to answer; that shows
+    up here as a non-zero exit we pass back.
     """
-    import shutil
-
-    exe = shutil.which("pymobiledevice3")
-    if not exe:
-        return b"", "pymobiledevice3 not on PATH (scripts/setup.sh --ios-tools)"
+    base = _pmd3_argv()
+    if not base:
+        return b"", "pymobiledevice3 not found (scripts/setup.sh --ios-tools)"
     # CLI shape moved around between releases; try the DVT form then the flat one.
     variants = [
-        [exe, "developer", "dvt", "screenshot", out_path, "--udid", udid],
-        [exe, "developer", "screenshot", out_path, "--udid", udid],
+        [*base, "developer", "dvt", "screenshot", out_path, "--udid", udid],
+        [*base, "developer", "screenshot", out_path, "--udid", udid],
     ]
     diag = "no variant ran"
     for cmd in variants:

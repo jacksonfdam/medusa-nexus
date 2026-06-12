@@ -2130,6 +2130,40 @@ def serve(host: str, port: int, reload: bool) -> None:
     uvicorn.run("mnexus.api.main:app", host=host, port=port, reload=reload)
 
 
+def _resolve_pmd3() -> list[str] | None:
+    """Locate pymobiledevice3 and return the argv prefix to invoke it.
+
+    `mnexus` may run under the system python while `--ios-tools` installs the
+    package into the project venv, so we can't assume `sys.executable` has it.
+    Resolution order: console script on PATH → the project venv's console
+    script → any interpreter (current, then venv python) that imports it.
+    Returns None if nothing has it.
+    """
+    import importlib.util
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    on_path = shutil.which("pymobiledevice3")
+    if on_path:
+        return [on_path]
+    venv_bin = Path(__file__).resolve().parent.parent / ".venv" / "bin" / "pymobiledevice3"
+    if venv_bin.exists():
+        return [str(venv_bin)]
+    candidates = [sys.executable, str(Path(__file__).resolve().parent.parent / ".venv" / "bin" / "python")]
+    if importlib.util.find_spec("pymobiledevice3") is not None:
+        return [sys.executable, "-m", "pymobiledevice3"]
+    for py in candidates[1:]:
+        if py and Path(py).exists():
+            try:
+                if subprocess.run([py, "-c", "import pymobiledevice3"], capture_output=True).returncode == 0:
+                    return [py, "-m", "pymobiledevice3"]
+            except OSError:
+                pass
+    return None
+
+
 @cli.command(name="ios-tunnel", help="Start the pymobiledevice3 RemoteXPC tunnel (iOS 17+ developer services). Needs sudo.")
 def ios_tunnel() -> None:
     """Run the iOS tunnel daemon in the foreground.
@@ -2138,15 +2172,19 @@ def ios_tunnel() -> None:
     dvt, …) over a userspace tunnel that root has to create. The server tries
     to start this automatically, but if sudo creds aren't cached it can't —
     run this once (it prompts for your password) and leave it open.
-
-    Uses *this* interpreter so the venv's pymobiledevice3 is found even under
-    sudo, sidestepping the "No module named pymobiledevice3" you get from
-    sudo'ing the system python.
     """
     import subprocess
     import sys
 
-    cmd = ["sudo", sys.executable, "-m", "pymobiledevice3", "remote", "tunneld"]
+    base = _resolve_pmd3()
+    if base is None:
+        console.print("[red]pymobiledevice3 not found[/red] on PATH, in the project venv, or for this interpreter.")
+        console.print("Install it for the interpreter that runs the tunnel as root:")
+        console.print(f"  [bold]sudo {sys.executable} -m pip install pymobiledevice3[/bold]")
+        console.print("…or run [bold]scripts/setup.sh --ios-tools[/bold] (installs into the project venv).")
+        raise SystemExit(1)
+
+    cmd = ["sudo", *base, "remote", "tunneld"]
     console.print("[bold cyan]→ iOS tunnel[/bold cyan] · " + " ".join(cmd))
     console.print("[dim]leave this running; needed for the iOS screen mirror on iOS 17+[/dim]\n")
     try:
@@ -2154,7 +2192,7 @@ def ios_tunnel() -> None:
     except KeyboardInterrupt:
         console.print("\n[dim]tunnel stopped[/dim]")
     except FileNotFoundError:
-        console.print("[red]pymobiledevice3 not installed[/red] — run [bold]scripts/setup.sh --ios-tools[/bold]")
+        console.print("[red]pymobiledevice3 not runnable[/red] — run [bold]scripts/setup.sh --ios-tools[/bold]")
 
 
 @cli.command(name="dev", help="Dev mode: install deps if needed, start server with reload, stream status.")
