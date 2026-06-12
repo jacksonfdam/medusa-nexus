@@ -334,9 +334,26 @@ Setup:
 
 ```bash
 ./scripts/setup.sh --ios-tools     # installs pymobiledevice3 + libimobiledevice
-# pair + trust the device first; on iOS 17+ start a developer tunnel:
-sudo python -m pymobiledevice3 remote tunneld
+# then pair + trust the device on the phone (tap "Trust").
 ```
+
+On iOS 17+ the developer services live behind a root-created tunnel. The
+server **starts it for you** on launch (`pymobiledevice3 remote tunneld`,
+via `sudo -n` using the venv interpreter). If sudo creds aren't cached it
+can't, and the startup log prints a one-liner — easiest is to run it once
+in the foreground:
+
+```bash
+mnexus ios-tunnel        # prompts for your sudo password; leave it open
+```
+
+Notes:
+
+- Use `mnexus ios-tunnel` (or the venv's python), **not** the system
+  `python3` — `sudo python3 -m pymobiledevice3 …` fails with
+  *No module named pymobiledevice3* because the package lives in the
+  project venv.
+- Opt out of the auto-start with `MNEXUS_IOS_TUNNEL=0`.
 
 If the mirror shows "unavailable", the panel prints the exact hint
 returned by the endpoint (missing tool / unpaired device / no tunnel).

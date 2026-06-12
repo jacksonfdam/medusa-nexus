@@ -282,7 +282,9 @@ git clone https://github.com/AloneMonkey/frida-ios-dump ~/.mnexus/tools/frida-io
 You can also just **watch the screen** without any of that: plug in the
 iPhone, open `/#/devices`, click it, and the panel renders a read-only
 mirror (screenshot poll over lockdownd — no jailbreak, no decryption).
-Live control stays Android-only.
+Live control stays Android-only. On iOS 17+ the developer tunnel the
+mirror needs is started for you on server launch; if sudo creds aren't
+cached, run `mnexus ios-tunnel` once. Opt out with `MNEXUS_IOS_TUNNEL=0`.
 
 Then drive the full workflow from the REPL:
 

@@ -861,8 +861,8 @@ install_ios_tools() {
 
     hint "wire it up: source $MNEXUS_ENV_FILE && mnexus doctor"
     hint "first decrypt: mnexus then /decrypt-ios <bundle_id>"
-    hint "screen view: pair + trust the iPhone first; iOS 17+ may need a developer tunnel"
-    hint "  (sudo python -m pymobiledevice3 remote tunneld) before screenshots work"
+    hint "screen view: pair + trust the iPhone first. iOS 17+ needs a developer tunnel —"
+    hint "  the server auto-starts it, or run it yourself once:  mnexus ios-tunnel"
 }
 
 
