@@ -76,6 +76,8 @@ packages = ["mnexus"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Jython 2.7 post-script executed by Ghidra headless, not importable host Python.
+extend-exclude = ["mnexus/engines/ghidra_scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM"]
@@ -86,6 +88,7 @@ python_version = "3.11"
 strict = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
+exclude = ['mnexus/engines/ghidra_scripts/']
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

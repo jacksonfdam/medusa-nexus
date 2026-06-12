@@ -12,13 +12,20 @@ Mach-O magic (FE ED FA CE/CF or CA FE BA BE) → iOS-flavoured patterns.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+import shutil
 import zipfile
 from pathlib import Path
+from typing import cast
 
 from mnexus.engines.base import AnalysisContext, BaseEngine, EngineStatus
 from mnexus.models.attack_surface import CryptoOperation
 from mnexus.models.finding import Finding, FindingCategory, Severity
+
+# Bundled Ghidra headless post-script (Jython). Copied into the workspace at
+# run time so it's reachable both for a local Ghidra and the containerised one.
+_GHIDRA_POSTSCRIPT = Path(__file__).parent / "ghidra_scripts" / "nexus_dump.py"
 
 # Patterns shared by both formats — compiled cryptography libs reuse the same
 # C symbol names whether the host is Android NDK or iOS.
@@ -102,10 +109,27 @@ class GhidraEngine(BaseEngine):
         return EngineStatus(
             name=self.name,
             installed=True,
-            version="headless",
+            version=self._ghidra_version(),
             path=str(self.config.ghidra_path),
             message="ready to dissect native blobs",
         )
+
+    def _ghidra_version(self) -> str:
+        """Best-effort real version from `application.properties`.
+
+        Falls back to ``"headless"`` when unreadable — e.g. the containerised
+        shim, where the actual install lives inside Docker, not on this path.
+        """
+        if not self.config.ghidra_path:
+            return "headless"
+        props = self.config.ghidra_path / "Ghidra" / "application.properties"
+        try:
+            for line in props.read_text(encoding="utf-8").splitlines():
+                if line.startswith("application.version="):
+                    return line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+        return "headless"
 
     async def execute(self, context: AnalysisContext) -> list[Finding]:
         """Read every native binary in the APK or IPA; emit findings.
@@ -143,7 +167,7 @@ class GhidraEngine(BaseEngine):
                         result = self._scan_macho(n, data, findings, crypto_ops)
                         if result.get("jb_detected"):
                             jb_detected = True
-                            jb_library = jb_library or result.get("jb_library")
+                            jb_library = jb_library or cast("str | None", result.get("jb_library"))
                     # else: not a native binary, skip silently.
         except Exception:  # noqa: BLE001
             return findings
@@ -162,8 +186,7 @@ class GhidraEngine(BaseEngine):
         # separate Findings with near-identical title/description. Group by
         # (severity, category, normalised-title) and merge their location
         # + evidence into one entry per signal.
-        findings = _collapse_native_duplicates(findings)
-        return findings
+        return _collapse_native_duplicates(findings)
 
     def _scan_elf(self, name: str, data: bytes, findings: list[Finding], crypto_ops: list[CryptoOperation]) -> None:
         """Android-flavoured native scan — ELF .so file."""
@@ -374,7 +397,7 @@ class GhidraEngine(BaseEngine):
         if fmt == "elf":
             jni_exports = _extract_jni_exports(data)
 
-        return {
+        result: dict[str, object] = {
             "format": fmt,
             "name": name,
             "size": len(data),
@@ -383,7 +406,83 @@ class GhidraEngine(BaseEngine):
             "hardcoded_urls": _extract_hardcoded_urls(data),
             "hardcoded_keys": _extract_aiza_keys(data),
             "crypto_operations": [c.model_dump(mode="json") if hasattr(c, "model_dump") else dict(c.__dict__) for c in crypto_ops],
+            "engine_mode": "scanner",
         }
+
+        # ── Additive deepening with real Ghidra headless, when available. ──
+        # Symbol-table truth beats regex byte-matching. This NEVER regresses:
+        # if Ghidra is absent or the run fails, `_run_headless` returns {} and
+        # the byte-scan result above stands on its own. Slow (full auto-analysis
+        # per binary) — which is why it lives here, in the on-demand per-binary
+        # view, not in the ingest fan-out (`execute`).
+        deep = await self._run_headless(so_path)
+        if deep:
+            funcs = cast("list[str]", deep.get("functions") or [])
+            imports = cast("list[str]", deep.get("imports") or [])
+            strings = cast("list[str]", deep.get("strings") or [])
+            jni = cast("list[str]", deep.get("jni_exports") or [])
+            result["engine_mode"] = "headless"
+            result["ghidra"] = {
+                "language": deep.get("language"),
+                "function_count": len(funcs),
+                "functions": funcs[:500],
+                "imports": imports,
+                "strings": strings[:200],
+            }
+            # Ghidra's symbol-derived JNI exports supersede the regex guess.
+            if jni:
+                result["jni_exports"] = sorted(set(jni))[:200]
+
+        return result
+
+    async def _run_headless(self, target: Path) -> dict[str, object]:
+        """Run real Ghidra `analyzeHeadless` on one native binary; return its dump.
+
+        Best-effort and side-effect-free on failure — returns ``{}`` on any
+        problem so the caller keeps its byte-scan findings. Works identically
+        against a local install and the containerised Ghidra: every path passed
+        lives under ``config.workspace`` (the compose bind-mount), so the
+        ``ghidra-docker`` shim's host→/workspace translation covers them all.
+        """
+        ghidra = self.config.ghidra_path
+        if not ghidra or not (ghidra / "support" / "analyzeHeadless").exists():
+            return {}
+
+        ws = self.config.workspace
+        scripts_dir = ws / ".ghidra" / "scripts"
+        proj_dir = ws / ".ghidra" / "proj"
+        out_dir = ws / ".ghidra" / "out"
+        try:
+            for d in (scripts_dir, proj_dir, out_dir):
+                d.mkdir(parents=True, exist_ok=True)
+            # Ship the post-script into the workspace so the container sees it.
+            shutil.copy2(_GHIDRA_POSTSCRIPT, scripts_dir / _GHIDRA_POSTSCRIPT.name)
+        except OSError:
+            return {}
+
+        token = f"{target.stem}-{abs(hash(str(target))) & 0xFFFFFF:06x}"
+        out_json = out_dir / f"{token}.json"
+        out_json.unlink(missing_ok=True)
+
+        cmd = [
+            str(ghidra / "support" / "analyzeHeadless"),
+            str(proj_dir), f"nexus_{token}",
+            "-import", str(target),
+            "-scriptPath", str(scripts_dir),
+            "-postScript", _GHIDRA_POSTSCRIPT.name, str(out_json),
+            "-deleteProject", "-overwrite",
+        ]
+        try:
+            await self._run(cmd)
+            if not out_json.exists():
+                return {}
+            parsed = json.loads(out_json.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return {}
+        finally:
+            out_json.unlink(missing_ok=True)
+
+        return {str(k): v for k, v in parsed.items()} if isinstance(parsed, dict) else {}
 
     async def _run(self, cmd: list[str]) -> str:
         proc = await asyncio.create_subprocess_exec(
@@ -441,9 +540,11 @@ def _looks_like_main_macho(name: str) -> bool:
     if len(parts) == 3 and parts[1].endswith(".app") and not parts[2].endswith((".plist", ".png", ".jpg", ".car", ".nib", ".strings", ".storyboardc")):
         return True
     # Payload/Foo.app/Frameworks/Bar.framework/Bar
-    if "/Frameworks/" in name and len(parts) >= 5 and parts[-1].split(".")[-1] not in ("plist", "nib", "strings"):
-        return True
-    return False
+    return (
+        "/Frameworks/" in name
+        and len(parts) >= 5
+        and parts[-1].split(".")[-1] not in ("plist", "nib", "strings")
+    )
 
 
 def _collapse_native_duplicates(findings: list[Finding]) -> list[Finding]:
@@ -454,8 +555,8 @@ def _collapse_native_duplicates(findings: list[Finding]) -> list[Finding]:
     "Anti-Frida tripwire in liba.so / libb.so / …" rows. We collapse those
     into one Finding whose location is the comma-joined list of files.
     """
-    grouped: dict[tuple, Finding] = {}
-    extras: dict[tuple, list[str]] = {}
+    grouped: dict[tuple[Severity, FindingCategory, str], Finding] = {}
+    extras: dict[tuple[Severity, FindingCategory, str], list[str]] = {}
 
     for f in findings:
         # Normalise: drop trailing "in <filename>" so libraries with the
