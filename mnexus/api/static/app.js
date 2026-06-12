@@ -3207,8 +3207,20 @@ function openDeviceDetail(serial, d) {
     if (d?.platform === "ios") {
         if (_mirrorTimer) { clearInterval(_mirrorTimer); _mirrorTimer = null; }
         host.innerHTML = `
-          <div class="device-detail" style="grid-template-columns:1fr">
-            <div class="col" style="gap:12px">
+          <div class="device-detail">
+            <div class="device-mirror" id="ios-mirror">
+              <div class="mirror-stage">
+                <img id="ios-mirror-img" alt="iOS screen mirror" />
+              </div>
+              <div class="mirror-foot">
+                <span>MIRROR · iOS</span>
+                <span>·</span>
+                <span>read-only · poll</span>
+                <span class="spacer"></span>
+                <span id="ios-mirror-status" style="color:var(--acid)">connecting…</span>
+              </div>
+            </div>
+            <div class="col">
               <section class="panel">
                 <div class="panel-head">// iOS DEVICE</div>
                 <div class="panel-body col" style="gap:8px">
@@ -3228,7 +3240,7 @@ function openDeviceDetail(serial, d) {
               <section class="panel">
                 <div class="panel-head">// ANALYSIS</div>
                 <div class="panel-body col" style="gap:8px">
-                  <div class="muted small">Live device control (screen mirror, shell, key events, app install) runs over <b>adb</b> and is Android-only. For iOS, MedusaNexus works at the binary level:</div>
+                  <div class="muted small">The mirror on the left is <b>read-only</b> (screenshot poll over lockdownd). Live <b>control</b> — shell, key events, app install — runs over <b>adb</b> and is Android-only. For deeper work, analyse the app binary:</div>
                   <div class="row" style="gap:8px;flex-wrap:wrap">
                     <a class="btn primary" href="#/scan">[ ↑ UPLOAD IPA TO SCAN ]</a>
                     <a class="btn" href="#/recipes?platform=ios">[ iOS RECIPES ]</a>
@@ -3244,6 +3256,50 @@ function openDeviceDetail(serial, d) {
             try { await navigator.clipboard.writeText(d.udid || serial); if (st) { st.textContent = "copied"; st.style.color = "var(--acid)"; } }
             catch { if (st) { st.textContent = d.udid || serial; } }
         });
+
+        // ── read-only mirror: poll the iOS screenshot endpoint ──
+        // No adb here — the server captures via pymobiledevice3 / idevicescreenshot.
+        // iOS screenshots are slower than adb screencap, so poll at ~1.5s.
+        const imgEl = $("#ios-mirror-img");
+        const stEl = $("#ios-mirror-status");
+        let inFlight = false, fails = 0, lastUrl = null;
+        const setSt = (t, c) => { if (stEl) { stEl.textContent = t; stEl.style.color = c || "var(--acid)"; } };
+        const iosPoll = async () => {
+            if (inFlight) return;
+            inFlight = true;
+            try {
+                const r = await fetch(`/v1/devices/${encodeURIComponent(serial)}/ios-screen.png?t=${Date.now()}`, { cache: "no-store" });
+                if (!r.ok) {
+                    fails++;
+                    let hint = "";
+                    try { const j = await r.json(); hint = (j.detail && j.detail.hint) || ""; } catch (_) { /* non-JSON */ }
+                    setSt(`unavailable · ${r.status}`, "var(--sev-high)");
+                    const stage = imgEl && imgEl.parentElement;
+                    if (fails === 1 && stage && !$("#ios-mirror-msg")) {
+                        stage.insertAdjacentHTML("beforeend", `<div id="ios-mirror-msg" class="muted small" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:18px;line-height:1.5">iOS screenshot unavailable.<br>${escapeHtml(hint || "Run scripts/setup.sh --ios-tools, pair + trust the device, and on iOS 17+ start the developer tunnel.")}</div>`);
+                    }
+                    return;
+                }
+                const blob = await r.blob();
+                const url = URL.createObjectURL(blob);
+                if (imgEl) { imgEl.src = url; imgEl.style.opacity = "1"; }
+                const msg = $("#ios-mirror-msg"); if (msg) msg.remove();
+                if (lastUrl) URL.revokeObjectURL(lastUrl);
+                lastUrl = url; fails = 0;
+                setSt(`live · poll · ${r.headers.get("X-MNexus-Path") || "?"}`);
+            } catch (e) {
+                fails++;
+                setSt("network error", "var(--sev-crit)");
+            } finally {
+                inFlight = false;
+            }
+        };
+        iosPoll();
+        _mirrorTimer = setInterval(() => {
+            if (!location.hash.startsWith("#/devices")) { clearInterval(_mirrorTimer); return; }
+            if (_activeSerial !== serial) { clearInterval(_mirrorTimer); return; }
+            iosPoll();
+        }, 1500);
         return;
     }
 
