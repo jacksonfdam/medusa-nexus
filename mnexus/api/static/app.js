@@ -2544,6 +2544,18 @@ function view_project_report(ctx) {
  *  SCREEN 22 — Report Generator
  * ═══════════════════════════════════════════════════════════════════════════ */
 function view_report() {
+    const tmpls = [
+        ["technical", "TECHNICAL"],
+        ["executive", "EXECUTIVE"],
+        ["owasp-matrix", "OWASP MATRIX"],
+        ["diff", "DIFF (v4.11 → v4.12)"],
+    ];
+    const includes = [
+        ["playbook", "Mitigation Playbook", true],
+        ["evidence", "Evidence snippets", false],
+        ["frida", "Frida scripts used", false],
+        ["traffic", "Traffic captures (sanitized)", false],
+    ];
     return h`
     <div class="main">
       ${sectionHeader("R", "22 // FINDING + REPORT", "REPORT GENERATOR")}
@@ -2551,29 +2563,36 @@ function view_report() {
         <section class="panel" style="width:320px;flex:none">
           <div class="panel-head">// TEMPLATE</div>
           <div class="panel-body col" style="gap:8px">
-            <div class="row" style="padding:10px;background:var(--bg-accent-panel);border:1px solid var(--border-accent);border-radius:2px"><span style="color:var(--acid)">●</span><span class="t-mono" style="color:var(--acid);font-weight:700">TECHNICAL</span></div>
-            <div class="row" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="muted">○</span><span class="t-mono">EXECUTIVE</span></div>
-            <div class="row" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="muted">○</span><span class="t-mono">OWASP MATRIX</span></div>
-            <div class="row" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="muted">○</span><span class="t-mono">DIFF (v4.11 → v4.12)</span></div>
+            <label class="row small muted" style="gap:6px;align-items:center">project
+              <select id="report-project" style="flex:1;background:var(--bg-panel);color:inherit;border:1px solid var(--border);border-radius:2px;padding:6px"></select>
+            </label>
+            <div id="report-templates" class="col" style="gap:8px">
+              ${tmpls.map(([id, label]) => `
+                <div class="tmpl-row row" data-tmpl="${id}" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;cursor:pointer">
+                  <span class="tmpl-dot muted">○</span><span class="t-mono">${label}</span>
+                </div>`).join("")}
+            </div>
             <div style="height:1px;background:var(--border);margin:8px 0"></div>
             <div class="panel-head" style="background:transparent;border:0;padding:0">// INCLUDE</div>
-            <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span style="color:var(--acid);flex:1">Mitigation Playbook</span><span class="small" style="color:var(--magenta)">mandatory</span></div>
-            <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span>Evidence snippets</span></div>
-            <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span>Frida scripts used</span></div>
-            <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span>Traffic captures (sanitized)</span></div>
+            <div id="report-includes" class="col" style="gap:6px">
+              ${includes.map(([id, label, locked]) => `
+                <div class="incl-row row" data-incl="${id}" data-locked="${locked}" style="cursor:${locked ? "default" : "pointer"}">
+                  <span class="incl-box" style="font-weight:700;color:var(--acid)">[x]</span>
+                  <span style="flex:1${locked ? ";color:var(--acid)" : ""}">${label}</span>
+                  ${locked ? '<span class="small" style="color:var(--magenta)">mandatory</span>' : ""}
+                </div>`).join("")}
+            </div>
             <div style="height:1px;background:var(--border);margin:8px 0"></div>
             <div class="panel-head" style="background:transparent;border:0;padding:0">// EXPORT</div>
-            <div class="row" style="gap:8px"><button class="btn primary">[ PDF ]</button><button class="btn">[ HTML ]</button></div>
-            <div class="row" style="gap:8px"><button class="btn">[ .MD ]</button><button class="btn">[ JSON ]</button></div>
+            <div class="row" style="gap:8px"><button class="btn primary export-btn" data-fmt="pdf">[ PDF ]</button><button class="btn export-btn" data-fmt="html">[ HTML ]</button></div>
+            <div class="row" style="gap:8px"><button class="btn export-btn" data-fmt="markdown">[ .MD ]</button><button class="btn export-btn" data-fmt="json">[ JSON ]</button></div>
+            <div id="report-export-status" class="small muted"></div>
           </div>
         </section>
         <section class="panel grow">
           <div class="panel-head" id="report-preview-head">// PREVIEW</div>
           <div class="panel-body col" style="gap:12px;background:#050505" id="report-preview">
-            <div class="empty-state">
-              <span class="muted small uppercase">no project picked yet</span>
-              <div class="muted small" style="margin-top:6px">scan an APK at <a href="#/scan">/#/scan</a>, then come back to render its real Mitigation Playbook here.</div>
-            </div>
+            <div class="empty-state"><span class="muted small uppercase">loading…</span></div>
           </div>
         </section>
       </div>
@@ -5981,106 +6000,210 @@ async function mount_report(ctx) {
     const queryProj = (ctx.hash || "").split("?")[1]?.split("project=")[1];
     let targetId = (queryProj && decodeURIComponent(queryProj))
         || ctx.params.id
-        || projects[0]?.id;
-    let activeTemplate = "technical";
-    if (!targetId && !projects.length) {
-        const main = $(".main");
-        if (main) main.insertAdjacentHTML("afterbegin", `<div class="empty-state" style="margin-bottom:8px;color:var(--sev-high)">no projects yet — <a href="#/scan">ingest one</a></div>`);
+        || projects[0]?.id
+        || null;
+
+    const state = {
+        template: "technical",
+        includes: { playbook: true, evidence: false, frida: false, traffic: false },
+        project: null,
+    };
+    const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+    const sevClass = (sev) => (sev === "critical" ? "crit" : sev === "medium" ? "med" : sev);
+
+    // ── project picker ──
+    const sel = $("#report-project");
+    if (sel) {
+        if (!projects.length) {
+            sel.innerHTML = `<option value="">— no projects —</option>`;
+        } else {
+            sel.innerHTML = projects
+                .map((p) => `<option value="${p.id}">${escapeHtml(p.package_name || p.id)} (${p.id})</option>`)
+                .join("");
+            if (targetId) sel.value = targetId;
+            targetId = sel.value || targetId;
+        }
+        sel.addEventListener("change", async () => {
+            targetId = sel.value || null;
+            await loadProject();
+            renderPreview();
+        });
     }
 
-    // ── live report preview from the chosen project ──
-    const previewHead = $("#report-preview-head");
-    const preview = $("#report-preview");
-    if (preview) {
-        if (!targetId) {
-            preview.innerHTML = `<div class="empty-state"><span class="muted small uppercase">no project picked yet</span></div>`;
-        } else {
-            try {
-                const project = await getJSON(`/v1/projects/${encodeURIComponent(targetId)}`);
-                const findings = (project.attack_surface?.findings || []);
-                const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-                const top = findings
-                    .filter((f) => f.remediation && f.remediation.trim())
-                    .sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9))
-                    .slice(0, 8);
-
-                if (previewHead) previewHead.textContent = `// PREVIEW · ${project.package_name} v${project.version_name} · ${findings.length} findings`;
-
-                preview.innerHTML = `
-                  <div style="font-size:20px;color:var(--cyan);font-weight:700;letter-spacing:2px">MEDUSA NEXUS // ${activeTemplate.toUpperCase()} ASSESSMENT</div>
-                  <div class="muted small">target: ${project.package_name} v${project.version_name} · SHA-256 ${(project.apk_sha256 || "").slice(0, 16)}… · ${(project.created_at || "").slice(0, 10)}</div>
-                  <div class="gradient-underline"></div>
-                  <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · EXECUTIVE SUMMARY</div>
-                  <div>Risk ${(project.risk_score ?? 0).toFixed(1)}/100. ${
-                      Object.entries(project.findings_by_severity || {})
-                          .filter(([, n]) => n)
-                          .map(([sev, n]) => `${n} ${sev}`).join(", ") || "no findings"
-                  }.</div>
-                  <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 02 · MITIGATION PLAYBOOK — mandatory section</div>
-                  <div class="mitigation">
-                    ${top.length ? top.map((f) => {
-                        const sev = (f.severity || "info").toLowerCase();
-                        const cls = sev === "critical" ? "crit" : sev === "medium" ? "med" : sev;
-                        const firstLine = f.remediation.split("\n").find((l) => l.trim()) || "";
-                        return `<div class="row" style="align-items:flex-start;gap:10px"><span class="chip ${cls}">${cls.toUpperCase()}</span><div><b>${f.id} · ${f.title}</b><br>→ ${escapeHtml(firstLine)}</div></div>`;
-                    }).join("") : `<div class="muted small">no actionable findings yet — run static engines.</div>`}
-                  </div>
-                  <div class="muted small">§ 03 · FINDINGS DETAIL · § 04 · OWASP MASVS COMPLIANCE MATRIX · § 05 · EVIDENCE PACKAGE · § 06 · REPRO STEPS</div>`;
-            } catch (e) {
-                preview.innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">failed to load project ${targetId}: ${e.message}</span></div>`;
-            }
+    async function loadProject() {
+        if (!targetId) { state.project = null; return; }
+        try {
+            state.project = await getJSON(`/v1/projects/${encodeURIComponent(targetId)}`);
+        } catch (e) {
+            state.project = { _error: e.message };
         }
     }
 
-    // Template selector — make all rows clickable.
-    const tmplRows = $$(".panel:first-of-type .panel-body .row");
-    tmplRows.forEach((row) => {
-        const txt = row.textContent.trim().toLowerCase();
-        const tmpl = txt.includes("executive") ? "executive"
-            : txt.includes("owasp") ? "owasp-matrix"
-            : txt.includes("diff") ? "diff"
-            : txt.includes("technical") ? "technical" : null;
-        if (!tmpl) return;
-        row.style.cursor = "pointer";
-        row.addEventListener("click", () => {
-            activeTemplate = tmpl;
-            tmplRows.forEach((r) => {
-                const t = r.textContent.trim().toLowerCase();
-                const isMine = t.includes(activeTemplate.replace("-matrix", " matrix")) || (activeTemplate === "technical" && t.includes("technical"));
-                r.style.background = isMine ? "var(--bg-accent-panel)" : "var(--bg-panel)";
-                r.style.borderColor = isMine ? "var(--border-accent)" : "var(--border)";
+    function renderPreview() {
+        const head = $("#report-preview-head");
+        const preview = $("#report-preview");
+        if (!preview) return;
+        const p = state.project;
+        if (!targetId) {
+            if (head) head.textContent = "// PREVIEW";
+            preview.innerHTML = `<div class="empty-state"><span class="muted small uppercase">no project — <a href="#/scan">scan one</a></span></div>`;
+            return;
+        }
+        if (!p || p._error) {
+            preview.innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">failed to load ${targetId}${p && p._error ? ": " + escapeHtml(p._error) : ""}</span></div>`;
+            return;
+        }
+        const findings = p.attack_surface?.findings || [];
+        const top = findings
+            .filter((f) => f.remediation && f.remediation.trim())
+            .sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9))
+            .slice(0, 8);
+        const tlabel = { technical: "TECHNICAL", executive: "EXECUTIVE", "owasp-matrix": "OWASP MASVS MATRIX", diff: "DIFF" }[state.template] || state.template.toUpperCase();
+        if (head) head.textContent = `// PREVIEW · ${p.package_name} v${p.version_name} · ${state.template} · ${findings.length} findings`;
+
+        const out = [];
+        out.push(`<div style="font-size:20px;color:var(--cyan);font-weight:700;letter-spacing:2px">MEDUSA NEXUS // ${tlabel} ASSESSMENT</div>`);
+        out.push(`<div class="muted small">target: ${escapeHtml(p.package_name || "")} v${escapeHtml(p.version_name || "")} · SHA-256 ${(p.apk_sha256 || "").slice(0, 16)}… · ${(p.created_at || "").slice(0, 10)}</div>`);
+        out.push(`<div class="gradient-underline"></div>`);
+        out.push(`<div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · EXECUTIVE SUMMARY</div>`);
+        out.push(`<div>Risk ${(p.risk_score ?? 0).toFixed(1)}/100. ${
+            Object.entries(p.findings_by_severity || {}).filter(([, n]) => n).map(([s, n]) => `${n} ${s}`).join(", ") || "no findings"
+        }.</div>`);
+
+        let sn = 1; // running section number after the executive summary
+        if (state.template === "owasp-matrix") {
+            const byTag = {};
+            findings.forEach((f) => { if (f.masvs) (byTag[f.masvs] = byTag[f.masvs] || []).push(f); });
+            const rows = Object.entries(byTag).sort().map(([tag, fs]) => {
+                const hi = fs.map((x) => x.severity).sort((a, b) => (order[a] ?? 9) - (order[b] ?? 9))[0] || "info";
+                return `<div class="row" style="gap:10px;align-items:center"><span class="chip ${sevClass(hi)}">${hi.toUpperCase()}</span><b>${escapeHtml(tag)}</b><span class="muted small">${fs.length} finding(s)</span></div>`;
             });
+            out.push(`<div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 0${++sn} · OWASP MASVS COMPLIANCE MATRIX</div>`);
+            out.push(`<div class="col" style="gap:6px">${rows.length ? rows.join("") : `<div class="muted small">no MASVS-tagged findings.</div>`}</div>`);
+        }
+
+        if (state.includes.playbook) {
+            out.push(`<div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 0${++sn} · MITIGATION PLAYBOOK — mandatory section</div>`);
+            out.push(`<div class="mitigation col" style="gap:8px">${top.length ? top.map((f) => {
+                const cls = sevClass((f.severity || "info").toLowerCase());
+                const firstLine = (f.remediation || "").split("\n").find((l) => l.trim()) || "";
+                const ev = (state.includes.evidence && f.evidence)
+                    ? `<div class="muted small t-mono" style="margin-top:2px;white-space:pre-wrap">⌗ ${escapeHtml((f.evidence || "").slice(0, 160))}</div>`
+                    : "";
+                return `<div class="row" style="align-items:flex-start;gap:10px"><span class="chip ${cls}">${cls.toUpperCase()}</span><div><b>${f.id} · ${escapeHtml(f.title)}</b><br>→ ${escapeHtml(firstLine)}${ev}</div></div>`;
+            }).join("") : `<div class="muted small">no actionable findings yet — run static engines.</div>`}</div>`);
+        }
+
+        // Remaining section markers reflect the active include toggles.
+        const tail = [`§ 0${++sn} · FINDINGS DETAIL`];
+        if (state.template !== "owasp-matrix") tail.push(`§ 0${++sn} · OWASP MASVS COMPLIANCE MATRIX`);
+        if (state.includes.evidence) tail.push(`§ 0${++sn} · EVIDENCE PACKAGE`);
+        if (state.includes.frida) tail.push(`§ 0${++sn} · FRIDA SCRIPTS`);
+        if (state.includes.traffic) tail.push(`§ 0${++sn} · TRAFFIC CAPTURES (SANITIZED)`);
+        out.push(`<div class="muted small">${tail.join(" · ")}</div>`);
+        preview.innerHTML = out.join("");
+    }
+
+    function syncTemplateUI() {
+        $$(".tmpl-row").forEach((row) => {
+            const on = row.dataset.tmpl === state.template;
+            row.style.background = on ? "var(--bg-accent-panel)" : "var(--bg-panel)";
+            row.style.borderColor = on ? "var(--border-accent)" : "var(--border)";
+            const dot = row.querySelector(".tmpl-dot");
+            if (dot) { dot.textContent = on ? "●" : "○"; dot.style.color = on ? "var(--acid)" : ""; dot.classList.toggle("muted", !on); }
+            const label = row.querySelector(".t-mono");
+            if (label) { label.style.color = on ? "var(--acid)" : ""; label.style.fontWeight = on ? "700" : ""; }
+        });
+    }
+    function syncIncludeUI() {
+        $$(".incl-row").forEach((row) => {
+            const box = row.querySelector(".incl-box");
+            if (box) box.textContent = state.includes[row.dataset.incl] ? "[x]" : "[ ]";
+        });
+    }
+
+    // Template selection → re-render preview live.
+    $$(".tmpl-row").forEach((row) => row.addEventListener("click", () => {
+        state.template = row.dataset.tmpl;
+        syncTemplateUI();
+        renderPreview();
+    }));
+
+    // INCLUDE checkboxes → toggle (Mitigation Playbook is locked on).
+    $$(".incl-row").forEach((row) => {
+        if (row.dataset.locked === "true") return;
+        row.addEventListener("click", () => {
+            const id = row.dataset.incl;
+            state.includes[id] = !state.includes[id];
+            syncIncludeUI();
+            renderPreview();
         });
     });
 
-    $$(".btn.primary, .btn").forEach((btn) => {
-        const t = btn.textContent.trim();
-        const m = t.match(/^\[ (PDF|HTML|\.MD|JSON) \]$/);
-        if (!m) return;
+    // Export buttons → POST + download with inline status feedback.
+    $$(".export-btn").forEach((btn) => {
         btn.addEventListener("click", async () => {
-            if (!targetId) { alert("no project selected — scan one first."); return; }
-            const fmt = { "PDF": "pdf", "HTML": "html", ".MD": "markdown", "JSON": "json" }[m[1]];
-            const fd = new FormData();
-            fd.append("template", activeTemplate);
-            fd.append("fmt", fmt);
-            btn.textContent = "[ … ]";
-            const r = await fetch(`/v1/projects/${encodeURIComponent(targetId)}/report`, { method: "POST", body: fd });
-            if (!r.ok) {
-                const detail = await r.text();
-                btn.textContent = `[ ${m[1]} ✕ ]`; btn.style.color = "var(--sev-crit)";
-                alert(`report failed (${r.status}): ${detail.slice(0, 240)}`);
+            const status = $("#report-export-status");
+            if (!targetId) {
+                if (status) { status.textContent = "no project selected — pick or scan one first."; status.style.color = "var(--sev-high)"; }
                 return;
             }
-            const blob = await r.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url; a.download = `${targetId}.${fmt === "markdown" ? "md" : fmt}`;
-            a.click();
-            URL.revokeObjectURL(url);
-            btn.textContent = `[ ${m[1]} ✓ ]`; btn.style.color = "var(--acid)";
-            setTimeout(() => { btn.textContent = `[ ${m[1]} ]`; btn.style.color = ""; }, 1800);
+            const fmt = btn.dataset.fmt;
+            const orig = btn.textContent;
+            const fd = new FormData();
+            fd.append("template", state.template);
+            fd.append("fmt", fmt);
+            btn.textContent = "[ … ]"; btn.disabled = true;
+            if (status) { status.textContent = `generating ${state.template} · ${fmt}…`; status.style.color = ""; }
+            try {
+                const r = await fetch(`/v1/projects/${encodeURIComponent(targetId)}/report`, { method: "POST", body: fd });
+                if (!r.ok) { const d = await r.text(); throw new Error(`${r.status}: ${d.slice(0, 200)}`); }
+                const blob = await r.blob();
+                // Honour the filename the server actually produced. PDF/PNG
+                // gracefully degrade to HTML when WeasyPrint / Chromium are
+                // missing, so the response may be .html even though we asked
+                // for .pdf — saving the bytes under the requested extension is
+                // exactly what made the "corrupted PDF" (HTML-in-a-.pdf).
+                const wantExt = fmt === "markdown" ? "md" : fmt;
+                const cd = r.headers.get("content-disposition") || "";
+                const fnMatch = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+                const serverName = fnMatch ? decodeURIComponent(fnMatch[1].trim()) : "";
+                const realExt = (serverName.split(".").pop() || wantExt).toLowerCase();
+                const fname = serverName || `${targetId}.${realExt}`;
+                const degraded = realExt !== wantExt;
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url; a.download = fname;
+                document.body.appendChild(a); a.click(); a.remove();
+                URL.revokeObjectURL(url);
+                btn.textContent = orig.replace(" ]", " ✓ ]"); btn.style.color = "var(--acid)";
+                if (status) {
+                    if (degraded && wantExt === "pdf") {
+                        status.innerHTML = `downloaded <b>${fname}</b> — PDF needs WeasyPrint on the API host; served HTML instead.`;
+                        status.style.color = "var(--sev-high)";
+                    } else if (degraded && wantExt === "png") {
+                        status.innerHTML = `downloaded <b>${fname}</b> — PNG needs Chromium on the API host; served HTML instead.`;
+                        status.style.color = "var(--sev-high)";
+                    } else {
+                        status.textContent = `downloaded ${fname}`;
+                        status.style.color = "var(--acid)";
+                    }
+                }
+            } catch (e) {
+                btn.textContent = orig.replace(" ]", " ✕ ]"); btn.style.color = "var(--sev-crit)";
+                if (status) { status.textContent = `report failed — ${e.message}`; status.style.color = "var(--sev-crit)"; }
+            } finally {
+                btn.disabled = false;
+                setTimeout(() => { btn.textContent = orig; btn.style.color = ""; }, 2200);
+            }
         });
     });
+
+    // Initial paint.
+    syncTemplateUI();
+    syncIncludeUI();
+    await loadProject();
+    renderPreview();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
