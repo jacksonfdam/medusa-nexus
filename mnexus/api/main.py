@@ -2336,6 +2336,12 @@ async def device_ios_screen(serial: str) -> Response:
                 content=png2, media_type="image/png",
                 headers={"Cache-Control": "no-cache", "X-MNexus-Path": "idevicescreenshot"},
             )
+    # Log the real reason to the server console so it's visible without
+    # digging into the browser — these failures are otherwise opaque 503s.
+    logging.getLogger("mnexus.api.ios").warning(
+        "ios-screen %s failed:\n  pymobiledevice3: %s\n  idevicescreenshot: %s",
+        serial, diag1, diag2,
+    )
     raise HTTPException(
         503,
         detail={
