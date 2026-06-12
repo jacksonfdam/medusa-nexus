@@ -15,6 +15,7 @@ import { getPageMap } from 'nextra/page-map';
 import 'nextra-theme-docs/style.css';
 import '../styles/globals.css';
 import { Analytics } from "@vercel/analytics/next"
+import { SpeedInsights } from "@vercel/speed-insights/next"
 
 const REPO = 'https://github.com/jacksonfdam/medusa-nexus';
 
@@ -124,6 +125,13 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           telemetry-free).
         */}
         <Analytics />
+        {/*
+          Speed Insights — Core Web Vitals (LCP, INP, CLS) per route.
+          Same opt-in profile as Analytics: runs on Vercel deploys only,
+          silent locally. Useful for spotting which long-form articles
+          start blowing LCP budgets as the series grows.
+        */}
+        <SpeedInsights />
       </body>
     </html>
   );
