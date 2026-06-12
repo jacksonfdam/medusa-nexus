@@ -4456,9 +4456,45 @@ async function mount_project_network(ctx) {
         }
     }
 
-    const renderRows = (rows) => {
+    // Android emits a constant drip of captive-portal / connectivity probes
+    // (gen_204 · generate_204 to Google hosts, empty 204s). With no active
+    // capture these flood the table with thousands of meaningless rows. Treat
+    // them as noise: filter them out, and if nothing else remains show the
+    // idle empty-state instead of a wall of probes.
+    const CONNECTIVITY_DOMAINS = ["gstatic.com", "google.com", "googleapis.com", "googleusercontent.com"];
+    const isConnectivityNoise = (row) => {
+        const path = String(row.path || "").split("?")[0];
+        if (!(path.endsWith("/gen_204") || path.endsWith("/generate_204"))) return false;
+        const host = String(row.host || "").toLowerCase();
+        const onProbeHost = CONNECTIVITY_DOMAINS.some((d) => host === d || host.endsWith("." + d));
+        const status = Number(row.status) || 0;
+        const emptyBody = !(Number(row.size) > 0);
+        return onProbeHost && (status === 204 || status === 0) && emptyBody;
+    };
+
+    const renderRows = (allRows) => {
+        const rows = allRows.filter((r) => !isConnectivityNoise(r));
+        const hidden = allRows.length - rows.length;
+        // Keep the top metric + subtitle in sync with what's actually shown,
+        // so the panel reads "idle" (not "1000") when only probes came in.
+        const countEl = $("#net-traffic-count");
+        if (countEl) {
+            countEl.textContent = String(rows.length).padStart(2, "0");
+            countEl.className = "metric-value " + (rows.length ? "acid" : "");
+        }
+        const subEl = $("#net-traffic-sub");
+        if (subEl) {
+            const burp = rows.filter((r) => (r.origin || "burp") !== "moxy").length;
+            subEl.textContent = rows.length ? `${burp} burp · ${rows.length - burp} moxy` : "no proxy data yet";
+        }
+        const metaEl = $("#net-traffic-meta");
+        if (metaEl) {
+            metaEl.textContent = rows.length
+                ? `${rows.length} request(s)${hidden ? ` · ${hidden} probe(s) hidden` : ""}`
+                : (hidden ? `no active capture · ${hidden} connectivity probe(s) hidden` : "no traffic captured yet");
+        }
         if (!rows.length) {
-            tEl.innerHTML = `<div class="empty-state">no captured traffic — start a Burp / Moxy session and proxy the device through it. The events will surface here.</div>`;
+            tEl.innerHTML = `<div class="empty-state">no active capture${hidden ? ` — ${hidden} connectivity probe(s) filtered out` : ""}. Start a Burp / Moxy session and proxy the device through it; real flows will surface here.</div>`;
             return;
         }
         const sevColor = (status) => {
@@ -4490,7 +4526,7 @@ async function mount_project_network(ctx) {
                 <span class="t-muted">${row.ms || "—"}</span>
                 <span style="font-size:9px;color:var(--sev-info);font-weight:700">${(row.flags || []).map((f) => "[" + escapeHtml(f) + "]").join("")}${matched && row.origin === "moxy" ? "[✓]" : ""}</span>
               </div>`;
-        }).join("");
+        }).join("") + (hidden ? `<div class="muted small" style="padding:6px 10px">+ ${hidden} connectivity probe(s) hidden (gen_204 / generate_204)</div>` : "");
     };
 
     // Initial render: Burp rows on top, Moxy rows underneath. Sort by timestamp
