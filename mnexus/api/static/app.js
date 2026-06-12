@@ -2962,6 +2962,7 @@ function view_devices() {
 
 let _devicesPollTimer = null;
 let _mirrorTimer = null;
+let _iosSyslogCtl = null;   // AbortController for the live iOS syslog stream
 let _activeSerial = null;
 
 async function mount_devices() {
@@ -3238,9 +3239,59 @@ function openDeviceDetail(serial, d) {
                 </div>
               </section>
               <section class="panel">
+                <div class="panel-head">// QUICK ACTIONS · lockdown</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div class="row" style="gap:8px;flex-wrap:wrap">
+                    <button class="btn" data-ios-power="restart">[ REBOOT ]</button>
+                    <button class="btn" data-ios-power="shutdown">[ SHUTDOWN ]</button>
+                    <button class="btn" data-ios-power="sleep">[ SLEEP ]</button>
+                  </div>
+                  <span id="ios-power-status" class="muted small"></span>
+                </div>
+              </section>
+              <section class="panel">
+                <div class="panel-head">// APPS · install / list / uninstall</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+                    <input type="file" id="ios-ipa-file" accept=".ipa" style="display:none">
+                    <button class="btn" id="ios-install-btn">[ ↑ INSTALL IPA ]</button>
+                    <button class="btn" id="ios-apps-refresh">[ ⟳ LIST APPS ]</button>
+                    <span id="ios-apps-status" class="muted small grow"></span>
+                  </div>
+                  <div id="ios-apps-list" class="col" style="gap:4px;max-height:220px;overflow:auto"></div>
+                </div>
+              </section>
+              <section class="panel">
+                <div class="panel-head">// SYSLOG · live device log</div>
+                <div class="panel-body col" style="gap:6px">
+                  <div class="row" style="gap:8px;align-items:center">
+                    <button class="btn" id="ios-syslog-toggle">[ ▶ START ]</button>
+                    <button class="btn" id="ios-syslog-clear">[ CLEAR ]</button>
+                    <span id="ios-syslog-status" class="muted small"></span>
+                  </div>
+                  <pre id="ios-syslog-out" class="code" style="max-height:240px;overflow:auto"></pre>
+                </div>
+              </section>
+              <section class="panel">
+                <div class="panel-head">// CRASHES + FILES</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div class="row" style="gap:8px;align-items:center">
+                    <button class="btn" id="ios-crashes-btn">[ ⟳ CRASH REPORTS ]</button>
+                    <span id="ios-crashes-status" class="muted small"></span>
+                  </div>
+                  <pre id="ios-crashes-out" class="code" style="max-height:150px;overflow:auto"></pre>
+                  <div class="row" style="gap:8px;align-items:center">
+                    <span class="muted small">AFC</span>
+                    <input id="ios-afc-path" value="/" style="flex:1;background:var(--bg-panel);color:inherit;border:1px solid var(--border);border-radius:2px;padding:4px 8px">
+                    <button class="btn" id="ios-afc-btn">[ LS ]</button>
+                  </div>
+                  <pre id="ios-afc-out" class="code" style="max-height:150px;overflow:auto"></pre>
+                </div>
+              </section>
+              <section class="panel">
                 <div class="panel-head">// ANALYSIS</div>
                 <div class="panel-body col" style="gap:8px">
-                  <div class="muted small">The mirror on the left is <b>read-only</b> (screenshot poll over lockdownd). Live <b>control</b> — shell, key events, app install — runs over <b>adb</b> and is Android-only. For deeper work, analyse the app binary:</div>
+                  <div class="muted small">The mirror is <b>read-only</b>; full screen control (taps / swipes / key events) is Android-only. The actions above run over lockdown. For deeper work, analyse the app binary:</div>
                   <div class="row" style="gap:8px;flex-wrap:wrap">
                     <a class="btn primary" href="#/scan">[ ↑ UPLOAD IPA TO SCAN ]</a>
                     <a class="btn" href="#/recipes?platform=ios">[ iOS RECIPES ]</a>
@@ -3255,6 +3306,103 @@ function openDeviceDetail(serial, d) {
             const st = $("#ios-copy-status");
             try { await navigator.clipboard.writeText(d.udid || serial); if (st) { st.textContent = "copied"; st.style.color = "var(--acid)"; } }
             catch { if (st) { st.textContent = d.udid || serial; } }
+        });
+
+        const iosBase = `/v1/devices/${encodeURIComponent(serial)}/ios`;
+
+        // ── power: reboot / shutdown / sleep ──
+        $$("[data-ios-power]").forEach((b) => b.addEventListener("click", async () => {
+            const action = b.dataset.iosPower;
+            const st = $("#ios-power-status");
+            if (!confirm(`iOS ${action}?`)) return;
+            if (st) { st.textContent = `${action}…`; st.style.color = ""; }
+            try {
+                const r = await fetch(`${iosBase}/power/${action}`, { method: "POST" });
+                if (!r.ok) throw new Error((await r.text()).slice(0, 160));
+                if (st) { st.textContent = `${action} sent`; st.style.color = "var(--acid)"; }
+            } catch (e) { if (st) { st.textContent = `failed: ${e.message}`; st.style.color = "var(--sev-crit)"; } }
+        }));
+
+        // ── apps: list / install / uninstall ──
+        const appsList = $("#ios-apps-list"), appsStatus = $("#ios-apps-status");
+        const loadApps = async () => {
+            if (appsStatus) { appsStatus.textContent = "loading…"; appsStatus.style.color = ""; }
+            try {
+                const j = await getJSON(`${iosBase}/apps`);
+                if (appsStatus) appsStatus.textContent = `${j.count} app(s)`;
+                appsList.innerHTML = (j.apps || []).map((a) => `<div class="row" style="gap:8px;align-items:center"><span class="t-mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(a.bundle_id)}">${escapeHtml(a.name)} <span class="muted small">${escapeHtml(a.version)}</span></span><button class="btn" data-ios-uninstall="${escapeHtml(a.bundle_id)}" style="padding:1px 8px">✕</button></div>`).join("") || `<div class="muted small">no apps</div>`;
+                $$("[data-ios-uninstall]").forEach((b) => b.addEventListener("click", async () => {
+                    const bid = b.dataset.iosUninstall;
+                    if (!confirm(`Uninstall ${bid}?`)) return;
+                    b.textContent = "…";
+                    try {
+                        const r = await fetch(`${iosBase}/apps/${encodeURIComponent(bid)}/uninstall`, { method: "POST" });
+                        if (!r.ok) throw new Error((await r.text()).slice(0, 120));
+                        loadApps();
+                    } catch (e) { b.textContent = "✕"; if (appsStatus) { appsStatus.textContent = "uninstall failed: " + e.message; appsStatus.style.color = "var(--sev-crit)"; } }
+                }));
+            } catch (e) { if (appsStatus) { appsStatus.textContent = "failed: " + e.message; appsStatus.style.color = "var(--sev-crit)"; } }
+        };
+        $("#ios-apps-refresh")?.addEventListener("click", loadApps);
+        const ipaFile = $("#ios-ipa-file");
+        $("#ios-install-btn")?.addEventListener("click", () => ipaFile?.click());
+        ipaFile?.addEventListener("change", async () => {
+            const f = ipaFile.files?.[0]; if (!f) return;
+            if (appsStatus) { appsStatus.textContent = `installing ${f.name}…`; appsStatus.style.color = ""; }
+            const fd = new FormData(); fd.append("file", f);
+            try {
+                const r = await fetch(`${iosBase}/apps/install`, { method: "POST", body: fd });
+                if (!r.ok) throw new Error((await r.text()).slice(0, 200));
+                if (appsStatus) { appsStatus.textContent = "installed ✓"; appsStatus.style.color = "var(--acid)"; }
+                loadApps();
+            } catch (e) { if (appsStatus) { appsStatus.textContent = "install failed: " + e.message; appsStatus.style.color = "var(--sev-crit)"; } }
+            finally { ipaFile.value = ""; }
+        });
+
+        // ── syslog: live stream (the iOS logcat) ──
+        if (_iosSyslogCtl) { _iosSyslogCtl.abort(); _iosSyslogCtl = null; }
+        const syslogOut = $("#ios-syslog-out"), syslogToggle = $("#ios-syslog-toggle"), syslogStatus = $("#ios-syslog-status");
+        $("#ios-syslog-clear")?.addEventListener("click", () => { if (syslogOut) syslogOut.textContent = ""; });
+        syslogToggle?.addEventListener("click", async () => {
+            if (_iosSyslogCtl) { _iosSyslogCtl.abort(); _iosSyslogCtl = null; syslogToggle.textContent = "[ ▶ START ]"; if (syslogStatus) syslogStatus.textContent = ""; return; }
+            _iosSyslogCtl = new AbortController();
+            syslogToggle.textContent = "[ ■ STOP ]";
+            if (syslogStatus) { syslogStatus.textContent = "streaming…"; syslogStatus.style.color = "var(--acid)"; }
+            try {
+                const r = await fetch(`${iosBase}/syslog`, { signal: _iosSyslogCtl.signal });
+                if (!r.ok) throw new Error(`${r.status}`);
+                const reader = r.body.getReader(); const dec = new TextDecoder();
+                for (;;) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    syslogOut.textContent += dec.decode(value, { stream: true });
+                    if (syslogOut.textContent.length > 200000) syslogOut.textContent = syslogOut.textContent.slice(-150000);
+                    syslogOut.scrollTop = syslogOut.scrollHeight;
+                }
+            } catch (e) {
+                if (e.name !== "AbortError" && syslogStatus) { syslogStatus.textContent = "error: " + e.message; syslogStatus.style.color = "var(--sev-crit)"; }
+            } finally {
+                if (syslogToggle) syslogToggle.textContent = "[ ▶ START ]";
+            }
+        });
+
+        // ── crash reports + AFC file listing ──
+        $("#ios-crashes-btn")?.addEventListener("click", async () => {
+            const out = $("#ios-crashes-out"), st = $("#ios-crashes-status");
+            if (st) { st.textContent = "loading…"; st.style.color = ""; }
+            try {
+                const j = await getJSON(`${iosBase}/crashes`);
+                if (st) st.textContent = `${j.count} entries`;
+                out.textContent = (j.entries || []).join("\n") || "(none)";
+            } catch (e) { if (st) { st.textContent = "failed: " + e.message; st.style.color = "var(--sev-crit)"; } }
+        });
+        $("#ios-afc-btn")?.addEventListener("click", async () => {
+            const out = $("#ios-afc-out"), p = $("#ios-afc-path")?.value || "/";
+            out.textContent = "…";
+            try {
+                const j = await getJSON(`${iosBase}/afc?path=${encodeURIComponent(p)}`);
+                out.textContent = (j.entries || []).join("\n") || "(empty)";
+            } catch (e) { out.textContent = "failed: " + e.message; }
         });
 
         // ── read-only mirror: poll the iOS screenshot endpoint ──
@@ -3690,6 +3838,7 @@ async function bindInstall(serial) {
 function closeDeviceDetail() {
     _activeSerial = null;
     clearInterval(_mirrorTimer);
+    if (_iosSyslogCtl) { _iosSyslogCtl.abort(); _iosSyslogCtl = null; }
     const panel = $("#device-detail-panel");
     if (panel) panel.style.display = "none";
     document.querySelectorAll(".device-card").forEach((c) => c.classList.remove("active"));
