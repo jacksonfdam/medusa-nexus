@@ -3160,15 +3160,24 @@ async function refreshDevices() {
 
 function deviceCardHtml(d) {
     const ok = d.state === "device";
-    const stateColor = ok ? "var(--acid)" : (d.state === "unauthorized" ? "var(--sev-high)" : "var(--sev-crit)");
+    const isIos = d.platform === "ios";
+    const stateColor = isIos ? "var(--cyan)" : (ok ? "var(--acid)" : (d.state === "unauthorized" ? "var(--sev-high)" : "var(--sev-crit)"));
+    const badge = isIos ? "iOS" : d.state.toUpperCase();
     return `
     <div class="device-card ${d.serial === _activeSerial ? "active" : ""}" data-serial="${d.serial}">
       <div class="head">
         <span class="t-mono" style="font-weight:700;flex:1">${d.model || d.product || d.serial}</span>
-        <span class="badge" style="color:${stateColor};border-color:${stateColor}">${d.state.toUpperCase()}</span>
+        <span class="badge" style="color:${stateColor};border-color:${stateColor}">${badge}</span>
       </div>
       <div class="muted small t-mono">${d.serial}</div>
-      ${ok ? `
+      ${isIos ? `
+      <div class="grid">
+        <span class="key">PLATFORM</span><span class="val" style="color:var(--cyan)">iOS</span>
+        <span class="key">VERSION</span><span class="val">${d.ios_version || "?"}</span>
+        <span class="key">ARCH</span><span class="val">${d.arch || "?"}</span>
+        <span class="key">UDID</span><span class="val t-mono" style="font-size:9px">${escapeHtml(d.udid || d.serial)}</span>
+        <span class="key">FRIDA</span><span class="val" style="color:var(--${d.frida_visible ? "acid" : "muted"})">${d.frida_visible ? "visible · lockdownd" : "—"}</span>
+      </div>` : ok ? `
       <div class="grid">
         <span class="key">ANDROID</span><span class="val">${d.android_release || "?"} (SDK ${d.android_sdk || "?"})</span>
         <span class="key">ABI</span><span class="val">${d.abi || "?"}</span>
@@ -3189,6 +3198,54 @@ function openDeviceDetail(serial, d) {
     if (!panel || !host) return;
     panel.style.display = "";
     title.textContent = `// DEVICE :: ${d?.model || serial}`;
+
+    // iOS devices are discovered via Frida/lockdownd, but every live-control
+    // path below (mirror, shell, keyevents, install, frida-server push) is
+    // adb-only. Rather than firing adb at an iPhone and surfacing "?" /
+    // endless polling, render an iOS-specific panel that's honest about what
+    // is and isn't supported.
+    if (d?.platform === "ios") {
+        if (_mirrorTimer) { clearInterval(_mirrorTimer); _mirrorTimer = null; }
+        host.innerHTML = `
+          <div class="device-detail" style="grid-template-columns:1fr">
+            <div class="col" style="gap:12px">
+              <section class="panel">
+                <div class="panel-head">// iOS DEVICE</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div style="display:grid;grid-template-columns:84px 1fr;gap:6px 14px;font-size:11px;align-items:baseline">
+                    <span class="muted" style="letter-spacing:1px">NAME</span><span class="t-mono" style="color:var(--cyan)">${escapeHtml(d.model || "iOS device")}</span>
+                    <span class="muted" style="letter-spacing:1px">UDID</span><span class="t-mono" style="color:var(--cyan);word-break:break-all">${escapeHtml(d.udid || serial)}</span>
+                    <span class="muted" style="letter-spacing:1px">VERSION</span><span class="t-mono" style="color:var(--cyan)">${escapeHtml(d.ios_version || "?")}</span>
+                    <span class="muted" style="letter-spacing:1px">ARCH</span><span class="t-mono" style="color:var(--cyan)">${escapeHtml(d.arch || "?")}</span>
+                    <span class="muted" style="letter-spacing:1px">FRIDA</span><span class="t-mono" style="color:var(--${d.frida_visible ? "acid" : "muted"})">${d.frida_visible ? "visible · lockdownd" : "not visible"}</span>
+                  </div>
+                  <div class="row" style="gap:8px">
+                    <button class="btn" id="ios-copy-udid">[ COPY UDID ]</button>
+                    <span id="ios-copy-status" class="muted small"></span>
+                  </div>
+                </div>
+              </section>
+              <section class="panel">
+                <div class="panel-head">// ANALYSIS</div>
+                <div class="panel-body col" style="gap:8px">
+                  <div class="muted small">Live device control (screen mirror, shell, key events, app install) runs over <b>adb</b> and is Android-only. For iOS, MedusaNexus works at the binary level:</div>
+                  <div class="row" style="gap:8px;flex-wrap:wrap">
+                    <a class="btn primary" href="#/scan">[ ↑ UPLOAD IPA TO SCAN ]</a>
+                    <a class="btn" href="#/recipes?platform=ios">[ iOS RECIPES ]</a>
+                  </div>
+                  <div class="muted small">Decrypt + analyse a signed app with <code>frida-ios-dump</code>, then run the iOS static pipeline. ${d.frida_visible ? "Frida sees this device, so on-device instrumentation is possible from the CLI (<code>mnexus</code> + Frida)." : "Pair the device and ensure Frida is installed to enable on-device instrumentation."}</div>
+                </div>
+              </section>
+            </div>
+          </div>`;
+        const copyBtn = $("#ios-copy-udid");
+        if (copyBtn) copyBtn.addEventListener("click", async () => {
+            const st = $("#ios-copy-status");
+            try { await navigator.clipboard.writeText(d.udid || serial); if (st) { st.textContent = "copied"; st.style.color = "var(--acid)"; } }
+            catch { if (st) { st.textContent = d.udid || serial; } }
+        });
+        return;
+    }
 
     const ok = d?.state === "device";
     if (!ok) {
