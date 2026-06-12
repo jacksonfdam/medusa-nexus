@@ -3093,11 +3093,15 @@ async def generate_report(
     if not project:
         raise HTTPException(404, f"no project with id {project_id}")
 
-    suffix = {"markdown": "md", "json": "json", "html": "html", "pdf": "pdf"}.get(fmt.lower(), "txt")
+    suffix = {"markdown": "md", "json": "json", "html": "html", "pdf": "pdf", "png": "png"}.get(fmt.lower(), "txt")
     out_path = nexus.config.workspace / "reports" / f"{project_id}.{suffix}"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        ReportGenerator(project).generate(
+        # generate() may graceful-degrade (PDF→HTML when WeasyPrint is missing,
+        # PNG→HTML when no Chromium). It returns the path it actually wrote,
+        # which can differ from out_path — serve *that* file, not the one we
+        # asked for, otherwise we FileResponse a path that was never created.
+        produced = ReportGenerator(project).generate(
             ReportTemplate(template),
             ReportFormat(fmt.lower()),
             str(out_path),
@@ -3107,13 +3111,18 @@ async def generate_report(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"{exc.__class__.__name__}: {exc}") from exc
 
+    produced_path = Path(produced)
+    if not produced_path.is_file():
+        raise HTTPException(500, f"report generation produced no file at {produced_path}")
+
     media = {
         "md": "text/markdown",
         "json": "application/json",
         "html": "text/html",
         "pdf": "application/pdf",
-    }.get(suffix, "application/octet-stream")
-    return FileResponse(str(out_path), media_type=media, filename=out_path.name)
+        "png": "image/png",
+    }.get(produced_path.suffix.lstrip("."), "application/octet-stream")
+    return FileResponse(str(produced_path), media_type=media, filename=produced_path.name)
 
 
 # ─── project sub-views (screens 09 / 10 / 11 / 15 / 16 / 17 / 18 / 19 / 20) ─
