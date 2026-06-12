@@ -320,8 +320,9 @@ and the detail panel renders a read-only mirror alongside the device
 facts (name / UDID / iOS version / arch / Frida visibility).
 
 How it works: the API host captures a PNG screenshot over lockdownd and
-the browser polls it (~1.5s). There is no adb and no live control — taps,
-swipes, key events and app install stay Android-only. The capture path:
+the browser polls it (~1.5s). There is no adb; full screen control (taps,
+swipes, key events) stays Android-only — but a set of lockdown-backed
+actions *is* wired into the same panel (see below). The capture path:
 
 ```
 GET /v1/devices/{udid}/ios-screen.png
@@ -354,6 +355,25 @@ Notes:
   *No module named pymobiledevice3* because the package lives in the
   project venv.
 - Opt out of the auto-start with `MNEXUS_IOS_TUNNEL=0`.
+
+### Device panel actions (lockdown, no tunnel)
+
+Beyond the mirror, the iPhone panel mirrors the adb-backed Android panel
+with actions that run over plain lockdown — so they work even without the
+developer tunnel:
+
+| Action | Endpoint | pymobiledevice3 |
+|---|---|---|
+| Reboot / Shutdown / Sleep | `POST /v1/devices/{udid}/ios/power/{action}` | `diagnostics restart\|shutdown\|sleep` |
+| Device facts | `GET /v1/devices/{udid}/ios/info` | `lockdown info` |
+| List / install / uninstall apps | `GET\|POST .../ios/apps[/install\|/{bundle}/uninstall]` | `apps list\|install\|uninstall` |
+| Live syslog (the logcat equivalent) | `GET .../ios/syslog` (stream) | `syslog live` |
+| Crash reports | `GET .../ios/crashes` | `crash ls` |
+| File browser (media partition) | `GET .../ios/afc?path=` | `afc ls` |
+
+Only the screen mirror (and other DVT/developer services) needs the
+tunnel; everything in the table is lockdown and works as soon as the
+device is paired + trusted.
 
 If the mirror shows "unavailable", the panel prints the exact hint
 returned by the endpoint (missing tool / unpaired device / no tunnel).
