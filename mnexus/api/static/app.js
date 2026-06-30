@@ -6190,46 +6190,121 @@ async function mount_report(ctx) {
     // ── live report preview from the chosen project ──
     const previewHead = $("#report-preview-head");
     const preview = $("#report-preview");
-    if (preview) {
+
+    // Cache the project once so template-switching is instant. The
+    // network round-trip only happens on mount or when the project id
+    // changes (currently never inside this screen).
+    let cachedProject = null;
+    if (targetId) {
+        try { cachedProject = await getJSON(`/v1/projects/${encodeURIComponent(targetId)}`); }
+        catch (e) { cachedProject = { _error: e.message }; }
+    }
+
+    function renderPreview() {
+        if (!preview) return;
         if (!targetId) {
             preview.innerHTML = `<div class="empty-state"><span class="muted small uppercase">no project picked yet</span></div>`;
-        } else {
-            try {
-                const project = await getJSON(`/v1/projects/${encodeURIComponent(targetId)}`);
-                const findings = (project.attack_surface?.findings || []);
-                const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-                const top = findings
-                    .filter((f) => f.remediation && f.remediation.trim())
-                    .sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9))
-                    .slice(0, 8);
-
-                if (previewHead) previewHead.textContent = `// PREVIEW · ${project.package_name} v${project.version_name} · ${findings.length} findings`;
-
-                preview.innerHTML = `
-                  <div style="font-size:20px;color:var(--cyan);font-weight:700;letter-spacing:2px">MEDUSA NEXUS // ${activeTemplate.toUpperCase()} ASSESSMENT</div>
-                  <div class="muted small">target: ${project.package_name} v${project.version_name} · SHA-256 ${(project.apk_sha256 || "").slice(0, 16)}… · ${(project.created_at || "").slice(0, 10)}</div>
-                  <div class="gradient-underline"></div>
-                  <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · EXECUTIVE SUMMARY</div>
-                  <div>Risk ${(project.risk_score ?? 0).toFixed(1)}/100. ${
-                      Object.entries(project.findings_by_severity || {})
-                          .filter(([, n]) => n)
-                          .map(([sev, n]) => `${n} ${sev}`).join(", ") || "no findings"
-                  }.</div>
-                  <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 02 · MITIGATION PLAYBOOK — mandatory section</div>
-                  <div class="mitigation">
-                    ${top.length ? top.map((f) => {
-                        const sev = (f.severity || "info").toLowerCase();
-                        const cls = sev === "critical" ? "crit" : sev === "medium" ? "med" : sev;
-                        const firstLine = f.remediation.split("\n").find((l) => l.trim()) || "";
-                        return `<div class="row" style="align-items:flex-start;gap:10px"><span class="chip ${cls}">${cls.toUpperCase()}</span><div><b>${f.id} · ${f.title}</b><br>→ ${escapeHtml(firstLine)}</div></div>`;
-                    }).join("") : `<div class="muted small">no actionable findings yet — run static engines.</div>`}
-                  </div>
-                  <div class="muted small">§ 03 · FINDINGS DETAIL · § 04 · OWASP MASVS COMPLIANCE MATRIX · § 05 · EVIDENCE PACKAGE · § 06 · REPRO STEPS</div>`;
-            } catch (e) {
-                preview.innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">failed to load project ${targetId}: ${e.message}</span></div>`;
-            }
+            return;
         }
+        if (cachedProject && cachedProject._error) {
+            preview.innerHTML = `<div class="empty-state"><span style="color:var(--sev-crit)">failed to load project ${targetId}: ${cachedProject._error}</span></div>`;
+            return;
+        }
+        const project = cachedProject || {};
+        const findings = (project.attack_surface?.findings || []);
+        const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+        const sorted = findings
+            .filter((f) => f.remediation && f.remediation.trim())
+            .sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
+
+        if (previewHead) {
+            previewHead.textContent = `// PREVIEW · ${project.package_name} v${project.version_name} · ${findings.length} findings · ${activeTemplate.toUpperCase()}`;
+        }
+
+        const header = `
+          <div style="font-size:20px;color:var(--cyan);font-weight:700;letter-spacing:2px">MEDUSA NEXUS // ${activeTemplate.toUpperCase().replace("-", " ")} ASSESSMENT</div>
+          <div class="muted small">target: ${project.package_name} v${project.version_name} · SHA-256 ${(project.apk_sha256 || "").slice(0, 16)}… · ${(project.created_at || "").slice(0, 10)}</div>
+          <div class="gradient-underline"></div>`;
+
+        const sevSummary = Object.entries(project.findings_by_severity || {})
+            .filter(([, n]) => n)
+            .map(([sev, n]) => `${n} ${sev}`).join(", ") || "no findings";
+
+        const sevToCls = (sev) => sev === "critical" ? "crit" : sev === "medium" ? "med" : sev;
+
+        let body = "";
+        if (activeTemplate === "executive") {
+            // C-suite cut: numbers + 3-line "what to do today", no code.
+            const top3 = sorted.slice(0, 3);
+            body = `
+              <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · RISK POSTURE</div>
+              <div style="font-size:32px;color:var(--cyan);font-weight:700">Risk ${(project.risk_score ?? 0).toFixed(1)}<span class="muted small" style="font-size:14px"> / 100</span></div>
+              <div class="muted">${sevSummary}.</div>
+              <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid);margin-top:8px">§ 02 · TOP 3 — ACT THIS SPRINT</div>
+              ${top3.length ? top3.map((f, i) => {
+                  const cls = sevToCls((f.severity || "info").toLowerCase());
+                  return `<div class="row" style="align-items:flex-start;gap:10px"><span class="chip ${cls}">${cls.toUpperCase()}</span><div><b>${String(i + 1).padStart(2, "0")} · ${escapeHtml(f.title)}</b></div></div>`;
+              }).join("") : `<div class="muted small">no high-severity findings.</div>`}
+              <div class="muted small">§ 03 · BUSINESS IMPACT · § 04 · REGULATORY EXPOSURE · § 05 · ROADMAP — generated on export</div>`;
+        } else if (activeTemplate === "owasp-matrix") {
+            // MASVS compliance grid: every finding bucketed by MASVS control.
+            const byMasvs = {};
+            findings.forEach((f) => {
+                const key = f.masvs || "uncategorized";
+                (byMasvs[key] ||= []).push(f);
+            });
+            const rows = Object.entries(byMasvs).sort(([a], [b]) => a.localeCompare(b));
+            body = `
+              <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · OWASP MASVS MATRIX</div>
+              <div class="muted small">${rows.length} control(s) hit · ${findings.length} finding(s) total</div>
+              <table style="width:100%;border-collapse:collapse;margin-top:6px">
+                <thead><tr style="border-bottom:1px solid var(--border)">
+                  <th class="muted small uppercase" style="text-align:left;padding:4px 8px">MASVS</th>
+                  <th class="muted small uppercase" style="text-align:right;padding:4px 8px">findings</th>
+                  <th class="muted small uppercase" style="text-align:left;padding:4px 8px">worst</th>
+                </tr></thead>
+                <tbody>
+                ${rows.map(([k, fs]) => {
+                    const worst = fs.map((f) => (f.severity || "info").toLowerCase())
+                        .sort((a, b) => (order[a] ?? 9) - (order[b] ?? 9))[0] || "info";
+                    return `<tr style="border-top:1px solid var(--border)">
+                      <td class="t-mono" style="padding:4px 8px">${escapeHtml(k)}</td>
+                      <td class="t-mono" style="padding:4px 8px;text-align:right">${fs.length}</td>
+                      <td class="t-mono" style="padding:4px 8px;color:var(--sev-${worst});text-transform:uppercase">${worst}</td>
+                    </tr>`;
+                }).join("")}
+                </tbody>
+              </table>
+              <div class="muted small">§ 02 · CONTROL-BY-CONTROL EVIDENCE — generated on export</div>`;
+        } else if (activeTemplate === "diff") {
+            // Diff template needs a baseline; show the picker hint.
+            body = `
+              <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · DIFF SCOPE</div>
+              <div class="muted">Pick a baseline project under <a href="#/projects">/projects</a> and pass <code>--against PRJ-XXXX</code> on scan, or use the per-project <b>findings-diff</b> tab.</div>
+              <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid);margin-top:8px">§ 02 · CURRENT SURFACE</div>
+              <div>Risk ${(project.risk_score ?? 0).toFixed(1)}/100 · ${sevSummary}.</div>
+              <div class="muted small">§ 03 · NEW vs RESOLVED · § 04 · SEVERITY ESCALATIONS — populated when a baseline is set</div>`;
+        } else {
+            // technical (default): full mitigation playbook.
+            const top = sorted.slice(0, 8);
+            body = `
+              <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--magenta)">§ 01 · EXECUTIVE SUMMARY</div>
+              <div>Risk ${(project.risk_score ?? 0).toFixed(1)}/100. ${sevSummary}.</div>
+              <div class="panel-head" style="background:transparent;border:0;padding:0;color:var(--acid)">§ 02 · MITIGATION PLAYBOOK — mandatory section</div>
+              <div class="mitigation">
+                ${top.length ? top.map((f) => {
+                    const cls = sevToCls((f.severity || "info").toLowerCase());
+                    const firstLine = f.remediation.split("\n").find((l) => l.trim()) || "";
+                    return `<div class="row" style="align-items:flex-start;gap:10px"><span class="chip ${cls}">${cls.toUpperCase()}</span><div><b>${f.id} · ${escapeHtml(f.title)}</b><br>→ ${escapeHtml(firstLine)}</div></div>`;
+                }).join("") : `<div class="muted small">no actionable findings yet — run static engines.</div>`}
+              </div>
+              <div class="muted small">§ 03 · FINDINGS DETAIL · § 04 · OWASP MASVS COMPLIANCE MATRIX · § 05 · EVIDENCE PACKAGE · § 06 · REPRO STEPS</div>`;
+        }
+
+        preview.innerHTML = header + body;
     }
+
+    renderPreview();
 
     // Template selector — stable [data-template] attribute, no
     // textContent-sniffing or :first-of-type juggling.
@@ -6254,6 +6329,9 @@ async function mount_report(ctx) {
                 label.style.fontWeight = isMine ? "700" : "";
             }
         });
+        // Repaint the preview pane so the body actually reflects the
+        // newly-selected template — the whole point of clicking it.
+        renderPreview();
     };
     tmplRows.forEach((row) => {
         row.addEventListener("click", () => setActiveTemplate(row.dataset.template));
