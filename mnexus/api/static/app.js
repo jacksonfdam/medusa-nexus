@@ -1300,11 +1300,23 @@ function renderEngineFindingsBlock(findings) {
                 <div class="muted small">no findings emitted</div></div>`;
     }
     const sevColor = (s) => `var(--sev-${s})`;
+    const attrChip = (f) => {
+        if (!f.attributed_to) return "";
+        const owner = f.attributed_to;
+        let color = "var(--magenta)";
+        if (owner === "first-party") color = "var(--acid)";
+        else if (owner === "third-party (unknown)") color = "var(--sev-high)";
+        else color = "var(--cyan)";
+        const conf = (f.attribution_confidence || "").toLowerCase();
+        const dot = conf === "high" ? "●" : conf === "medium" ? "◐" : "○";
+        return `<div class="muted small" style="margin-top:3px;color:${color}">${dot} ${escapeHtml(owner)}${f.sdk_category ? ` · ${escapeHtml(f.sdk_category)}` : ""}</div>`;
+    };
     const rows = findings.map((f) => `
         <tr style="border-top:1px solid var(--border)">
           <td class="t-mono" style="padding:6px 8px;color:${sevColor(f.severity)};text-transform:uppercase;white-space:nowrap">${escapeHtml(f.severity)}</td>
           <td style="padding:6px 8px">
             <div>${escapeHtml(f.title)}</div>
+            ${attrChip(f)}
             ${f.evidence ? `<div class="muted small" style="margin-top:2px;white-space:pre-wrap;font-family:monospace">${escapeHtml(f.evidence).slice(0, 600)}</div>` : ""}
           </td>
           <td class="muted small" style="padding:6px 8px;vertical-align:top;max-width:280px;word-break:break-all">${escapeHtml(f.location || "—")}</td>
@@ -3018,11 +3030,13 @@ function view_finding_detail(ctx) {
           <span id="finding-chip"></span>
           <span class="tag" style="color:var(--magenta)" id="finding-cwe"></span>
           <span class="tag" style="color:var(--magenta)" id="finding-owasp"></span>
+          <span class="tag" id="finding-attribution" title="Library attribution — owner of the offending code" style="display:none"></span>
           <span class="grow"></span>
           <span class="badge" id="finding-state"></span>
         </div>
         <div class="title" style="font-size:20px" id="finding-title">loading…</div>
         <div class="meta" id="finding-desc"></div>
+        <div class="meta" id="finding-attribution-paths" style="display:none"></div>
         <div style="height:1px;background:var(--border);margin:8px 0"></div>
         <div class="block-label">// EVIDENCE</div>
         <pre class="code" id="finding-evidence"></pre>
@@ -6079,6 +6093,32 @@ async function mount_finding_detail(ctx) {
     setText("finding-desc", finding.description || "");
     setText("finding-cwe", finding.cwe_id ? finding.cwe_id : "");
     setText("finding-owasp", finding.owasp_mobile ? `OWASP ${finding.owasp_mobile}` : "");
+
+    // ── library attribution chip ──
+    const attrEl = $("#finding-attribution");
+    const attrPathsEl = $("#finding-attribution-paths");
+    if (attrEl && finding.attributed_to) {
+        const owner = finding.attributed_to;
+        const conf = (finding.attribution_confidence || "").toLowerCase();
+        // Colour by owner class — first-party = acid (their code, their fix),
+        // named SDK = cyan (third-party, talk to vendor or rotate),
+        // unknown third-party = magenta (warning: needs human review).
+        let color = "var(--magenta)";
+        if (owner === "first-party") color = "var(--acid)";
+        else if (owner === "third-party (unknown)") color = "var(--sev-high)";
+        else color = "var(--cyan)";
+        const dot = conf === "high" ? "●" : conf === "medium" ? "◐" : "○";
+        attrEl.style.display = "";
+        attrEl.style.color = color;
+        attrEl.textContent = `${dot} ${owner}${finding.sdk_category ? ` · ${finding.sdk_category}` : ""}`;
+
+        const paths = finding.attribution_paths || [];
+        if (attrPathsEl && paths.length) {
+            attrPathsEl.style.display = "";
+            attrPathsEl.innerHTML = `<span class="muted small uppercase">// inferred from</span> ` +
+                paths.map((p) => `<code style="font-size:11px">${escapeHtml(p)}</code>`).join("<br>");
+        }
+    }
 
     const chipEl = $("#finding-chip");
     if (chipEl) chipEl.innerHTML = `<span class="chip ${sevClass}">${sevClass.toUpperCase()}</span>`;

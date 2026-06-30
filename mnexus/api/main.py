@@ -3472,6 +3472,7 @@ async def project_find(
     Returns ``{project_id, query, hits: [{file, line, snippet, tree}], truncated}``.
     """
     from mnexus.intelligence.workspace_locator import find_in_workspace
+    from mnexus.intelligence.library_attribution import _attribute_path
 
     p = _require_project(project_id)
     nexus: MedusaNexus = app.state.nexus
@@ -3491,16 +3492,26 @@ async def project_find(
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
+    serialized_hits = []
+    for h in hits:
+        owner, confidence, category = _attribute_path(h.file, p.package_name or "")
+        serialized_hits.append({
+            "file": h.file,
+            "line": h.line,
+            "snippet": h.snippet,
+            "tree": h.tree,
+            "attributed_to": owner,
+            "attribution_confidence": confidence,
+            "sdk_category": category,
+        })
+
     return {
         "project_id": project_id,
         "query": q,
         "regex": regex,
         "case_insensitive": case_insensitive,
         "max_results": max_results,
-        "hits": [
-            {"file": h.file, "line": h.line, "snippet": h.snippet, "tree": h.tree}
-            for h in hits
-        ],
+        "hits": serialized_hits,
         "truncated": len(hits) >= max_results,
     }
 
