@@ -142,6 +142,7 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/patch apk|ipa",   "Byte-patch the active project's APK/IPA + re-sign."),
         ("/decrypt-ios <id>","Decrypt App Store IPA via bagbak / frida-ios-dump + auto-ingest."),
         ("/diff manifest|findings", "Diff the active project against the latest prior scan."),
+        ("/manifest [--tree]", "View the decoded AndroidManifest.xml (--raw default, --tree colored, --output <path> writes to disk)."),
         ("/pipeline list|run", "List built-in pipelines or run one against the active project."),
         ("/recipes [filter]","Browse /v1/recipes catalogue (built-ins + Medusa modules)."),
         ("/clear",           "Clear the screen."),
@@ -1418,6 +1419,103 @@ def _decrypt_ios(state: ReplState, args: list[str]) -> None:
         console.print(f"[dim]· {w}[/dim]")
 
 
+# ─── /manifest — decoded AndroidManifest.xml viewer ───────────────────
+
+def _manifest(state: ReplState, args: list[str]) -> None:
+    """`/manifest [--project <id>] [--raw|--tree] [--output <path>]`.
+
+    Fetch the project's decoded AndroidManifest.xml from the running
+    server and either print it (`--raw`, default) or render a coloured
+    component tree (`--tree`). `--output` writes the XML to a file
+    instead of printing.
+    """
+    if args and args[0] in ("-h", "--help"):
+        console.print(
+            "[red]usage:[/red] /manifest [--project <id>] "
+            "[--raw|--tree] [--output <path>]"
+        )
+        return
+    project_id = state.active_project_id
+    mode = "raw"           # raw | tree
+    output_path: Path | None = None
+    it = iter(args)
+    for tok in it:
+        if tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--raw":
+            mode = "raw"
+        elif tok == "--tree":
+            mode = "tree"
+        elif tok == "--output":
+            val = next(it, "")
+            if val:
+                output_path = Path(val).expanduser()
+        else:
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+    if not _require_server(state):
+        return
+
+    fmt = "json" if mode == "tree" else "xml"
+    status, body = _api_request(
+        state, "GET", f"/v1/projects/{project_id}/manifest?fmt={fmt}",
+    )
+    if status != 200:
+        console.print(f"[red]manifest failed[/red] [{status}] {str(body)[:200]}")
+        return
+
+    if mode == "tree":
+        if not isinstance(body, dict):
+            console.print(f"[red]unexpected response[/red] {type(body).__name__}"); return
+        manifest = body.get("manifest", {}) if isinstance(body, dict) else {}
+        _render_manifest_tree(manifest)
+        return
+
+    xml = body if isinstance(body, str) else str(body)
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(xml, encoding="utf-8")
+        console.print(f"[green]✓ wrote[/green] {output_path}  ({len(xml)} bytes)")
+        return
+    # Print to stdout. No syntax highlighting yet — keeps the output
+    # pipeable to `less` and `grep` without ANSI noise.
+    console.print(xml)
+
+
+def _render_manifest_tree(manifest: dict) -> None:
+    """Compact coloured tree view of parsed manifest data — REPL only."""
+    pkg = manifest.get("package") or "(unknown)"
+    ver = manifest.get("version_name") or manifest.get("version") or "?"
+    console.print(
+        f"[bold cyan]{pkg}[/bold cyan] [dim]v[/dim]{ver}  "
+        f"[dim]· min/target/compile:[/dim] "
+        f"{manifest.get('min_sdk', '?')}/{manifest.get('target_sdk', '?')}/{manifest.get('compile_sdk', '?')}"
+    )
+
+    perms = manifest.get("permissions") or []
+    if perms:
+        console.print(f"[bold magenta]permissions[/bold magenta] ({len(perms)})")
+        for p in perms[:30]:
+            console.print(f"  [dim]·[/dim] {p}")
+        if len(perms) > 30:
+            console.print(f"  [dim]…+{len(perms) - 30} more[/dim]")
+
+    comps = manifest.get("components") or []
+    if comps:
+        by_type: dict[str, list[dict]] = {}
+        for c in comps:
+            by_type.setdefault(c.get("component_type", "?"), []).append(c)
+        console.print(f"[bold magenta]components[/bold magenta] ({len(comps)})")
+        for ctype, items in by_type.items():
+            console.print(f"  [bold]{ctype}[/bold] · {len(items)}")
+            for c in items[:8]:
+                exported = "[red]exported[/red]" if c.get("exported") else "[dim]internal[/dim]"
+                console.print(f"    [dim]·[/dim] {c.get('name', '?')}  {exported}")
+            if len(items) > 8:
+                console.print(f"    [dim]…+{len(items) - 8} more[/dim]")
+
+
 # ─── /diff — manifest / findings diff between two project versions ───
 
 def _diff(state: ReplState, args: list[str]) -> None:
@@ -1627,6 +1725,7 @@ SLASH_COMMANDS = {
     "diff":      _diff,
     "pipeline":  _pipeline,
     "recipes":   _recipes,
+    "manifest":  _manifest,
     "clear":     _clear,
     "exit":      _exit,
     "quit":      _exit,
@@ -2002,6 +2101,89 @@ def findings_cmd(ctx: click.Context, project_id: str, severity: str | None, as_j
         return
     import json
     click.echo(json.dumps([f.model_dump(mode="json") for f in findings], default=str, indent=2))
+
+
+@cli.command(name="manifest",
+             help="Print the decoded AndroidManifest.xml (or Info.plist) for a project. Pipeable.")
+@click.argument("project_id")
+@click.option("--output", "output_path",
+              type=click.Path(path_type=Path),
+              default=None,
+              help="Write the XML to this path instead of stdout.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit the structured parse as JSON instead of the raw XML.")
+@click.pass_context
+def manifest_cmd(ctx: click.Context, project_id: str, output_path: Path | None, as_json: bool) -> None:
+    """Decode the project's manifest by driving the engine directly.
+
+    Bypasses the HTTP API on purpose — this flat command is meant for CI
+    pipelines (`mnexus manifest PRJ-… | grep usesCleartextTraffic`) and
+    should work without a running server.
+    """
+    import asyncio as _asyncio
+    import json as _json
+    from mnexus.engines.apktool_engine import APKToolEngine, _parse_manifest
+
+    state = ReplState(ctx.obj["config"])
+    proj = state.nexus.db.load_project(project_id)
+    if not proj:
+        console.print(f"[red]no project with id:[/red] {project_id}")
+        sys.exit(2)
+
+    apk_path = proj.apk_path if isinstance(proj.apk_path, Path) else Path(str(proj.apk_path))
+    if not apk_path.exists():
+        console.print(f"[red]source artefact missing on disk:[/red] {apk_path}")
+        sys.exit(2)
+
+    cache_dir = state.config.workspace / project_id / "apktool-manifest"
+    cache_xml = cache_dir / "AndroidManifest.xml"
+
+    if not cache_xml.exists():
+        engine = APKToolEngine(state.config)
+        try:
+            _asyncio.run(engine.decode(apk_path, cache_dir))
+        except RuntimeError:
+            pass  # apktool missing — handled by the size check below
+        # apktool may have succeeded but produced an empty AXML output
+        # (zero-byte manifest, malformed); in that case synthesise from
+        # the built-in parser so the output is still readable.
+        if (not cache_xml.exists()) or cache_xml.stat().st_size < 20:
+            meta = _asyncio.run(engine.parse_apk_with_fallback(apk_path))
+            if not meta.get("package"):
+                meta["package"] = proj.package_name
+            if not meta.get("version_name"):
+                meta["version_name"] = proj.version_name
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            from mnexus.api.main import _synth_manifest_xml
+            cache_xml.write_text(_synth_manifest_xml(meta), encoding="utf-8")
+
+    if not cache_xml.exists():
+        console.print("[red]manifest decode produced no output[/red]")
+        sys.exit(3)
+
+    if as_json:
+        # Run the parser directly against the APK so the JSON shape
+        # matches what the API + the rest of the platform produce.
+        engine = APKToolEngine(state.config)
+        try:
+            parsed = _asyncio.run(engine.parse_apk_with_fallback(apk_path))
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]manifest parse failed:[/red] {exc}")
+            sys.exit(3)
+        if not parsed.get("package"):
+            parsed["package"] = proj.package_name
+        if not parsed.get("version_name"):
+            parsed["version_name"] = proj.version_name
+        output = _json.dumps({"project_id": project_id, "manifest": parsed}, default=str, indent=2)
+    else:
+        output = cache_xml.read_text(encoding="utf-8")
+
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(output, encoding="utf-8")
+        console.print(f"[green]✓ wrote[/green] {output_path}  ({len(output)} bytes)")
+        return
+    click.echo(output)
 
 
 @cli.group(name="play-account", help="Manage stored Play identities (the account manager that backs `play-scan`).")

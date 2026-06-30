@@ -832,3 +832,48 @@ body::before {
     .body-grid { grid-template-columns: 280px 1fr; }
     .main { padding: 28px; }
 }
+
+/* ── Manifest side-sheet ──────────────────────────────────────────── */
+.side-sheet {
+    position: fixed;
+    top: 0; right: 0; bottom: 0;
+    width: min(720px, 92vw);
+    background: var(--bg-panel, #0e1117);
+    border-left: 1px solid rgba(34, 211, 238, 0.4);
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.6);
+}
+.side-sheet[hidden] { display: none; }
+.side-sheet-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 18px;
+    border-bottom: 1px solid rgba(34, 211, 238, 0.2);
+    font-family: monospace;
+    font-size: 12px;
+}
+.side-sheet-head .spacer { flex: 1; }
+.side-sheet-body {
+    flex: 1;
+    overflow: auto;
+    padding: 16px 18px;
+    margin: 0;
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text, #cbd5e1);
+    background: rgba(10, 14, 20, 0.6);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.btn.xs {
+    padding: 4px 10px;
+    font-size: 11px;
+}
+.btn.xs.ghost {
+    background: transparent;
+    border: 1px solid rgba(34, 211, 238, 0.3);
+}

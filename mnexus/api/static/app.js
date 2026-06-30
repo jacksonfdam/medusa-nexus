@@ -6195,6 +6195,10 @@ function view_project_components(ctx) {
       ${projectChrome(id, "components")}
       ${sectionHeader("C", "10 // STATIC", "COMPONENTS + DEEP LINKS")}
       <section class="row" id="components-tabs"></section>
+      <section class="row" style="gap:8px;margin-bottom:8px">
+        <button class="btn small" id="components-manifest-btn" title="Open the decoded AndroidManifest.xml in a side-sheet">VIEW RAW MANIFEST</button>
+        <span class="muted small">cached on first open · re-runs apktool when the cache is empty</span>
+      </section>
       <section class="panel">
         <div class="panel-head"><span>// EXPORTED COMPONENTS</span><span class="spacer"></span><span class="muted" id="components-count">loading…</span></div>
         <div class="panel-body tight" id="components-table">loading…</div>
@@ -6207,6 +6211,16 @@ function view_project_components(ctx) {
         <div class="panel-head">// PERMISSIONS DECLARED</div>
         <div class="panel-body" id="components-permissions">loading…</div>
       </section>
+      <aside id="manifest-sheet" class="side-sheet" hidden>
+        <div class="side-sheet-head">
+          <span class="t-mono">AndroidManifest.xml</span>
+          <span class="spacer"></span>
+          <button class="btn xs ghost" id="manifest-copy">COPY</button>
+          <button class="btn xs ghost" id="manifest-download">DOWNLOAD</button>
+          <button class="btn xs" id="manifest-close">CLOSE</button>
+        </div>
+        <pre class="side-sheet-body" id="manifest-content">loading…</pre>
+      </aside>
     </div>`;
 }
 
@@ -6314,6 +6328,53 @@ async function mount_project_components(ctx) {
     } else {
         perms.innerHTML = data.permissions.map((p) => `<span class="chip info" style="margin:2px">${p}</span>`).join("");
     }
+
+    // ── Manifest side-sheet wiring ────────────────────────────────
+    const sheet = $("#manifest-sheet");
+    const content = $("#manifest-content");
+    const openBtn = $("#components-manifest-btn");
+    const closeBtn = $("#manifest-close");
+    const copyBtn = $("#manifest-copy");
+    const dlBtn = $("#manifest-download");
+    let cached = null;
+    if (openBtn) {
+        openBtn.addEventListener("click", async () => {
+            sheet.hidden = false;
+            if (cached == null) {
+                content.textContent = "loading…";
+                try {
+                    const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/manifest`);
+                    cached = await r.text();
+                    if (!r.ok) {
+                        content.textContent = `error [${r.status}]: ${cached}`;
+                        cached = null;
+                        return;
+                    }
+                } catch (e) {
+                    content.textContent = `network error: ${e}`;
+                    cached = null;
+                    return;
+                }
+            }
+            content.textContent = cached;
+        });
+    }
+    if (closeBtn) closeBtn.addEventListener("click", () => { sheet.hidden = true; });
+    if (copyBtn) copyBtn.addEventListener("click", async () => {
+        if (cached) {
+            try { await navigator.clipboard.writeText(cached); copyBtn.textContent = "COPIED"; setTimeout(() => copyBtn.textContent = "COPY", 1200); }
+            catch (e) { copyBtn.textContent = "CLIPBOARD BLOCKED"; }
+        }
+    });
+    if (dlBtn) dlBtn.addEventListener("click", () => {
+        if (!cached) return;
+        const blob = new Blob([cached], { type: "application/xml;charset=utf-8" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${id}-AndroidManifest.xml`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    });
 }
 
 /* SCREEN 11 — Native (Ghidra) */
