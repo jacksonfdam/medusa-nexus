@@ -2689,13 +2689,21 @@ function view_report() {
     <div class="main">
       ${sectionHeader("R", "22 // FINDING + REPORT", "REPORT GENERATOR")}
       <div class="row" style="align-items:flex-start;gap:16px">
-        <section class="panel" style="width:320px;flex:none">
+        <section class="panel" id="report-template-panel" style="width:320px;flex:none">
           <div class="panel-head">// TEMPLATE</div>
           <div class="panel-body col" style="gap:8px">
-            <div class="row" style="padding:10px;background:var(--bg-accent-panel);border:1px solid var(--border-accent);border-radius:2px"><span style="color:var(--acid)">●</span><span class="t-mono" style="color:var(--acid);font-weight:700">TECHNICAL</span></div>
-            <div class="row" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="muted">○</span><span class="t-mono">EXECUTIVE</span></div>
-            <div class="row" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="muted">○</span><span class="t-mono">OWASP MATRIX</span></div>
-            <div class="row" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px"><span class="muted">○</span><span class="t-mono">DIFF (v4.11 → v4.12)</span></div>
+            <div class="row report-template-row active" data-template="technical" style="padding:10px;background:var(--bg-accent-panel);border:1px solid var(--border-accent);border-radius:2px;cursor:pointer">
+              <span style="color:var(--acid)">●</span><span class="t-mono" style="color:var(--acid);font-weight:700">TECHNICAL</span>
+            </div>
+            <div class="row report-template-row" data-template="executive" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;cursor:pointer">
+              <span class="muted">○</span><span class="t-mono">EXECUTIVE</span>
+            </div>
+            <div class="row report-template-row" data-template="owasp-matrix" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;cursor:pointer">
+              <span class="muted">○</span><span class="t-mono">OWASP MATRIX</span>
+            </div>
+            <div class="row report-template-row" data-template="diff" style="padding:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;cursor:pointer">
+              <span class="muted">○</span><span class="t-mono">DIFF</span>
+            </div>
             <div style="height:1px;background:var(--border);margin:8px 0"></div>
             <div class="panel-head" style="background:transparent;border:0;padding:0">// INCLUDE</div>
             <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span style="color:var(--acid);flex:1">Mitigation Playbook</span><span class="small" style="color:var(--magenta)">mandatory</span></div>
@@ -2704,8 +2712,14 @@ function view_report() {
             <div class="row"><span style="color:var(--acid);font-weight:700">[x]</span><span>Traffic captures (sanitized)</span></div>
             <div style="height:1px;background:var(--border);margin:8px 0"></div>
             <div class="panel-head" style="background:transparent;border:0;padding:0">// EXPORT</div>
-            <div class="row" style="gap:8px"><button class="btn primary">[ PDF ]</button><button class="btn">[ HTML ]</button></div>
-            <div class="row" style="gap:8px"><button class="btn">[ .MD ]</button><button class="btn">[ JSON ]</button></div>
+            <div class="row" style="gap:8px">
+              <button class="btn primary" data-export="pdf">[ PDF ]</button>
+              <button class="btn" data-export="html">[ HTML ]</button>
+            </div>
+            <div class="row" style="gap:8px">
+              <button class="btn" data-export="markdown">[ .MD ]</button>
+              <button class="btn" data-export="json">[ JSON ]</button>
+            </div>
           </div>
         </section>
         <section class="panel grow">
@@ -6173,53 +6187,72 @@ async function mount_report(ctx) {
         }
     }
 
-    // Template selector — make all rows clickable.
-    const tmplRows = $$(".panel:first-of-type .panel-body .row");
-    tmplRows.forEach((row) => {
-        const txt = row.textContent.trim().toLowerCase();
-        const tmpl = txt.includes("executive") ? "executive"
-            : txt.includes("owasp") ? "owasp-matrix"
-            : txt.includes("diff") ? "diff"
-            : txt.includes("technical") ? "technical" : null;
-        if (!tmpl) return;
-        row.style.cursor = "pointer";
-        row.addEventListener("click", () => {
-            activeTemplate = tmpl;
-            tmplRows.forEach((r) => {
-                const t = r.textContent.trim().toLowerCase();
-                const isMine = t.includes(activeTemplate.replace("-matrix", " matrix")) || (activeTemplate === "technical" && t.includes("technical"));
-                r.style.background = isMine ? "var(--bg-accent-panel)" : "var(--bg-panel)";
-                r.style.borderColor = isMine ? "var(--border-accent)" : "var(--border)";
-            });
+    // Template selector — stable [data-template] attribute, no
+    // textContent-sniffing or :first-of-type juggling.
+    const tmplRows = $$("#report-template-panel [data-template]");
+    const setActiveTemplate = (next) => {
+        activeTemplate = next;
+        tmplRows.forEach((r) => {
+            const isMine = r.dataset.template === next;
+            r.classList.toggle("active", isMine);
+            r.style.background = isMine ? "var(--bg-accent-panel)" : "var(--bg-panel)";
+            r.style.borderColor = isMine ? "var(--border-accent)" : "var(--border)";
+            // Re-render the dot indicator on the first child <span>.
+            const dot = r.querySelector("span");
+            if (dot) {
+                dot.textContent = isMine ? "●" : "○";
+                dot.style.color = isMine ? "var(--acid)" : "";
+                dot.className = isMine ? "" : "muted";
+            }
+            const label = r.querySelector("span:nth-child(2)");
+            if (label) {
+                label.style.color = isMine ? "var(--acid)" : "";
+                label.style.fontWeight = isMine ? "700" : "";
+            }
         });
+    };
+    tmplRows.forEach((row) => {
+        row.addEventListener("click", () => setActiveTemplate(row.dataset.template));
     });
 
-    $$(".btn.primary, .btn").forEach((btn) => {
-        const t = btn.textContent.trim();
-        const m = t.match(/^\[ (PDF|HTML|\.MD|JSON) \]$/);
-        if (!m) return;
+    // Export buttons — stable [data-export] attribute, single regex-free
+    // wireup. Each button knows its format directly from the attribute.
+    const labelFor = (fmt) => ({ pdf: "PDF", html: "HTML", markdown: ".MD", json: "JSON" })[fmt] || fmt.toUpperCase();
+    $$("[data-export]").forEach((btn) => {
+        const fmt = btn.dataset.export;
         btn.addEventListener("click", async () => {
             if (!targetId) { alert("no project selected — scan one first."); return; }
-            const fmt = { "PDF": "pdf", "HTML": "html", ".MD": "markdown", "JSON": "json" }[m[1]];
             const fd = new FormData();
             fd.append("template", activeTemplate);
             fd.append("fmt", fmt);
+            const original = btn.textContent;
             btn.textContent = "[ … ]";
-            const r = await fetch(`/v1/projects/${encodeURIComponent(targetId)}/report`, { method: "POST", body: fd });
-            if (!r.ok) {
-                const detail = await r.text();
-                btn.textContent = `[ ${m[1]} ✕ ]`; btn.style.color = "var(--sev-crit)";
-                alert(`report failed (${r.status}): ${detail.slice(0, 240)}`);
-                return;
+            btn.disabled = true;
+            try {
+                const r = await fetch(`/v1/projects/${encodeURIComponent(targetId)}/report`, { method: "POST", body: fd });
+                if (!r.ok) {
+                    const detail = await r.text();
+                    btn.textContent = `[ ${labelFor(fmt)} ✕ ]`;
+                    btn.style.color = "var(--sev-crit)";
+                    alert(`report failed (${r.status}): ${detail.slice(0, 240)}`);
+                    return;
+                }
+                const blob = await r.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `${targetId}.${fmt === "markdown" ? "md" : fmt}`;
+                a.click();
+                URL.revokeObjectURL(url);
+                btn.textContent = `[ ${labelFor(fmt)} ✓ ]`;
+                btn.style.color = "var(--acid)";
+                setTimeout(() => {
+                    btn.textContent = original;
+                    btn.style.color = "";
+                }, 1800);
+            } finally {
+                btn.disabled = false;
             }
-            const blob = await r.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url; a.download = `${targetId}.${fmt === "markdown" ? "md" : fmt}`;
-            a.click();
-            URL.revokeObjectURL(url);
-            btn.textContent = `[ ${m[1]} ✓ ]`; btn.style.color = "var(--acid)";
-            setTimeout(() => { btn.textContent = `[ ${m[1]} ]`; btn.style.color = ""; }, 1800);
         });
     });
 }
