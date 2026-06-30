@@ -416,6 +416,39 @@ repro, not the UI.
 - `200` — Successful Response
 - `422` — Validation Error
 
+## `GET /v1/projects/{project_id}/manifest`
+
+**Project Manifest**
+
+Decoded ``AndroidManifest.xml`` for the project (or ``Info.plist`` for iOS).
+
+Query params:
+  * ``fmt=xml`` (default) — returns the decoded XML as ``text/xml``.
+  * ``fmt=json``           — returns the structured parse as JSON.
+
+Caching:
+  The full ``apktool d -s`` decode runs at most once per project. The
+  result lands at ``\<workspace>/\<project_id>/apktool-manifest/`` and
+  every subsequent call streams the cached file. If the APK / IPA
+  changes (re-ingest), the project id changes too (content-addressed),
+  so the cache is implicitly versioned.
+
+Failure modes:
+  * 404 — project id unknown.
+  * 422 — project's source artefact is no longer on disk.
+  * 503 — neither apktool nor the built-in AXML fallback could
+          produce a manifest (rare; means the artefact itself is
+          malformed).
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `fmt` | query | no | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
 ## `GET /v1/projects/{project_id}/manifest-diff`
 
 **Project Manifest Diff**

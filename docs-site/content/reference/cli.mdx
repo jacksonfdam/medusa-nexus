@@ -57,6 +57,19 @@ mnexus findings
 | `--severity` | CHOICE | — | Filter by severity floor (everything at or above). |
 | `--json` | BOOLEAN | `False` | Emit a JSON array on stdout. |
 
+### `mnexus manifest`
+
+Print the decoded AndroidManifest.xml (or Info.plist) for a project. Pipeable.
+
+```bash
+mnexus manifest <project_id>
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--output` | PATH | — | Write the XML to this path instead of stdout. |
+| `--json` | BOOLEAN | `False` | Emit the structured parse as JSON instead of the raw XML. |
+
 ### `mnexus mcp-serve`
 
 Run as an MCP (Model Context Protocol) stdio server — wire MedusaNexus into Claude Desktop / Cursor / Zed.

@@ -90,6 +90,37 @@ Open `http://127.0.0.1:8765/#/projects/PRJ-…` after `/serve`:
 | **Manifest diff** | `GET /v1/projects/{id}/manifest-diff` | Surface delta vs prior scan. |
 | **Findings diff** | `GET /v1/projects/{id}/findings-diff` | Security delta vs prior scan. |
 
+## Reading the decoded `AndroidManifest.xml`
+
+The static scan parses the manifest into findings (debuggable, allowBackup, exported components, intent-filters) but the raw XML stays out of the SPA by default. Three surfaces expose it on demand:
+
+**REPL** — most ergonomic during interactive analysis:
+
+```
+🔱 nexus PRJ-… ❯ /manifest                # raw XML to stdout
+🔱 nexus PRJ-… ❯ /manifest --tree         # colored component tree
+🔱 nexus PRJ-… ❯ /manifest --output ./m.xml  # write to disk
+```
+
+**Flat CLI** — pipeable for CI greps and scripts:
+
+```bash
+mnexus manifest PRJ-355151DF | grep usesCleartextTraffic
+mnexus manifest PRJ-355151DF --json | jq '.manifest.permissions[]'
+mnexus manifest PRJ-355151DF --output ./AndroidManifest.xml
+```
+
+**HTTP API** — same data the REPL and SPA consume:
+
+```bash
+curl http://127.0.0.1:8765/v1/projects/PRJ-355151DF/manifest          # text/xml
+curl http://127.0.0.1:8765/v1/projects/PRJ-355151DF/manifest?fmt=json # application/json
+```
+
+**Web UI** — Components tab → `[ VIEW RAW MANIFEST ]` button → side-sheet with copy + download.
+
+Caching: the first request runs `apktool d -f` (or the built-in AXML fallback when apktool isn't on PATH) and stores the result at `<workspace>/<project_id>/apktool-manifest/AndroidManifest.xml`. Subsequent requests stream the cached file in <10ms. Re-ingesting the APK produces a new project id (content-addressed), so the cache is implicitly versioned.
+
 ## Re-scanning
 
 When you suspect a finding is stale (e.g. you changed a rule):
