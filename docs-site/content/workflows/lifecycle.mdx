@@ -1,0 +1,214 @@
+---
+title: Project lifecycle — find · backup · delete
+---
+
+import { Callout } from 'nextra/components';
+
+# Project lifecycle — find / backup / delete
+
+Three operations that the rest of the platform assumed someone would
+build later: locating an arbitrary string inside a project's
+decompiled workspace, archiving an entire project for cold storage,
+and wiping every trace of a project from disk + DB for legal /
+compliance reasons.
+
+## Why this exists
+
+The static engines surface findings with a generic `location` — a
+finding might say *"Detected `AIzaSy…` in DEX strings"* but not point
+at the specific `.java` / `.smali` file the string ended up in.
+**`find`** closes that gap.
+
+Legal / compliance teams routinely need to (a) export every
+analysis-related artefact for one app to a portable archive, and (b)
+remove every trace of one app's analysis from the host. **`backup`**
+and **`delete`** are the platform answers — both designed so the
+output is auditable enough to show to a regulator.
+
+<Callout type="warning" emoji="🪓">
+`delete` is destructive and irreversible. It wipes the project's
+workspace tree, reports, source APK (when no other project shares
+the file), PlayIntel secrets directory (when no other project shares
+the package), and the DB rows. The platform refuses to run without
+`--yes` / `?confirm=true`. Run a `backup` first if there's any chance
+you'll want the data again.
+</Callout>
+
+## `mnexus find` — locate a string in the workspace
+
+The locator walks four trees, in priority order:
+
+1. `<workspace>/<pid>/jadx/`           — decompiled Java/Kotlin
+2. `<workspace>/<pid>/apktool/`        — smali + decoded resources
+3. `<workspace>/<pid>/apktool-manifest/` — manifest cache
+4. `<workspace>/secrets/<package>/`    — PlayIntel-saved bearing files
+
+Filters by file extension (`.java`, `.kt`, `.smali`, `.xml`, `.json`,
+`.js`, `.properties`, `.txt`, `.arsc`, etc.) to keep the search fast
+on heavy projects.
+
+### From the REPL
+
+```
+🔱 nexus PRJ-… ❯ /find AIzaSyDgmW4ZMvNblSXq
+```
+
+```
+🔱 nexus PRJ-… ❯ /find "AIzaSy[A-Za-z0-9_]+" --regex
+🔱 nexus PRJ-… ❯ /find authorization -i --max 50
+```
+
+Output is one line per hit: `[tree] file:line  context snippet`.
+
+### From the flat CLI (no server required)
+
+```bash
+mnexus find PRJ-355151DF AIzaSyDgmW4ZMvNblSXq
+mnexus find PRJ-355151DF "AIzaSy[A-Za-z0-9_]+" --regex --max 100
+mnexus find PRJ-355151DF authorization -i --json | jq '.hits[] | {file, line}'
+```
+
+The flat command works offline — bypasses the FastAPI server and walks
+the workspace directly. Useful for batch grepping in CI.
+
+### HTTP API
+
+```
+GET /v1/projects/{id}/find?q=<pattern>[&regex=true][&case_insensitive=true][&max_results=200]
+```
+
+Returns `{project_id, query, hits: [{file, line, snippet, tree}], truncated}`.
+
+## `mnexus project backup` — archive everything
+
+Produces a self-contained `.zip` with everything attributable to one
+project:
+
+```
+project-<id>-backup-<timestamp>.zip
+├── MANIFEST.json         backup metadata (format version, sizes, counts)
+├── project.json          the Project model dump
+├── findings/             one .json per finding
+│   └── FND-7B22A91C.json
+├── source.apk            the original artefact (or source.ipa)
+├── workspace/            entire <workspace>/<id>/ tree
+│   ├── apktool-manifest/
+│   ├── jadx/
+│   ├── ghidra/
+│   ├── hooks/
+│   └── …
+└── reports/              <workspace>/reports/<id>.* if any
+```
+
+### From the flat CLI
+
+```bash
+mnexus project backup PRJ-355151DF                       # → <workspace>/backups/
+mnexus project backup PRJ-355151DF --output ~/archives/  # custom output dir
+mnexus project backup --all                              # every project
+mnexus project backup PRJ-355151DF --json                # CI-friendly summary
+```
+
+### From the REPL
+
+```
+🔱 nexus PRJ-… ❯ /backup                # active project
+🔱 nexus PRJ-… ❯ /backup --all
+```
+
+### HTTP API
+
+```
+POST /v1/projects/{id}/backup            # streams the .zip back via FileResponse
+POST /v1/projects/backup-all             # JSON summary; archives stay on the host
+```
+
+The on-disk archive is kept after the download. Move it to S3 / rsync /
+whatever your cold-storage path is. Retention is unmanaged by the
+platform — handle it from the operating system side.
+
+## `mnexus project delete` — full data wipe
+
+Wipes everything in this order (least-to-most destructive, so a
+mid-flight crash leaves the DB row pointing at *some* surviving
+artefact):
+
+1. **Reports** keyed by project id — `<workspace>/reports/<id>.*`.
+2. **Workspace directory** — `<workspace>/<id>/` entirely.
+3. **Source artefact** — only if no other project's `apk_path` resolves
+   to the same on-disk file. (Each upload normally writes to its own
+   `upload-<uuid>-<name>` path, so this is usually safe; the check is
+   defensive in case a future upload step ever dedupes by SHA.)
+4. **PlayIntel secrets directory** — `<workspace>/secrets/<package>/`,
+   only if no other project shares the package name.
+5. **DB rows** — `projects` (FK `CASCADE` wipes `findings` +
+   `dynamic_events` automatically).
+
+The audit trail comes back as a structured `DeleteResult`:
+
+```json
+{
+  "project_id": "PRJ-355151DF",
+  "package": "com.target.app",
+  "workspace_dir_removed": true,
+  "workspace_bytes_freed": 47823412,
+  "workspace_files_removed": 8194,
+  "source_artefact_removed": "/Users/.../workspace/upload-5b610fba-target.apk",
+  "secrets_dir_removed": "/Users/.../workspace/secrets/com.target.app",
+  "reports_removed": ["/Users/.../workspace/reports/PRJ-355151DF.html"],
+  "findings_removed": 42,
+  "dynamic_events_removed": 0,
+  "db_row_removed": true,
+  "completed_at": "2026-06-30T14:22:01.123456+00:00"
+}
+```
+
+### From the flat CLI
+
+```bash
+mnexus project delete PRJ-355151DF --yes
+mnexus project delete --all --yes
+mnexus project delete PRJ-355151DF --yes --json
+```
+
+### From the REPL
+
+```
+🔱 nexus PRJ-… ❯ /delete
+about to wipe project PRJ-… — this cannot be undone. type yes to proceed: yes
+✓ wiped PRJ-355151DF · com.target.app
+  workspace        · 8194 file(s) · 45.6 MB
+  source artefact  · /Users/.../upload-5b610fba-target.apk
+  secrets dir      · /Users/.../secrets/com.target.app
+  db               · 42 finding(s) + 0 dynamic event(s) + 1 project row
+```
+
+Without `--yes`, the REPL prompts interactively; the flat CLI refuses
+outright. Both default-to-safe.
+
+### HTTP API
+
+```
+DELETE /v1/projects/{id}?confirm=true    # single project; returns audit
+DELETE /v1/projects?confirm=true         # every project; returns per-project audits
+```
+
+`confirm=true` is mandatory — without it the endpoint returns 400.
+
+## When to back up vs delete
+
+* **Back up before delete.** Always. Cheap insurance.
+* **Back up before re-scanning a project to test a new rule.** The
+  re-scan replaces findings in place; the backup preserves the prior
+  state.
+* **Delete when legal asks.** GDPR / right-to-be-forgotten / NDA-bound
+  audit cleanup. The structured audit trail is the receipt.
+* **Delete `--all` at the end of an engagement.** Equivalent to factory
+  reset — wipes every project, every workspace, every report. Pair with
+  `--json` so the receipt lives in your engagement file.
+
+## Code references
+
+* Locator: [`mnexus/intelligence/workspace_locator.py`](https://github.com/jacksonfdam/medusa-nexus/blob/main/mnexus/intelligence/workspace_locator.py)
+* Lifecycle: [`mnexus/core/project_lifecycle.py`](https://github.com/jacksonfdam/medusa-nexus/blob/main/mnexus/core/project_lifecycle.py)
+* Tests: [`tests/test_project_lifecycle.py`](https://github.com/jacksonfdam/medusa-nexus/blob/main/tests/test_project_lifecycle.py)

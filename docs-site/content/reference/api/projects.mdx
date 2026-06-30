@@ -6,12 +6,68 @@ title: projects · API
 
 Auto-generated from FastAPI OpenAPI. The descriptions are lifted from the route docstrings — edit the Python source, not this page.
 
+## `DELETE /v1/projects`
+
+**Projects Delete All**
+
+Wipe every project. Equivalent to factory reset — handle with care.
+
+Same confirmation contract as the single-project delete: pass
+``?confirm=true``. Returns per-project audit trails.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `confirm` | query | no | boolean |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
 ## `GET /v1/projects`
 
 **List Projects**
 
 **Responses:**
 - `200` — Successful Response
+
+## `POST /v1/projects/backup-all`
+
+**Projects Backup All**
+
+Backup every project. One zip per project, lands in ``\<workspace>/backups/``.
+
+The response carries the per-project audit trail. Each archive
+stays on disk so the caller can subsequently move them off-host
+(S3, rsync, whatever the compliance posture demands).
+
+**Responses:**
+- `200` — Successful Response
+
+## `DELETE /v1/projects/{project_id}`
+
+**Project Delete**
+
+Wipe every disk + DB trace of a project. Returns the audit trail.
+
+Pass ``?confirm=true`` to execute. Without the confirmation flag the
+endpoint refuses with 400 — this is destructive, the caller has to
+say yes explicitly.
+
+The response carries a structured ``DeleteResult`` dict so the
+operator can log + show the wipe to legal / audit. Includes:
+workspace bytes freed, files removed, whether the source artefact
++ secrets dir were wiped (gated on no other project sharing the
+SHA / package), reports removed, findings + dynamic-event counts,
+and the DB-row removal flag.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `confirm` | query | no | boolean |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
 
 ## `GET /v1/projects/{project_id}`
 
@@ -67,6 +123,25 @@ Screen 19 — attack tree per high-severity finding.
 
 For every CRIT/HIGH finding we synthesize a 3-step chain:
 prerequisite → exploitation → impact. Cheap, deterministic, useful.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `POST /v1/projects/{project_id}/backup`
+
+**Project Backup**
+
+Produce a ``.zip`` backup of the project and stream it back.
+
+The archive lands in ``\<workspace>/backups/`` and is returned via
+FileResponse so the client downloads it directly. The on-disk copy
+is kept (under the workspace), useful for incremental cold-storage
+rotation; manage retention manually or with a cron.
 
 | parameter | in | required | type | description |
 | --------- | -- | -------- | ---- | ----------- |
@@ -265,6 +340,39 @@ Formats:
 | --------- | -- | -------- | ---- | ----------- |
 | `project_id` | path | yes | string |  |
 | `fmt` | path | yes | string |  |
+
+**Responses:**
+- `200` — Successful Response
+- `422` — Validation Error
+
+## `GET /v1/projects/{project_id}/find`
+
+**Project Find**
+
+Locate ``q`` inside the project's static workspace (jadx + apktool + …).
+
+Answers questions like *"the jadx finding flagged this AIza key but
+not which file — which file is it actually in?"* Walks the
+decompiled trees, the manifest cache, and (when ``package_name`` is
+known) the PlayIntel ``secrets/\<package>/`` directory.
+
+Query params:
+  * ``q``                — pattern. Required.
+  * ``regex=true``       — interpret ``q`` as a Python regex.
+  * ``case_insensitive=true`` — lower-case the haystack + needle.
+  * ``max_results=200``  — cap the response. The walker stops once
+                           the cap is hit and the response carries
+                           ``truncated=true``.
+
+Returns ``\{project_id, query, hits: [\{file, line, snippet, tree\}], truncated\}``.
+
+| parameter | in | required | type | description |
+| --------- | -- | -------- | ---- | ----------- |
+| `project_id` | path | yes | string |  |
+| `q` | query | yes | string |  |
+| `regex` | query | no | boolean |  |
+| `case_insensitive` | query | no | boolean |  |
+| `max_results` | query | no | integer |  |
 
 **Responses:**
 - `200` — Successful Response

@@ -43,6 +43,21 @@ Verify every engine is installed, reachable, and not lying about its version.
 mnexus doctor
 ```
 
+### `mnexus find`
+
+Grep the project's static workspace (jadx + apktool + secrets) for a string or regex.
+
+```bash
+mnexus find <project_id> <pattern>
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--regex` | BOOLEAN | `False` | Treat pattern as a Python regex. |
+| `-i` / `--case-insensitive` | BOOLEAN | `False` | Match without case sensitivity. |
+| `--max` | INTEGER | `200` | Cap the result count (default 200). |
+| `--json` | BOOLEAN | `False` | JSON output for CI. |
+
 ### `mnexus findings`
 
 List findings on a project. Pair with --json for CI consumption.
@@ -152,6 +167,42 @@ mnexus play-scan <package>
 | `--apk` | PATH | — | Local APK file to scan instead of fetching from Play. |
 | `--account` / `-A` | TEXT | — | Stored Play identity to scan as (default: the one flagged default). |
 | `--no-probes` | BOOLEAN | `False` | Skip the active Firebase / Firestore / Storage probes (offline mode). |
+
+### `mnexus project`
+
+Project lifecycle — backup + delete with full data wipe.
+
+```bash
+mnexus project <subcommand>
+```
+
+#### `mnexus project backup`
+
+Backup one or every project to a .zip archive. Default output: \<workspace>/backups/.
+
+```bash
+mnexus project backup <project_id>
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--all` | BOOLEAN | `False` | Backup every project in the store. |
+| `--output` | PATH | — | Override the output directory (defaults to \<workspace>/backups/). |
+| `--json` | BOOLEAN | `False` | JSON output for CI. |
+
+#### `mnexus project delete`
+
+Wipe one or every project from disk + DB. Destructive; pass --yes.
+
+```bash
+mnexus project delete <project_id>
+```
+
+| flag | type | default | description |
+| ---- | ---- | ------- | ----------- |
+| `--all` | BOOLEAN | `False` | Delete every project. Equivalent to factory reset. |
+| `--yes` | BOOLEAN | `False` | Explicit confirmation. Required. |
+| `--json` | BOOLEAN | `False` | JSON output for CI. |
 
 ### `mnexus projects`
 
