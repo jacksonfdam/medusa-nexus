@@ -6273,6 +6273,7 @@ function projectChrome(id, label) {
     return h`
       <div class="row" style="align-items:center">
         <div class="muted small uppercase grow">🔱 NEXUS / ${id} / ${label}</div>
+        <button class="btn xs ghost" onclick="projectChromeManifest('${id}')" title="View the decoded AndroidManifest.xml (or Info.plist on iOS)">[ MANIFEST ]</button>
         <button class="btn xs ghost" onclick="projectChromeBackup('${id}')">[ BACKUP ]</button>
         <button class="btn xs ghost danger" onclick="projectChromeDelete('${id}')">[ DELETE ]</button>
       </div>
@@ -6281,6 +6282,75 @@ function projectChrome(id, label) {
 
 // Exposed on window so the inline onclick="…" handlers in projectChrome
 // can reach them — vanilla SPA pattern, no framework router gluing.
+window.projectChromeManifest = async function (id) {
+    // Reuse a single chrome-level side-sheet so the markup doesn't have
+    // to live in every view's template. We also reuse it across
+    // navigations — opening on one tab, switching to another tab will
+    // wipe the SPA's view shell but the sheet stays scoped to
+    // document.body and gets removed by the next chrome render.
+    let sheet = document.getElementById("chrome-manifest-sheet");
+    if (sheet) sheet.remove();
+    sheet = document.createElement("aside");
+    sheet.id = "chrome-manifest-sheet";
+    sheet.className = "side-sheet";
+    sheet.innerHTML = `
+      <div class="side-sheet-head">
+        <span class="t-mono">AndroidManifest.xml · ${id}</span>
+        <span class="spacer"></span>
+        <button class="btn xs ghost" id="chrome-manifest-copy">COPY</button>
+        <button class="btn xs ghost" id="chrome-manifest-download">DOWNLOAD</button>
+        <button class="btn xs" id="chrome-manifest-close">CLOSE</button>
+      </div>
+      <pre class="side-sheet-body" id="chrome-manifest-content">loading…</pre>`;
+    document.body.appendChild(sheet);
+
+    const content = document.getElementById("chrome-manifest-content");
+    const closeBtn = document.getElementById("chrome-manifest-close");
+    const copyBtn = document.getElementById("chrome-manifest-copy");
+    const dlBtn = document.getElementById("chrome-manifest-download");
+    let xml = "";
+
+    try {
+        const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/manifest`);
+        xml = await r.text();
+        if (!r.ok) {
+            content.textContent = `error [${r.status}]: ${xml.slice(0, 400)}`;
+            return;
+        }
+        content.textContent = xml;
+    } catch (e) {
+        content.textContent = `network error: ${e}`;
+        return;
+    }
+
+    closeBtn.addEventListener("click", () => sheet.remove());
+    copyBtn.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(xml);
+            copyBtn.textContent = "COPIED";
+            setTimeout(() => copyBtn.textContent = "COPY", 1200);
+        } catch {
+            copyBtn.textContent = "CLIPBOARD BLOCKED";
+        }
+    });
+    dlBtn.addEventListener("click", () => {
+        const blob = new Blob([xml], { type: "application/xml;charset=utf-8" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${id}-AndroidManifest.xml`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    });
+    // Esc closes the sheet.
+    const onKey = (ev) => {
+        if (ev.key === "Escape") {
+            document.removeEventListener("keydown", onKey);
+            sheet.remove();
+        }
+    };
+    document.addEventListener("keydown", onKey);
+};
+
 window.projectChromeBackup = async function (id) {
     const confirmed = await confirmModal({
         title: `Backup project ${id}?`,
