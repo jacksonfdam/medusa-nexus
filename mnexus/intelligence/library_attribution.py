@@ -233,18 +233,30 @@ def _attribute_path(file_path: str, app_package: str) -> tuple[str, str, str]:
     return ("third-party (unknown)", "medium", None)
 
 
+# Only walk source-bearing files for attribution. Resource bundles
+# (.json / .xml / .properties) are usually not where SDK ownership
+# lives, so dropping them cuts the locator's read budget by an order
+# of magnitude on real release APKs.
+_ATTRIBUTION_EXTENSIONS = (".java", ".kt", ".kts", ".smali")
+
+
 def attribute_finding(
     finding: Finding,
     *,
     workspace_dir: Path,
     project_id: str,
     app_package: str,
+    locator_cache: dict[str, list[LocatorHit]] | None = None,
 ) -> AttributionResult | None:
     """Try to attribute one finding to an SDK or first-party code.
 
     Returns ``None`` when the finding has no actionable fingerprint
     (e.g. a manifest-level finding like ``debuggable=true`` — that's
     a build-config issue, not a library-attribution one).
+
+    ``locator_cache`` lets multiple findings that share the same
+    hardcoded key reuse one workspace walk instead of N. The caller
+    (``attribute_findings``) wires this in automatically.
     """
     fingerprints = _extract_fingerprints(finding.evidence)
     if not fingerprints:
@@ -256,18 +268,27 @@ def attribute_finding(
     fingerprints.sort(key=len, reverse=True)
     primary = fingerprints[0]
 
-    try:
-        hits = find_in_workspace(
-            workspace_dir=workspace_dir,
-            project_id=project_id,
-            pattern=primary,
-            regex=False,
-            case_insensitive=False,
-            max_results=30,
-            package_name=app_package,
-        )
-    except Exception:
-        return None
+    if locator_cache is not None and primary in locator_cache:
+        hits = locator_cache[primary]
+    else:
+        try:
+            hits = find_in_workspace(
+                workspace_dir=workspace_dir,
+                project_id=project_id,
+                pattern=primary,
+                regex=False,
+                case_insensitive=False,
+                # 10 hits is enough for a confidence vote; the walker
+                # short-circuits as soon as the cap trips so a popular
+                # key doesn't drag the whole tree through memory.
+                max_results=10,
+                extensions=_ATTRIBUTION_EXTENSIONS,
+                package_name=app_package,
+            )
+        except Exception:
+            hits = []
+        if locator_cache is not None:
+            locator_cache[primary] = hits
 
     if not hits:
         # Fingerprint exists in evidence but not on disk — could be a
@@ -317,13 +338,20 @@ def attribute_findings(
     project_id: str,
     app_package: str,
 ) -> None:
-    """Walk every finding, attribute in place. Mutates the findings."""
+    """Walk every finding, attribute in place. Mutates the findings.
+
+    Findings that share the same hardcoded fingerprint (a common case
+    when several detectors report the same ``AIza...`` key from
+    different angles) share one workspace walk via ``locator_cache``.
+    """
+    locator_cache: dict[str, list[LocatorHit]] = {}
     for finding in findings:
         result = attribute_finding(
             finding,
             workspace_dir=workspace_dir,
             project_id=project_id,
             app_package=app_package,
+            locator_cache=locator_cache,
         )
         if result is None:
             continue
