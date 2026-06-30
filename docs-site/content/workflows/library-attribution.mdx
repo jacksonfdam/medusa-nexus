@@ -1,0 +1,150 @@
+---
+title: Library attribution
+---
+
+import { Callout } from 'nextra/components';
+
+# Library attribution
+
+A finding like *"hardcoded Google API key shipped in APK"* is correct
+but operationally useless on its own. The dev who picks up the ticket
+needs to know one thing first: **whose code is the key in?** A key
+inside `com.mcdonalds.mobileapp.Config` is *their* problem — rotate,
+audit usage, ship a fix. The same key inside
+`com.google.android.libraries.places.internal.zzcg` is a *Google* SDK
+shipping a default and they get to decide whether to override the
+build config and restrict it on the Cloud Console side. Same severity,
+different remediation, different owner.
+
+Library attribution closes that gap. After every static scan
+MedusaNexus walks the workspace, traces each secret-shaped piece of
+evidence back to the file that hosts it, and tags the finding with
+the owner of that file — *first-party*, a *named SDK*, or an unknown
+third-party blob.
+
+## Three buckets
+
+Every finding that carries a secret-shaped fingerprint gets one of:
+
+- **first-party** — the artefact lives under the app's own
+  `applicationId`. The fix is in their code. Render as green / acid.
+- **named third-party SDK** — the artefact lives under a registered
+  vendor namespace (Google Places, Firebase, Amplitude, Sentry, …).
+  The fix is "rotate the key, restrict it on the vendor console, and
+  override the SDK's default value in your build config." Render as
+  cyan.
+- **third-party (unknown)** — outside the app namespace, doesn't
+  match any prefix in the registry. Worth a human review — it may be
+  a private bundled lib the registry doesn't know about, or a vendored
+  fork. Render as red / sev-high so it doesn't slip past.
+
+## How attribution works
+
+Attribution runs after `ChainCorrelator` in the orchestrator's
+intelligence phase, so it sees every individual finding plus any
+chains the correlator promoted.
+
+```
+static engines  →  individual detectors  →  chain correlator  →  library attribution
+                                                                    ↓
+                                                            finding.attributed_to
+                                                            finding.attribution_confidence
+                                                            finding.sdk_category
+                                                            finding.attribution_paths
+```
+
+The pipeline per finding:
+
+1. **Extract fingerprints** from `finding.evidence` — regex for the
+   common credential formats (`AIza…`, `AKIA…`, `sk_live_…`, JWT,
+   GitHub `ghp_…`, Twilio `AC…`, Stripe restricted, PEM blocks).
+2. **Skip findings with no fingerprint** — e.g. `debuggable=true`
+   findings are build-config issues, not library-attribution ones,
+   so they stay untagged.
+3. **Locate** the longest fingerprint in the workspace via
+   `workspace_locator.find_in_workspace` — walks
+   `<workspace>/<pid>/jadx/`, `apktool/`, `apktool-manifest/`, and
+   `<workspace>/secrets/<package>/`.
+4. **Map each hit's path** to an owner. The app's own namespace wins
+   over any vendor match. Otherwise, the **longest matching** prefix
+   in `KNOWN_SDK_PREFIXES` wins (so `com/google/firebase` beats a
+   hypothetical `com/google` catch-all).
+5. **Vote** across all hits. The most common owner wins; confidence
+   is `high` (≥80% consensus), `medium` (≥50%), or `low` otherwise.
+
+The cost is bounded — only findings whose evidence carries a
+secret-shaped pattern trigger a workspace walk. A typical APK ingest
+adds well under one second.
+
+## What's in the registry
+
+\~50 SDK prefixes covering the categories analysts hit most:
+
+- **Google ecosystem** — Firebase, Maps, Places, Play Services, AdMob, ML Kit
+- **Meta** — Facebook Login, Share, Core
+- **Analytics + product** — Amplitude, Mixpanel, Segment, Heap, AppsFlyer, Adjust, Branch
+- **Push + engagement** — OneSignal, Urban Airship, Braze
+- **Crash + monitoring** — Sentry, Datadog, New Relic, Bugsnag, Firebase Crashlytics, Instabug
+- **Payments** — Stripe, PayPal, Braintree, Square
+- **Auth + identity** — Auth0, Keycloak, Okta, Microsoft Identity
+- **Anti-fraud** — Iovation, ThreatMetrix, Incognia
+- **Networking + serialization** — OkHttp, Retrofit, Moshi, Gson
+- **Imaging + media** — Glide, Picasso, Lottie
+- **Comms** — Twilio, Slack SDK, Agora, Intercom, Zendesk
+
+The registry is intentionally a plain Python list in
+`mnexus/intelligence/library_attribution.py` — adding a vendor is a
+one-line patch.
+
+## Reading the UI
+
+Both the Findings table (engine-results block) and the per-finding
+detail view render an attribution chip after the severity tag:
+
+- `● Google Places SDK · maps` — high-confidence (filled dot),
+  named SDK, cyan
+- `◐ first-party · app-code` — medium-confidence first-party, acid
+- `○ third-party (unknown)` — low-confidence unknown, magenta /
+  sev-high — needs human review
+
+The detail view also lists the workspace-relative paths that drove
+the attribution under `// inferred from`.
+
+## API
+
+The `/v1/projects/{pid}/find` endpoint returns the same attribution
+fields on every hit:
+
+```json
+{
+  "file": "jadx/sources/com/google/android/libraries/places/internal/zzcg.java",
+  "line": 12,
+  "snippet": "...AIzaSyA...",
+  "tree": "jadx",
+  "attributed_to": "Google Places SDK",
+  "attribution_confidence": "high",
+  "sdk_category": "maps"
+}
+```
+
+So a UI that surfaces "find this key in the workspace" automatically
+gets the owner column for free.
+
+## When attribution is `none`
+
+Three reasons a finding stays untagged:
+
+1. The evidence has no secret-shaped fingerprint
+   (`debuggable=true`, weak crypto, IPC misconfig). These are
+   build-config or code-quality issues, not ownership questions.
+2. The workspace was wiped between ingest and attribution
+   (rare — only happens if you `mnexus project delete` mid-pipeline).
+3. The library attribution pass raised — check `mnexus.log` for the
+   `library_attribution raised:` warning.
+
+<Callout type="info">
+**Why "first-party" is high-confidence by default.**
+The `applicationId` is a single, stable, unambiguous string. If the
+file path starts with it, the file *is* yours — no voting required.
+Vendor matches require ≥80% hit consensus before they earn `high`.
+</Callout>
