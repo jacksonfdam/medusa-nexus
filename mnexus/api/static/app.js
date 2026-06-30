@@ -1594,6 +1594,9 @@ function projectTabs(id, active) {
     <div class="tab-bar">
       ${tabs.map(([k, label]) => `<a class="tab ${k === active ? "active" : ""}" href="#/project/${encodeURIComponent(id)}/${k}">${k === active ? "> " : "  "}${label}</a>`).join("")}
       <span class="grow"></span>
+      <button class="tab" onclick="projectChromeManifest('${id}')" title="View the decoded AndroidManifest.xml (or Info.plist on iOS)">📄 MANIFEST</button>
+      <button class="tab" onclick="projectChromeBackup('${id}')" title="Zip up the entire project — model + findings + workspace + reports">↓ BACKUP</button>
+      <button class="tab" onclick="projectChromeDelete('${id}')" title="Wipe every disk + DB trace of this project (destructive)" style="color:var(--sev-high)">🗑 DELETE</button>
       <button class="tab" data-rescan="${id}" title="re-run static fan-out + rebuild attack surface">⟳ RESCAN</button>
       <a class="tab" href="#/project/${encodeURIComponent(id)}/${active}" data-refresh="${id}" title="reload current view">↻ REFRESH</a>
     </div>`;
@@ -6270,13 +6273,13 @@ function projectChrome(id, label) {
         "api-map": "network", "ssl-map": "network",
         surface: "static", dataflow: "static", "attack-tree": "static", owasp: "static",
     })[label] || "static";
+    // Backup / delete / manifest buttons now live inside projectTabs()
+    // (the right-side action group of the tab bar), so they show up on
+    // every project sub-page — including the OVERVIEW / STATIC /
+    // DYNAMIC / RUNTIME parents that render projectTabs() directly
+    // instead of going through this chrome helper.
     return h`
-      <div class="row" style="align-items:center">
-        <div class="muted small uppercase grow">🔱 NEXUS / ${id} / ${label}</div>
-        <button class="btn xs ghost" onclick="projectChromeManifest('${id}')" title="View the decoded AndroidManifest.xml (or Info.plist on iOS)">[ MANIFEST ]</button>
-        <button class="btn xs ghost" onclick="projectChromeBackup('${id}')">[ BACKUP ]</button>
-        <button class="btn xs ghost danger" onclick="projectChromeDelete('${id}')">[ DELETE ]</button>
-      </div>
+      <div class="muted small uppercase">🔱 NEXUS / ${id} / ${label}</div>
       ${projectTabs(id, parent)}`;
 }
 
