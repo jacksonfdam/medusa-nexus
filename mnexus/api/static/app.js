@@ -321,6 +321,17 @@ function view_projects() {
         <div class="input grow"><span class="prompt">&gt;</span><input placeholder="filter by package, min risk, critical-only…"><span class="cursor">_</span></div>
         <a class="btn primary" href="#/scan">[ + IMPORT APK ]</a>
       </section>
+      <section class="row" id="projects-bulk-bar" style="gap:8px;margin-bottom:8px" hidden>
+        <span class="muted small" id="projects-bulk-count">0 selected</span>
+        <span class="spacer"></span>
+        <button class="btn small" id="projects-bulk-backup">[ BACKUP SELECTED ]</button>
+        <button class="btn small danger" id="projects-bulk-delete">[ DELETE SELECTED ]</button>
+      </section>
+      <section class="row" style="gap:8px;margin-bottom:8px">
+        <span class="spacer"></span>
+        <button class="btn small ghost" id="projects-backup-all">[ BACKUP ALL ]</button>
+        <button class="btn small ghost danger" id="projects-delete-all">[ DELETE ALL ]</button>
+      </section>
       <section class="panel">
         <div class="panel-head">
           <span>// PROJECTS</span>
@@ -342,26 +353,156 @@ async function mount_projects() {
             <div style="font-size:24px;color:var(--magenta);letter-spacing:4px;margin-bottom:12px">NO PROJECTS YET</div>
             <div>drop an APK on the <a href="#/scan">Scan</a> screen or pull one off a device</div>
           </div>`;
+        // Hide bulk + all action buttons when there's nothing to act on.
+        const allBtn = $("#projects-backup-all"); if (allBtn) allBtn.hidden = true;
+        const dAllBtn = $("#projects-delete-all"); if (dAllBtn) dAllBtn.hidden = true;
         return;
     }
     const header = `
-      <div class="table-hdr" style="grid-template-columns: 40px 1fr 140px 90px 100px 120px 140px">
-        <span></span><span>PACKAGE</span><span>VERSION</span><span>RISK</span><span>SEVERITIES</span><span>UPDATED</span><span></span>
+      <div class="table-hdr" style="grid-template-columns: 28px 40px 1fr 140px 90px 100px 120px 140px">
+        <span></span><span></span><span>PACKAGE</span><span>VERSION</span><span>RISK</span><span>SEVERITIES</span><span>UPDATED</span><span></span>
       </div>`;
     const rows = projects.map((p) => {
         const score = p.risk_score || 0;
+        const sevColor = classifyRisk(score);
+        const pid = p.id;
         return `
-        <a class="table-row" href="#/project/${encodeURIComponent(p.id)}/overview" style="grid-template-columns: 40px 1fr 140px 90px 100px 120px 140px;text-decoration:none;color:inherit">
-          <div class="project-icon" style="background:${iconColor(p.package_name || p.id)};width:24px;height:24px"></div>
-          <span class="t-mono" style="font-weight:700">${platformGlyph(p.platform)} ${p.package_name || p.name || p.id}</span>
+        <div class="table-row" style="grid-template-columns: 28px 40px 1fr 140px 90px 100px 120px 140px">
+          <label style="display:inline-flex;align-items:center" onclick="event.stopPropagation()">
+            <input type="checkbox" class="projects-select" data-pid="${pid}" data-pkg="${(p.package_name || p.id)}" />
+          </label>
+          <a href="#/project/${encodeURIComponent(pid)}/overview" style="text-decoration:none">
+            <div class="project-icon" style="background:${iconColor(p.package_name || p.id)};width:24px;height:24px"></div>
+          </a>
+          <a href="#/project/${encodeURIComponent(pid)}/overview" class="t-mono" style="font-weight:700;text-decoration:none;color:inherit">${platformGlyph(p.platform)} ${p.package_name || p.name || pid}</a>
           <span class="t-muted">${p.version_name || "—"}</span>
-          <span class="t-mono" style="color:var(--sev-${classifyRisk(score)})">${score.toFixed(1)}</span>
+          <span class="t-mono" style="color:var(--sev-${sevColor})">${score.toFixed(1)}</span>
           <span class="t-muted">${p.counts || "—"}</span>
           <span class="t-muted">${(p.updated_at || "").slice(0, 10)}</span>
           <span style="text-align:right">${chip((p.worst_severity || "info").toLowerCase())}</span>
-        </a>`;
+        </div>`;
     }).join("");
     el.innerHTML = header + rows;
+
+    // ── Selection wiring ───────────────────────────────────────
+    const checkboxes = $$(".projects-select");
+    const bulkBar = $("#projects-bulk-bar");
+    const bulkCount = $("#projects-bulk-count");
+    const updateBulkBar = () => {
+        const selected = checkboxes.filter((c) => c.checked);
+        const n = selected.length;
+        if (n === 0) {
+            bulkBar.hidden = true;
+        } else {
+            bulkBar.hidden = false;
+            bulkCount.textContent = `${n} selected`;
+        }
+    };
+    checkboxes.forEach((c) => c.addEventListener("change", updateBulkBar));
+
+    // ── Bulk actions ───────────────────────────────────────────
+    const selectedPids = () => checkboxes.filter((c) => c.checked).map((c) => c.dataset.pid);
+    const selectedSummary = () => checkboxes.filter((c) => c.checked).map((c) => `${c.dataset.pid} · ${c.dataset.pkg}`);
+
+    $("#projects-bulk-backup").addEventListener("click", async () => {
+        const pids = selectedPids();
+        if (!pids.length) return;
+        const confirmed = await confirmModal({
+            title: `Backup ${pids.length} project(s)?`,
+            body: `Each project produces a self-contained .zip in the workspace's <code>backups/</code> directory:\n\n${selectedSummary().join("\n")}`,
+            okLabel: "BACKUP",
+            okStyle: "primary",
+        });
+        if (!confirmed) return;
+        await runBulkOp(pids, "backup");
+    });
+
+    $("#projects-bulk-delete").addEventListener("click", async () => {
+        const pids = selectedPids();
+        if (!pids.length) return;
+        const confirmed = await confirmModal({
+            title: `Wipe ${pids.length} project(s)?`,
+            body: `<strong style="color:var(--sev-high)">DESTRUCTIVE.</strong> Wipes the workspace tree, reports, source APK (when no other project shares the file), PlayIntel secrets dir (when no other project shares the package), and the DB row.\n\n${selectedSummary().join("\n")}\n\nThis cannot be undone. Back up first if there's any chance you want the data again.`,
+            okLabel: "WIPE",
+            okStyle: "danger",
+            confirmPhrase: "yes",
+        });
+        if (!confirmed) return;
+        await runBulkOp(pids, "delete");
+    });
+
+    $("#projects-backup-all").addEventListener("click", async () => {
+        if (!projects.length) return;
+        const confirmed = await confirmModal({
+            title: `Backup all ${projects.length} project(s)?`,
+            body: `Produces one .zip per project in the workspace's <code>backups/</code> directory. Existing archives are kept.`,
+            okLabel: "BACKUP ALL",
+            okStyle: "primary",
+        });
+        if (!confirmed) return;
+        const r = await fetch("/v1/projects/backup-all", { method: "POST" });
+        const body = await r.json().catch(() => ({}));
+        await confirmModal({
+            title: r.ok ? `✓ Backed up ${body.backed_up || 0} project(s)` : `✗ Backup failed (${r.status})`,
+            body: r.ok
+                ? `Archives in <code>${body.output_dir || "(unknown)"}</code>:\n\n${(body.archives || []).map((a) => `· ${a.project_id}  ${a.size_bytes ? (a.size_bytes / 1024 / 1024).toFixed(2) + " MB" : ""}`).join("\n")}`
+                : JSON.stringify(body, null, 2),
+            okLabel: "OK",
+            okStyle: "primary",
+            cancelLabel: null,
+        });
+    });
+
+    $("#projects-delete-all").addEventListener("click", async () => {
+        if (!projects.length) return;
+        const confirmed = await confirmModal({
+            title: `WIPE ALL ${projects.length} PROJECTS — FACTORY RESET`,
+            body: `<strong style="color:var(--sev-high)">EVERYTHING GOES.</strong>\n\nEvery project's workspace, reports, source artefacts, PlayIntel secrets, and DB rows. The Vercel-style 'cannot be undone' clause applies here literally.\n\nThis is the equivalent of <code>mnexus project delete --all --yes</code>.`,
+            okLabel: "FACTORY RESET",
+            okStyle: "danger",
+            confirmPhrase: "factory reset",
+        });
+        if (!confirmed) return;
+        const r = await fetch("/v1/projects?confirm=true", { method: "DELETE" });
+        const body = await r.json().catch(() => ({}));
+        await confirmModal({
+            title: r.ok ? `✓ Wiped ${body.deleted || 0} project(s)` : `✗ Delete failed (${r.status})`,
+            body: r.ok ? `${(body.audit || []).length} audit trail(s) returned.` : JSON.stringify(body, null, 2),
+            okLabel: "OK",
+            okStyle: "primary",
+            cancelLabel: null,
+        });
+        if (r.ok) mount_projects();
+    });
+
+    async function runBulkOp(pids, kind) {
+        const results = [];
+        for (const pid of pids) {
+            try {
+                if (kind === "backup") {
+                    const r = await fetch(`/v1/projects/${encodeURIComponent(pid)}/backup`, { method: "POST" });
+                    results.push({ pid, ok: r.ok, status: r.status,
+                                   bytes: r.headers.get("X-Mnexus-Backup-Size") });
+                } else {
+                    const r = await fetch(`/v1/projects/${encodeURIComponent(pid)}?confirm=true`, { method: "DELETE" });
+                    const body = await r.json().catch(() => ({}));
+                    results.push({ pid, ok: r.ok, status: r.status, audit: body.audit });
+                }
+            } catch (e) {
+                results.push({ pid, ok: false, status: "network-error", error: String(e) });
+            }
+        }
+        const okCount = results.filter((r) => r.ok).length;
+        const failCount = results.length - okCount;
+        await confirmModal({
+            title: `${kind === "backup" ? "Backup" : "Wipe"} complete — ${okCount} ok · ${failCount} failed`,
+            body: results.map((r) => `${r.ok ? "✓" : "✗"} ${r.pid}  ${r.ok ? "" : `[${r.status}]`}`).join("\n"),
+            okLabel: "OK",
+            okStyle: "primary",
+            cancelLabel: null,
+        });
+        if (kind === "delete" && okCount > 0) mount_projects();
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -6097,9 +6238,152 @@ function projectChrome(id, label) {
         surface: "static", dataflow: "static", "attack-tree": "static", owasp: "static",
     })[label] || "static";
     return h`
-      <div class="muted small uppercase">🔱 NEXUS / ${id} / ${label}</div>
+      <div class="row" style="align-items:center">
+        <div class="muted small uppercase grow">🔱 NEXUS / ${id} / ${label}</div>
+        <button class="btn xs ghost" onclick="projectChromeBackup('${id}')">[ BACKUP ]</button>
+        <button class="btn xs ghost danger" onclick="projectChromeDelete('${id}')">[ DELETE ]</button>
+      </div>
       ${projectTabs(id, parent)}`;
 }
+
+// Exposed on window so the inline onclick="…" handlers in projectChrome
+// can reach them — vanilla SPA pattern, no framework router gluing.
+window.projectChromeBackup = async function (id) {
+    const confirmed = await confirmModal({
+        title: `Backup project ${id}?`,
+        body: `Produces a self-contained .zip with the model, every finding, the source artefact, the workspace tree, and any generated reports. Lands in the workspace's <code>backups/</code> directory; existing archives are kept.`,
+        okLabel: "BACKUP",
+        okStyle: "primary",
+    });
+    if (!confirmed) return;
+    const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/backup`, { method: "POST" });
+    if (!r.ok) {
+        const body = await r.text();
+        await confirmModal({
+            title: `✗ Backup failed (${r.status})`,
+            body: body.slice(0, 400),
+            okLabel: "OK", okStyle: "primary", cancelLabel: null,
+        });
+        return;
+    }
+    const size = r.headers.get("X-Mnexus-Backup-Size") || "0";
+    const files = r.headers.get("X-Mnexus-Backup-Files") || "0";
+    const findings = r.headers.get("X-Mnexus-Backup-Findings") || "0";
+    await confirmModal({
+        title: `✓ Archive ready — ${(parseInt(size, 10) / 1024 / 1024).toFixed(2)} MB`,
+        body: `${files} files · ${findings} findings\n\nCheck the workspace's <code>backups/</code> directory on the host.`,
+        okLabel: "OK", okStyle: "primary", cancelLabel: null,
+    });
+};
+
+window.projectChromeDelete = async function (id) {
+    const confirmed = await confirmModal({
+        title: `Wipe project ${id}?`,
+        body: `<strong style="color:var(--sev-high)">DESTRUCTIVE.</strong> Wipes the project's workspace tree, every report, the source APK (when no other project shares the file), the PlayIntel secrets dir (when no other project shares the package), and the DB row.\n\nThis cannot be undone. Back up first if there's any chance you want the data again.`,
+        okLabel: "WIPE",
+        okStyle: "danger",
+        confirmPhrase: "yes",
+    });
+    if (!confirmed) return;
+    const r = await fetch(`/v1/projects/${encodeURIComponent(id)}?confirm=true`, { method: "DELETE" });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+        await confirmModal({
+            title: `✗ Delete failed (${r.status})`,
+            body: JSON.stringify(body, null, 2).slice(0, 600),
+            okLabel: "OK", okStyle: "primary", cancelLabel: null,
+        });
+        return;
+    }
+    const audit = body.audit || {};
+    const summary = [
+        `workspace        · ${audit.workspace_files_removed || 0} file(s) · ${((audit.workspace_bytes_freed || 0) / 1024 / 1024).toFixed(2)} MB`,
+        audit.source_artefact_removed ? `source artefact  · ${audit.source_artefact_removed}` : "source artefact  · kept (shared with another project)",
+        audit.secrets_dir_removed ? `secrets dir      · ${audit.secrets_dir_removed}` : null,
+        audit.reports_removed && audit.reports_removed.length ? `reports          · ${audit.reports_removed.length} file(s)` : null,
+        `db               · ${audit.findings_removed || 0} finding(s) + ${audit.dynamic_events_removed || 0} dynamic event(s) + 1 project row`,
+    ].filter(Boolean).join("\n");
+    await confirmModal({
+        title: `✓ Wiped ${audit.project_id} · ${audit.package || ""}`,
+        body: summary,
+        okLabel: "OK", okStyle: "primary", cancelLabel: null,
+    });
+    // After a single-project wipe we route back to the projects list —
+    // staying on the project page would 404 the next route load.
+    location.hash = "#/projects";
+};
+
+/**
+ * Promise-based confirmation modal — tiny vanilla pattern, no framework.
+ *
+ * Usage:
+ *   const ok = await confirmModal({
+ *     title: "Wipe project?",
+ *     body: "long description",
+ *     okLabel: "WIPE",
+ *     okStyle: "danger",          // "primary" | "danger"
+ *     cancelLabel: "Cancel",      // null to omit
+ *     confirmPhrase: "yes",        // if set, the OK button stays disabled
+ *                                  // until the user types this exact phrase
+ *   });
+ */
+window.confirmModal = function (opts) {
+    return new Promise((resolve) => {
+        const existing = document.getElementById("mn-confirm-overlay");
+        if (existing) existing.remove();
+        const okStyle = opts.okStyle === "danger" ? "danger" : "primary";
+        const overlay = document.createElement("div");
+        overlay.id = "mn-confirm-overlay";
+        overlay.className = "modal-overlay";
+        // Escape body content but allow our own controlled HTML — we build
+        // body from constants + audit data, so no untrusted user input
+        // reaches innerHTML directly.
+        const bodyHtml = (opts.body || "").replace(/\n/g, "<br>");
+        const phrase = opts.confirmPhrase || "";
+        overlay.innerHTML = `
+          <div class="modal">
+            <div class="modal-head">${opts.title || "Confirm"}</div>
+            <div class="modal-body">${bodyHtml}</div>
+            ${phrase ? `<div class="modal-phrase">
+              <div class="muted small">type <code>${phrase}</code> to enable the button:</div>
+              <input class="input-plain" id="mn-confirm-phrase" autocomplete="off" spellcheck="false" />
+            </div>` : ""}
+            <div class="modal-actions">
+              ${opts.cancelLabel !== null ? `<button class="btn ghost" id="mn-confirm-cancel">${opts.cancelLabel || "Cancel"}</button>` : ""}
+              <button class="btn ${okStyle}" id="mn-confirm-ok" ${phrase ? "disabled" : ""}>${opts.okLabel || "OK"}</button>
+            </div>
+          </div>`;
+        document.body.appendChild(overlay);
+
+        const cleanup = (result) => {
+            overlay.remove();
+            resolve(result);
+        };
+        const okBtn = document.getElementById("mn-confirm-ok");
+        const cancelBtn = document.getElementById("mn-confirm-cancel");
+        const phraseInput = document.getElementById("mn-confirm-phrase");
+        if (phraseInput) {
+            phraseInput.addEventListener("input", () => {
+                okBtn.disabled = phraseInput.value.trim().toLowerCase() !== phrase.toLowerCase();
+            });
+            phraseInput.focus();
+        }
+        okBtn.addEventListener("click", () => cleanup(true));
+        if (cancelBtn) cancelBtn.addEventListener("click", () => cleanup(false));
+        // Click outside the modal panel = cancel (only if cancelLabel is shown).
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay && opts.cancelLabel !== null) cleanup(false);
+        });
+        // Esc = cancel.
+        const onKey = (e) => {
+            if (e.key === "Escape" && opts.cancelLabel !== null) {
+                document.removeEventListener("keydown", onKey);
+                cleanup(false);
+            }
+        };
+        document.addEventListener("keydown", onKey);
+    });
+};
 
 /* SCREEN 09 — Secrets + Crypto Audit */
 function view_project_secrets(ctx) {

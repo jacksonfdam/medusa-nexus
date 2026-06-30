@@ -877,3 +877,124 @@ body::before {
     background: transparent;
     border: 1px solid rgba(34, 211, 238, 0.3);
 }
+
+/* ── Confirmation modal ───────────────────────────────────────────── */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    backdrop-filter: blur(2px);
+}
+.modal {
+    width: min(640px, 92vw);
+    max-height: 88vh;
+    overflow: auto;
+    background: var(--bg-panel, #0e1117);
+    border: 1px solid rgba(34, 211, 238, 0.35);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+}
+.modal-head {
+    padding: 18px 22px 12px;
+    font-family: monospace;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--cyan, #22d3ee);
+    border-bottom: 1px solid rgba(34, 211, 238, 0.18);
+}
+.modal-body {
+    padding: 18px 22px;
+    font-family: monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--text, #cbd5e1);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.modal-body code {
+    background: rgba(34, 211, 238, 0.1);
+    padding: 1px 6px;
+    border-radius: 3px;
+    color: var(--magenta, #f0abfc);
+}
+.modal-phrase {
+    padding: 0 22px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.modal-phrase .input-plain {
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(34, 211, 238, 0.3);
+    color: var(--text, #cbd5e1);
+    padding: 8px 12px;
+    font-family: monospace;
+    font-size: 13px;
+    border-radius: 3px;
+    outline: none;
+}
+.modal-phrase .input-plain:focus {
+    border-color: var(--cyan, #22d3ee);
+}
+.modal-actions {
+    padding: 12px 22px 18px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    border-top: 1px solid rgba(34, 211, 238, 0.12);
+}
+.btn.danger {
+    background: rgba(244, 63, 94, 0.15);
+    border-color: rgba(244, 63, 94, 0.5);
+    color: var(--sev-high, #f43f5e);
+}
+.btn.danger:hover:not(:disabled) {
+    background: rgba(244, 63, 94, 0.28);
+}
+.btn.ghost.danger {
+    background: transparent;
+    border-color: rgba(244, 63, 94, 0.4);
+    color: var(--sev-high, #f43f5e);
+}
+.btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.btn.small {
+    padding: 6px 12px;
+    font-size: 11.5px;
+}
+
+/* Projects-list checkbox styling — defang the default browser checkbox */
+input[type="checkbox"].projects-select {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border: 1px solid rgba(34, 211, 238, 0.5);
+    border-radius: 2px;
+    background: rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+    position: relative;
+}
+input[type="checkbox"].projects-select:checked {
+    background: var(--cyan, #22d3ee);
+    border-color: var(--cyan, #22d3ee);
+}
+input[type="checkbox"].projects-select:checked::after {
+    content: "✓";
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--bg-panel, #0e1117);
+    font-size: 12px;
+    font-weight: 700;
+}

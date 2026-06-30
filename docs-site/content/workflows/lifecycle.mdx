@@ -195,6 +195,35 @@ DELETE /v1/projects?confirm=true         # every project; returns per-project au
 
 `confirm=true` is mandatory — without it the endpoint returns 400.
 
+### From the web UI
+
+The SPA exposes both operations on two surfaces:
+
+**Projects list (`/#/projects`)** — each row has a checkbox. Select any
+combination and a bulk-action bar appears with `[ BACKUP SELECTED ]`
+and `[ DELETE SELECTED ]`. The header always shows `[ BACKUP ALL ]` +
+`[ DELETE ALL ]` for the no-selection / factory-reset path.
+
+**Inside any project tab** — the chrome breadcrumb gains `[ BACKUP ]`
+and `[ DELETE ]` buttons next to the page label, visible on every
+project sub-page (overview, findings, components, native, etc.).
+
+Every destructive action opens a confirmation modal that:
+
+* Names the project(s) involved by id + package.
+* Lists what gets wiped — workspace bytes, source artefact, secrets
+  dir, reports, DB rows.
+* Requires typing a confirmation phrase (``yes`` for single project,
+  ``factory reset`` for the bulk wipe-all) before the destructive
+  button enables.
+* Renders the audit trail back on success — same JSON shape as the
+  HTTP endpoint, just displayed instead of returned.
+
+Backups stream the `.zip` straight into the browser's download
+manager via the HTTP endpoint's `FileResponse`; the bulk-backup
+variant lists each archive's path + size in the success modal so the
+operator can spot-check the host's `<workspace>/backups/` directory.
+
 ## When to back up vs delete
 
 * **Back up before delete.** Always. Cheap insurance.
