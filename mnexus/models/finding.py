@@ -77,6 +77,29 @@ class Finding(BaseModel):
     confirmed: bool = Field(default=False, description="True once a dynamic run reproduced the issue.")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
+    # ─── Library attribution (set by LibraryAttributionAudit) ───
+    attributed_to: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable owner of the offending artefact: a vendor SDK name "
+            "(e.g. 'Google Places SDK', 'Firebase'), 'first-party', or "
+            "'third-party (unknown)'. Lets the dev know whether the fix is "
+            "in their code or a build-config override against a bundled SDK."
+        ),
+    )
+    attribution_confidence: str | None = Field(
+        default=None,
+        description="'high' | 'medium' | 'low' — how sure the attribution is.",
+    )
+    sdk_category: str | None = Field(
+        default=None,
+        description="Coarse SDK category — 'maps' | 'analytics' | 'auth' | 'crash' | …",
+    )
+    attribution_paths: list[str] = Field(
+        default_factory=list,
+        description="Workspace-relative file paths the attribution was inferred from (up to 5).",
+    )
+
     @field_validator("title", "description", "evidence")
     @classmethod
     def _no_empty_strings(cls, v: str) -> str:
