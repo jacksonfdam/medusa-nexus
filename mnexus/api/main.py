@@ -3526,10 +3526,13 @@ async def project_attribute(project_id: str) -> dict[str, Any]:
     named SDK / third-party unknown), persists the update, and returns
     a tally so the UI can re-fetch.
 
-    Cheap on findings without fingerprints: the extractor short-circuits
-    so the cost is bounded to the count of secret-like findings.
+    The heavy lifting is a workspace-wide grep per secret-bearing
+    finding — easily 100k+ files on a real release APK — so the work
+    runs in a threadpool to keep ``/v1/health`` and other endpoints
+    responsive while the backfill grinds.
     """
     from mnexus.intelligence.library_attribution import attribute_findings
+    from starlette.concurrency import run_in_threadpool
 
     p = _require_project(project_id)
     nexus: MedusaNexus = app.state.nexus
@@ -3537,16 +3540,19 @@ async def project_attribute(project_id: str) -> dict[str, Any]:
     findings = list(surface.findings) if surface else []
 
     before = sum(1 for f in findings if f.attributed_to)
-    attribute_findings(
-        findings,
-        workspace_dir=nexus.config.workspace,
-        project_id=project_id,
-        app_package=p.package_name,
-    )
+
+    def _do_work() -> None:
+        attribute_findings(
+            findings,
+            workspace_dir=nexus.config.workspace,
+            project_id=project_id,
+            app_package=p.package_name,
+        )
+        nexus.db.save_project(p)
+
+    await run_in_threadpool(_do_work)
+
     after = sum(1 for f in findings if f.attributed_to)
-
-    nexus.db.save_project(p)
-
     return {
         "project_id": project_id,
         "total_findings": len(findings),
