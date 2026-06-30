@@ -3343,6 +3343,168 @@ def _synth_manifest_xml(meta: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+@app.post("/v1/projects/backup-all")
+async def projects_backup_all() -> dict[str, Any]:
+    """Backup every project. One zip per project, lands in ``<workspace>/backups/``.
+
+    The response carries the per-project audit trail. Each archive
+    stays on disk so the caller can subsequently move them off-host
+    (S3, rsync, whatever the compliance posture demands).
+    """
+    from mnexus.core.project_lifecycle import backup_all_projects
+    from dataclasses import asdict
+
+    nexus: MedusaNexus = app.state.nexus
+    output_dir = nexus.config.workspace / "backups"
+    results = backup_all_projects(
+        store=nexus.db,
+        workspace_dir=nexus.config.workspace,
+        output_dir=output_dir,
+    )
+    return {
+        "backed_up": len(results),
+        "output_dir": str(output_dir),
+        "archives": [{**asdict(r), "archive_path": str(r.archive_path)} for r in results],
+    }
+
+
+@app.delete("/v1/projects")
+async def projects_delete_all(confirm: bool = False) -> dict[str, Any]:
+    """Wipe every project. Equivalent to factory reset — handle with care.
+
+    Same confirmation contract as the single-project delete: pass
+    ``?confirm=true``. Returns per-project audit trails.
+    """
+    from mnexus.core.project_lifecycle import delete_all_projects
+    from dataclasses import asdict
+
+    if not confirm:
+        raise HTTPException(400, "delete-all is destructive; pass confirm=true to proceed")
+    nexus: MedusaNexus = app.state.nexus
+    results = delete_all_projects(store=nexus.db, workspace_dir=nexus.config.workspace)
+    return {"deleted": len(results), "audit": [asdict(r) for r in results]}
+
+
+@app.post("/v1/projects/{project_id}/backup")
+async def project_backup(project_id: str) -> FileResponse:
+    """Produce a ``.zip`` backup of the project and stream it back.
+
+    The archive lands in ``<workspace>/backups/`` and is returned via
+    FileResponse so the client downloads it directly. The on-disk copy
+    is kept (under the workspace), useful for incremental cold-storage
+    rotation; manage retention manually or with a cron.
+    """
+    from mnexus.core.project_lifecycle import backup_project
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    output_dir = nexus.config.workspace / "backups"
+
+    result = backup_project(
+        p,
+        store=nexus.db,
+        workspace_dir=nexus.config.workspace,
+        output_dir=output_dir,
+    )
+
+    return FileResponse(
+        path=str(result.archive_path),
+        media_type="application/zip",
+        filename=result.archive_path.name,
+        headers={
+            "X-Mnexus-Backup-Size": str(result.size_bytes),
+            "X-Mnexus-Backup-Files": str(result.file_count),
+            "X-Mnexus-Backup-Findings": str(result.findings_count),
+        },
+    )
+
+
+@app.delete("/v1/projects/{project_id}")
+async def project_delete(project_id: str, confirm: bool = False) -> dict[str, Any]:
+    """Wipe every disk + DB trace of a project. Returns the audit trail.
+
+    Pass ``?confirm=true`` to execute. Without the confirmation flag the
+    endpoint refuses with 400 — this is destructive, the caller has to
+    say yes explicitly.
+
+    The response carries a structured ``DeleteResult`` dict so the
+    operator can log + show the wipe to legal / audit. Includes:
+    workspace bytes freed, files removed, whether the source artefact
+    + secrets dir were wiped (gated on no other project sharing the
+    SHA / package), reports removed, findings + dynamic-event counts,
+    and the DB-row removal flag.
+    """
+    from mnexus.core.project_lifecycle import delete_project
+    from dataclasses import asdict
+
+    p = _require_project(project_id)
+    if not confirm:
+        raise HTTPException(400, "delete is destructive; pass confirm=true to proceed")
+
+    nexus: MedusaNexus = app.state.nexus
+    result = delete_project(p, store=nexus.db, workspace_dir=nexus.config.workspace)
+    return {"deleted": True, "audit": asdict(result)}
+
+
+@app.get("/v1/projects/{project_id}/find")
+async def project_find(
+    project_id: str,
+    q: str,
+    regex: bool = False,
+    case_insensitive: bool = False,
+    max_results: int = 200,
+) -> dict[str, Any]:
+    """Locate ``q`` inside the project's static workspace (jadx + apktool + …).
+
+    Answers questions like *"the jadx finding flagged this AIza key but
+    not which file — which file is it actually in?"* Walks the
+    decompiled trees, the manifest cache, and (when ``package_name`` is
+    known) the PlayIntel ``secrets/<package>/`` directory.
+
+    Query params:
+      * ``q``                — pattern. Required.
+      * ``regex=true``       — interpret ``q`` as a Python regex.
+      * ``case_insensitive=true`` — lower-case the haystack + needle.
+      * ``max_results=200``  — cap the response. The walker stops once
+                               the cap is hit and the response carries
+                               ``truncated=true``.
+
+    Returns ``{project_id, query, hits: [{file, line, snippet, tree}], truncated}``.
+    """
+    from mnexus.intelligence.workspace_locator import find_in_workspace
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    if not q:
+        raise HTTPException(400, "query parameter 'q' is required")
+
+    try:
+        hits = find_in_workspace(
+            workspace_dir=nexus.config.workspace,
+            project_id=project_id,
+            pattern=q,
+            regex=regex,
+            case_insensitive=case_insensitive,
+            max_results=max(1, min(max_results, 1000)),
+            package_name=p.package_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    return {
+        "project_id": project_id,
+        "query": q,
+        "regex": regex,
+        "case_insensitive": case_insensitive,
+        "max_results": max_results,
+        "hits": [
+            {"file": h.file, "line": h.line, "snippet": h.snippet, "tree": h.tree}
+            for h in hits
+        ],
+        "truncated": len(hits) >= max_results,
+    }
+
+
 @app.get("/v1/projects/{project_id}/native")
 async def project_native(project_id: str) -> dict[str, Any]:
     """Screen 11 — Ghidra native analysis output."""

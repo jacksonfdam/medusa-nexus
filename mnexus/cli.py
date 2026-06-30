@@ -143,6 +143,9 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/decrypt-ios <id>","Decrypt App Store IPA via bagbak / frida-ios-dump + auto-ingest."),
         ("/diff manifest|findings", "Diff the active project against the latest prior scan."),
         ("/manifest [--tree]", "View the decoded AndroidManifest.xml (--raw default, --tree colored, --output <path> writes to disk)."),
+        ("/find <pattern>",  "Grep the project's static workspace (jadx + apktool + secrets) for a string or regex."),
+        ("/backup [--all]",  "Zip up one project (or every project) — model + findings + workspace + reports."),
+        ("/delete [--all]",  "Wipe one project (or every project) from disk + DB. Destructive; --yes required."),
         ("/pipeline list|run", "List built-in pipelines or run one against the active project."),
         ("/recipes [filter]","Browse /v1/recipes catalogue (built-ins + Medusa modules)."),
         ("/clear",           "Clear the screen."),
@@ -1419,6 +1422,214 @@ def _decrypt_ios(state: ReplState, args: list[str]) -> None:
         console.print(f"[dim]· {w}[/dim]")
 
 
+# ─── /find — grep the project's static workspace ──────────────────────
+
+def _find(state: ReplState, args: list[str]) -> None:
+    """`/find <pattern> [--project <id>] [--regex] [-i] [--max <N>]`.
+
+    Walks the project's jadx + apktool + manifest-cache + secrets trees
+    for ``pattern``. Default is substring match; pass ``--regex`` to
+    treat it as a Python regex; ``-i`` lowercases both sides. Caps at
+    200 results (override with ``--max``).
+    """
+    if not args or args[0] in ("-h", "--help"):
+        console.print(
+            "[red]usage:[/red] /find <pattern> [--project <id>] [--regex] [-i] [--max <N>]"
+        )
+        return
+    pattern = args[0]
+    project_id = state.active_project_id
+    is_regex = False
+    case_i = False
+    max_results = 200
+    it = iter(args[1:])
+    for tok in it:
+        if tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--regex":
+            is_regex = True
+        elif tok in ("-i", "--case-insensitive"):
+            case_i = True
+        elif tok == "--max":
+            try:
+                max_results = int(next(it, "200"))
+            except ValueError:
+                pass
+        else:
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+    if not _require_server(state):
+        return
+
+    import urllib.parse
+    qs = urllib.parse.urlencode({
+        "q": pattern,
+        "regex": "true" if is_regex else "false",
+        "case_insensitive": "true" if case_i else "false",
+        "max_results": str(max_results),
+    })
+    status, body = _api_request(state, "GET", f"/v1/projects/{project_id}/find?{qs}")
+    if status != 200:
+        console.print(f"[red]find failed[/red] [{status}] {str(body)[:200]}")
+        return
+    hits = body.get("hits", []) if isinstance(body, dict) else []
+    if not hits:
+        console.print(f"[dim]no matches for[/dim] [cyan]{pattern}[/cyan]")
+        return
+    console.print(
+        f"[cyan]{len(hits)}[/cyan] match(es)"
+        + (" [yellow](truncated)[/yellow]" if body.get("truncated") else "")
+        + f" for [bold]{pattern}[/bold]"
+    )
+    for h in hits[:40]:
+        tree_color = {"jadx": "cyan", "apktool": "magenta", "manifest-cache": "green", "secrets": "yellow"}.get(h.get("tree", ""), "white")
+        console.print(
+            f"  [{tree_color}]{h.get('tree', '?'):<16}[/{tree_color}] "
+            f"{h.get('file', '?')}:{h.get('line', 0)}  "
+            f"[dim]{h.get('snippet', '')[:120]}[/dim]"
+        )
+    if len(hits) > 40:
+        console.print(f"[dim]…+{len(hits) - 40} more (use --max smaller or --regex to narrow)[/dim]")
+
+
+# ─── /backup + /delete — project lifecycle ────────────────────────────
+
+def _backup(state: ReplState, args: list[str]) -> None:
+    """`/backup [--project <id>] [--all] [--output <dir>]`.
+
+    Produces a self-contained .zip per project: model, findings, source
+    artefact, workspace tree, reports. Default output dir is the running
+    server's ``<workspace>/backups/``.
+    """
+    if args and args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /backup [--project <id>] [--all] [--output <dir>]")
+        return
+    project_id = state.active_project_id
+    do_all = False
+    output_dir: Path | None = None
+    it = iter(args)
+    for tok in it:
+        if tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--all":
+            do_all = True
+        elif tok == "--output":
+            val = next(it, "")
+            if val:
+                output_dir = Path(val).expanduser()
+        else:
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+    if not do_all and not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project or --all."); return
+    if not _require_server(state):
+        return
+
+    if do_all:
+        status, body = _api_request(state, "POST", "/v1/projects/backup-all")
+        if status != 200:
+            console.print(f"[red]backup-all failed[/red] [{status}] {str(body)[:200]}"); return
+        archives = body.get("archives", []) if isinstance(body, dict) else []
+        console.print(f"[green]✓ backed up[/green] {len(archives)} project(s) → [bold]{body.get('output_dir', '?')}[/bold]")
+        for a in archives:
+            console.print(f"  · [cyan]{a.get('project_id')}[/cyan] · {a.get('archive_path')} · {_human_bytes(a.get('size_bytes', 0))}")
+        return
+
+    status, body = _api_request(state, "POST", f"/v1/projects/{project_id}/backup")
+    if status != 200:
+        console.print(f"[red]backup failed[/red] [{status}] {str(body)[:200]}"); return
+    # The endpoint returns the archive body directly (FileResponse), so
+    # the REPL would receive raw zip bytes here. The server has already
+    # cached the file on disk under <workspace>/backups/ — point the
+    # user at it. We don't write the streamed body to disk because the
+    # canonical copy is the server-side one.
+    console.print(f"[green]✓ archive ready[/green] · [dim]check[/dim] [bold]{state.config.workspace}/backups/[/bold] [dim]on the server host[/dim]")
+
+
+def _delete(state: ReplState, args: list[str]) -> None:
+    """`/delete [--project <id>] [--all] [--yes]`.
+
+    Wipes every disk + DB trace of the project: workspace dir, reports,
+    source artefact (when no other project shares the SHA), PlayIntel
+    secrets (when no other project shares the package), DB row. Returns
+    the structured audit trail.
+
+    Destructive — ``--yes`` confirmation required.
+    """
+    if args and args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /delete [--project <id>] [--all] --yes")
+        return
+    project_id = state.active_project_id
+    do_all = False
+    confirmed = False
+    it = iter(args)
+    for tok in it:
+        if tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--all":
+            do_all = True
+        elif tok == "--yes":
+            confirmed = True
+        else:
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+
+    if not confirmed:
+        what = "every project + every byte of analysis on disk" if do_all else f"project {project_id or '(none)'}"
+        verdict = Prompt.ask(
+            f"[bold red]about to wipe[/bold red] {what} — this cannot be undone. "
+            "type [bold]yes[/bold] to proceed",
+            default="no",
+        )
+        if verdict.strip().lower() != "yes":
+            console.print("[dim]aborted[/dim]")
+            return
+        confirmed = True
+
+    if not do_all and not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project or --all."); return
+    if not _require_server(state):
+        return
+
+    path = "/v1/projects?confirm=true" if do_all else f"/v1/projects/{project_id}?confirm=true"
+    status, body = _api_request(state, "DELETE", path)
+    if status != 200:
+        console.print(f"[red]delete failed[/red] [{status}] {str(body)[:200]}"); return
+
+    if do_all:
+        audits = body.get("audit", []) if isinstance(body, dict) else []
+        console.print(f"[green]✓ wiped[/green] {len(audits)} project(s)")
+        total_files = sum(a.get("workspace_files_removed", 0) for a in audits)
+        total_bytes = sum(a.get("workspace_bytes_freed", 0) for a in audits)
+        console.print(f"  [dim]freed[/dim] {total_files} workspace file(s) · {_human_bytes(total_bytes)}")
+        return
+
+    audit = body.get("audit", {}) if isinstance(body, dict) else {}
+    console.print(f"[green]✓ wiped[/green] [cyan]{audit.get('project_id')}[/cyan] · [magenta]{audit.get('package')}[/magenta]")
+    console.print(f"  workspace        · {audit.get('workspace_files_removed', 0)} file(s) · {_human_bytes(audit.get('workspace_bytes_freed', 0))}")
+    if audit.get("source_artefact_removed"):
+        console.print(f"  source artefact  · [dim]{audit['source_artefact_removed']}[/dim]")
+    else:
+        console.print("  source artefact  · [yellow]kept[/yellow] [dim](shared SHA with another project)[/dim]")
+    if audit.get("secrets_dir_removed"):
+        console.print(f"  secrets dir      · [dim]{audit['secrets_dir_removed']}[/dim]")
+    if audit.get("reports_removed"):
+        console.print(f"  reports          · {len(audit['reports_removed'])} file(s)")
+    console.print(
+        f"  db               · {audit.get('findings_removed', 0)} finding(s) + "
+        f"{audit.get('dynamic_events_removed', 0)} dynamic event(s) + 1 project row"
+    )
+
+
+def _human_bytes(n: int) -> str:
+    """1234567 -> '1.2 MB'."""
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}".replace(".0 ", " ")
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
 # ─── /manifest — decoded AndroidManifest.xml viewer ───────────────────
 
 def _manifest(state: ReplState, args: list[str]) -> None:
@@ -1726,6 +1937,10 @@ SLASH_COMMANDS = {
     "pipeline":  _pipeline,
     "recipes":   _recipes,
     "manifest":  _manifest,
+    # Lifecycle + workspace search
+    "find":      _find,
+    "backup":    _backup,
+    "delete":    _delete,
     "clear":     _clear,
     "exit":      _exit,
     "quit":      _exit,
@@ -2184,6 +2399,189 @@ def manifest_cmd(ctx: click.Context, project_id: str, output_path: Path | None, 
         console.print(f"[green]✓ wrote[/green] {output_path}  ({len(output)} bytes)")
         return
     click.echo(output)
+
+
+@cli.command(name="find",
+             help="Grep the project's static workspace (jadx + apktool + secrets) for a string or regex.")
+@click.argument("project_id")
+@click.argument("pattern")
+@click.option("--regex", is_flag=True, default=False, help="Treat pattern as a Python regex.")
+@click.option("-i", "--case-insensitive", "case_i", is_flag=True, default=False,
+              help="Match without case sensitivity.")
+@click.option("--max", "max_results", type=int, default=200, help="Cap the result count (default 200).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="JSON output for CI.")
+@click.pass_context
+def find_cmd(ctx: click.Context, project_id: str, pattern: str,
+             regex: bool, case_i: bool, max_results: int, as_json: bool) -> None:
+    """Server-independent flat command for greping a project workspace."""
+    import json as _json
+    from mnexus.intelligence.workspace_locator import find_in_workspace
+
+    state = ReplState(ctx.obj["config"])
+    proj = state.nexus.db.load_project(project_id)
+    if not proj:
+        msg = f"no project with id: {project_id}"
+        if as_json:
+            click.echo(_json.dumps({"error": msg}))
+        else:
+            console.print(f"[red]{msg}[/red]")
+        sys.exit(2)
+
+    try:
+        hits = find_in_workspace(
+            workspace_dir=state.config.workspace,
+            project_id=project_id,
+            pattern=pattern,
+            regex=regex,
+            case_insensitive=case_i,
+            max_results=max(1, min(max_results, 1000)),
+            package_name=proj.package_name,
+        )
+    except ValueError as exc:
+        if as_json:
+            click.echo(_json.dumps({"error": str(exc)}))
+        else:
+            console.print(f"[red]{exc}[/red]")
+        sys.exit(2)
+
+    if as_json:
+        click.echo(_json.dumps({
+            "project_id": project_id,
+            "query": pattern,
+            "regex": regex,
+            "case_insensitive": case_i,
+            "max_results": max_results,
+            "truncated": len(hits) >= max_results,
+            "hits": [{"file": h.file, "line": h.line, "snippet": h.snippet, "tree": h.tree} for h in hits],
+        }, default=str, indent=2))
+        return
+
+    if not hits:
+        console.print(f"[dim]no matches for[/dim] [cyan]{pattern}[/cyan]")
+        return
+    truncated = " (truncated)" if len(hits) >= max_results else ""
+    console.print(f"[cyan]{len(hits)}[/cyan] match(es){truncated} for [bold]{pattern}[/bold]")
+    for h in hits:
+        console.print(f"  [{h.tree}] {h.file}:{h.line}  {h.snippet[:140]}")
+
+
+@cli.group(name="project", help="Project lifecycle — backup + delete with full data wipe.")
+def project_group() -> None:
+    """Subcommand group: backup · delete."""
+
+
+@project_group.command("backup",
+                       help="Backup one or every project to a .zip archive. Default output: <workspace>/backups/.")
+@click.argument("project_id", required=False)
+@click.option("--all", "do_all", is_flag=True, default=False,
+              help="Backup every project in the store.")
+@click.option("--output", "output_dir", type=click.Path(path_type=Path), default=None,
+              help="Override the output directory (defaults to <workspace>/backups/).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="JSON output for CI.")
+@click.pass_context
+def project_backup(ctx: click.Context, project_id: str | None, do_all: bool,
+                   output_dir: Path | None, as_json: bool) -> None:
+    """Self-contained flat backup — works offline, no server required."""
+    import json as _json
+    from dataclasses import asdict
+    from mnexus.core.project_lifecycle import backup_project, backup_all_projects
+
+    state = ReplState(ctx.obj["config"])
+    target_dir = output_dir if output_dir else (state.config.workspace / "backups")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    if do_all:
+        results = backup_all_projects(
+            store=state.nexus.db,
+            workspace_dir=state.config.workspace,
+            output_dir=target_dir,
+        )
+        if as_json:
+            click.echo(_json.dumps([{**asdict(r), "archive_path": str(r.archive_path)} for r in results], default=str, indent=2))
+            return
+        console.print(f"[green]✓ backed up[/green] {len(results)} project(s) → [bold]{target_dir}[/bold]")
+        for r in results:
+            console.print(f"  · [cyan]{r.project_id}[/cyan]  {r.archive_path.name}  {_human_bytes(r.size_bytes)}")
+        return
+
+    if not project_id:
+        console.print("[red]usage:[/red] mnexus project backup <project_id> | --all")
+        sys.exit(2)
+    proj = state.nexus.db.load_project(project_id)
+    if not proj:
+        console.print(f"[red]no project with id:[/red] {project_id}")
+        sys.exit(2)
+    result = backup_project(
+        proj,
+        store=state.nexus.db,
+        workspace_dir=state.config.workspace,
+        output_dir=target_dir,
+    )
+    if as_json:
+        click.echo(_json.dumps({**asdict(result), "archive_path": str(result.archive_path)}, default=str, indent=2))
+        return
+    console.print(f"[green]✓ archive[/green] [bold]{result.archive_path}[/bold]  ({_human_bytes(result.size_bytes)} · {result.file_count} files · {result.findings_count} findings)")
+
+
+@project_group.command("delete",
+                       help="Wipe one or every project from disk + DB. Destructive; pass --yes.")
+@click.argument("project_id", required=False)
+@click.option("--all", "do_all", is_flag=True, default=False,
+              help="Delete every project. Equivalent to factory reset.")
+@click.option("--yes", "confirmed", is_flag=True, default=False,
+              help="Explicit confirmation. Required.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="JSON output for CI.")
+@click.pass_context
+def project_delete(ctx: click.Context, project_id: str | None, do_all: bool,
+                   confirmed: bool, as_json: bool) -> None:
+    """Self-contained flat delete — works offline, no server required."""
+    import json as _json
+    from dataclasses import asdict
+    from mnexus.core.project_lifecycle import delete_project, delete_all_projects
+
+    if not confirmed:
+        console.print(
+            "[red]refusing without --yes.[/red] this wipes workspace, reports, "
+            "source artefact, secrets dir, and DB rows."
+        )
+        sys.exit(2)
+
+    state = ReplState(ctx.obj["config"])
+
+    if do_all:
+        results = delete_all_projects(store=state.nexus.db, workspace_dir=state.config.workspace)
+        if as_json:
+            click.echo(_json.dumps([asdict(r) for r in results], default=str, indent=2))
+            return
+        total_files = sum(r.workspace_files_removed for r in results)
+        total_bytes = sum(r.workspace_bytes_freed for r in results)
+        console.print(f"[green]✓ wiped[/green] {len(results)} project(s) · "
+                      f"{total_files} workspace file(s) · {_human_bytes(total_bytes)}")
+        return
+
+    if not project_id:
+        console.print("[red]usage:[/red] mnexus project delete <project_id> --yes | --all --yes")
+        sys.exit(2)
+    proj = state.nexus.db.load_project(project_id)
+    if not proj:
+        console.print(f"[red]no project with id:[/red] {project_id}")
+        sys.exit(2)
+    audit = delete_project(proj, store=state.nexus.db, workspace_dir=state.config.workspace)
+    if as_json:
+        click.echo(_json.dumps(asdict(audit), default=str, indent=2))
+        return
+    console.print(f"[green]✓ wiped[/green] [cyan]{audit.project_id}[/cyan]")
+    console.print(f"  workspace        · {audit.workspace_files_removed} file(s) · {_human_bytes(audit.workspace_bytes_freed)}")
+    if audit.source_artefact_removed:
+        console.print(f"  source artefact  · {audit.source_artefact_removed}")
+    if audit.secrets_dir_removed:
+        console.print(f"  secrets dir      · {audit.secrets_dir_removed}")
+    if audit.reports_removed:
+        console.print(f"  reports          · {len(audit.reports_removed)} file(s)")
+    console.print(
+        f"  db               · {audit.findings_removed} finding(s) + "
+        f"{audit.dynamic_events_removed} dynamic event(s) + 1 project row"
+    )
 
 
 @cli.group(name="play-account", help="Manage stored Play identities (the account manager that backs `play-scan`).")
