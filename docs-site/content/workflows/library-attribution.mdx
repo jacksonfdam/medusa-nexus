@@ -130,6 +130,35 @@ fields on every hit:
 So a UI that surfaces "find this key in the workspace" automatically
 gets the owner column for free.
 
+## Back-filling old projects
+
+Projects ingested **before** LibraryAttributionAudit shipped won't
+show ownership chips — their findings carry `attributed_to: null`.
+Re-attribute them in place via any of:
+
+- **UI** — `⌖ ATTRIBUTE` button on the project chrome bar (next to
+  `MANIFEST` / `BACKUP` / `DELETE`).
+- **REPL** — `/attribute` (operates on the active project; pass
+  `--project <id>` to target another one).
+- **CLI** — `mnexus project attribute <pid>` (`--json` for CI).
+- **HTTP** — `POST /v1/projects/{pid}/attribute`.
+
+All four route through the same code path, persist the updated
+findings to the DB, and return a tally:
+
+```json
+{
+  "project_id": "PRJ-A1B2C3D4",
+  "total_findings": 47,
+  "attributed_before": 0,
+  "attributed_after": 9,
+  "newly_attributed": 9
+}
+```
+
+Re-runs are idempotent — running attribute twice on the same project
+won't double-tag anything.
+
 ## When attribution is `none`
 
 Three reasons a finding stays untagged:

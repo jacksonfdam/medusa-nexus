@@ -1902,6 +1902,37 @@ def _export(state: ReplState, args: list[str]) -> None:
     console.print(f"[green]✓ {fmt}[/green] · [bold]{out_path}[/bold] · {len(body)} bytes")
 
 
+def _attribute(state: ReplState, args: list[str]) -> None:
+    """`/attribute [--project <id>]`.
+
+    Re-tag the active (or named) project's findings with SDK / first-party
+    owners — useful for projects ingested before LibraryAttributionAudit
+    shipped. New scans get attribution for free.
+    """
+    if args and args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /attribute [--project <id>]"); return
+    project_id = state.active_project_id
+    it = iter(args)
+    for tok in it:
+        if tok == "--project":
+            project_id = next(it, "") or project_id
+        else:
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+    if not _require_server(state):
+        return
+    status, body = _api_request(state, "POST", f"/v1/projects/{project_id}/attribute")
+    if status != 200:
+        console.print(f"[red]attribute failed[/red] [{status}] {str(body)[:200]}"); return
+    console.print(
+        f"[green]⌖ attributed[/green] [cyan]{body.get('attributed_after', 0)}[/cyan]"
+        f"/{body.get('total_findings', 0)} findings · "
+        f"[bold]{body.get('newly_attributed', 0)}[/bold] newly tagged · "
+        f"{body.get('attributed_before', 0)} already had an owner"
+    )
+
+
 # Dispatch table — first match by prefix wins on ambiguity.
 SLASH_COMMANDS = {
     "help":      _help,
@@ -1939,6 +1970,7 @@ SLASH_COMMANDS = {
     "manifest":  _manifest,
     # Lifecycle + workspace search
     "find":      _find,
+    "attribute": _attribute,
     "backup":    _backup,
     "delete":    _delete,
     "clear":     _clear,
@@ -2581,6 +2613,55 @@ def project_delete(ctx: click.Context, project_id: str | None, do_all: bool,
     console.print(
         f"  db               · {audit.findings_removed} finding(s) + "
         f"{audit.dynamic_events_removed} dynamic event(s) + 1 project row"
+    )
+
+
+@project_group.command("attribute",
+                       help="Re-run library attribution on a project's stored findings — back-fill SDK / first-party owners.")
+@click.argument("project_id")
+@click.option("--json", "as_json", is_flag=True, default=False, help="JSON output for CI.")
+@click.pass_context
+def project_attribute(ctx: click.Context, project_id: str, as_json: bool) -> None:
+    """Useful for projects ingested before LibraryAttributionAudit shipped.
+
+    New scans get attribution baked in for free; old ones need this
+    command (or the ⌖ ATTRIBUTE button in the UI).
+    """
+    import json as _json
+    from mnexus.intelligence.library_attribution import attribute_findings
+
+    state = ReplState(ctx.obj["config"])
+    proj = state.nexus.db.load_project(project_id)
+    if not proj:
+        console.print(f"[red]no project with id:[/red] {project_id}")
+        sys.exit(2)
+    surface = proj.attack_surface
+    findings = list(surface.findings) if surface else []
+
+    before = sum(1 for f in findings if f.attributed_to)
+    attribute_findings(
+        findings,
+        workspace_dir=state.config.workspace,
+        project_id=project_id,
+        app_package=proj.package_name,
+    )
+    after = sum(1 for f in findings if f.attributed_to)
+    state.nexus.db.save_project(proj)
+
+    payload = {
+        "project_id": project_id,
+        "total_findings": len(findings),
+        "attributed_before": before,
+        "attributed_after": after,
+        "newly_attributed": max(0, after - before),
+    }
+    if as_json:
+        click.echo(_json.dumps(payload, indent=2))
+        return
+    console.print(
+        f"[green]⌖ attributed[/green] [cyan]{after}[/cyan]/{len(findings)} "
+        f"findings · [bold]{payload['newly_attributed']}[/bold] newly tagged "
+        f"· {before} already had an owner"
     )
 
 

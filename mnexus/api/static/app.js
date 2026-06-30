@@ -1607,6 +1607,7 @@ function projectTabs(id, active) {
       ${tabs.map(([k, label]) => `<a class="tab ${k === active ? "active" : ""}" href="#/project/${encodeURIComponent(id)}/${k}">${k === active ? "> " : "  "}${label}</a>`).join("")}
       <span class="grow"></span>
       <button class="tab" onclick="projectChromeManifest('${id}')" title="View the decoded AndroidManifest.xml (or Info.plist on iOS)">📄 MANIFEST</button>
+      <button class="tab" onclick="projectChromeAttribute('${id}')" title="Re-tag findings with their SDK / first-party owner (LibraryAttributionAudit)" style="color:var(--cyan)">⌖ ATTRIBUTE</button>
       <button class="tab" onclick="projectChromeBackup('${id}')" title="Zip up the entire project — model + findings + workspace + reports">↓ BACKUP</button>
       <button class="tab" onclick="projectChromeDelete('${id}')" title="Wipe every disk + DB trace of this project (destructive)" style="color:var(--sev-high)">🗑 DELETE</button>
       <button class="tab" data-rescan="${id}" title="re-run static fan-out + rebuild attack surface">⟳ RESCAN</button>
@@ -6392,6 +6393,28 @@ window.projectChromeManifest = async function (id) {
         }
     };
     document.addEventListener("keydown", onKey);
+};
+
+window.projectChromeAttribute = async function (id) {
+    // Re-run library attribution on the project's stored findings.
+    // Designed for projects ingested before LibraryAttributionAudit
+    // shipped — new scans get attribution for free.
+    const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/attribute`, { method: "POST" });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+        await confirmModal({
+            title: `✗ Attribution failed (${r.status})`,
+            body: JSON.stringify(body, null, 2).slice(0, 400),
+            okLabel: "OK", okStyle: "primary", cancelLabel: null,
+        });
+        return;
+    }
+    await confirmModal({
+        title: `⌖ Attribution done — ${body.attributed_after}/${body.total_findings} findings tagged`,
+        body: `<code>${body.newly_attributed}</code> newly attributed · <code>${body.attributed_before}</code> already had an owner.\n\nReloading the view so the chips show up.`,
+        okLabel: "OK", okStyle: "primary", cancelLabel: null,
+    });
+    setTimeout(() => { renderRoute(); }, 200);
 };
 
 window.projectChromeBackup = async function (id) {

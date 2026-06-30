@@ -3516,6 +3516,46 @@ async def project_find(
     }
 
 
+@app.post("/v1/projects/{project_id}/attribute")
+async def project_attribute(project_id: str) -> dict[str, Any]:
+    """Re-run library attribution against this project's stored findings.
+
+    Useful for projects ingested before LibraryAttributionAudit landed —
+    walks the existing workspace, tags every finding whose evidence
+    carries a secret-shaped fingerprint with its owner (first-party /
+    named SDK / third-party unknown), persists the update, and returns
+    a tally so the UI can re-fetch.
+
+    Cheap on findings without fingerprints: the extractor short-circuits
+    so the cost is bounded to the count of secret-like findings.
+    """
+    from mnexus.intelligence.library_attribution import attribute_findings
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    surface = p.attack_surface
+    findings = list(surface.findings) if surface else []
+
+    before = sum(1 for f in findings if f.attributed_to)
+    attribute_findings(
+        findings,
+        workspace_dir=nexus.config.workspace,
+        project_id=project_id,
+        app_package=p.package_name,
+    )
+    after = sum(1 for f in findings if f.attributed_to)
+
+    nexus.db.save_project(p)
+
+    return {
+        "project_id": project_id,
+        "total_findings": len(findings),
+        "attributed_before": before,
+        "attributed_after": after,
+        "newly_attributed": max(0, after - before),
+    }
+
+
 @app.get("/v1/projects/{project_id}/native")
 async def project_native(project_id: str) -> dict[str, Any]:
     """Screen 11 — Ghidra native analysis output."""
