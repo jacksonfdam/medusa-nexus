@@ -333,6 +333,22 @@ class MedusaNexus:
         except Exception as exc:  # noqa: BLE001
             log.warning("chain_correlator raised: %s", exc)
 
+        # Library attribution — tag findings whose evidence carries a
+        # secret-shaped fingerprint with the owner ('first-party',
+        # named SDK like 'Google Places SDK', or 'third-party (unknown)')
+        # so the analyst knows whether the fix is in their code or a
+        # build-config override against a bundled SDK.
+        try:
+            from mnexus.intelligence.library_attribution import attribute_findings
+            attribute_findings(
+                project.attack_surface.findings,
+                workspace_dir=self.config.workspace,
+                project_id=project.id,
+                app_package=project.package_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("library_attribution raised: %s", exc)
+
         # Phase 3 — auto-hooks from the surface.
         try:
             hooks = HookGenerator().for_attack_surface(project.attack_surface)
