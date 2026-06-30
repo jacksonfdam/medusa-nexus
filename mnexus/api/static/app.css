@@ -50,6 +50,9 @@
     --scanline: rgba(255, 255, 255, 0.05);
     --radius: 2px;
     --mono: "Courier Prime", ui-monospace, Menlo, monospace;
+
+    /* Layout — used by side-sheets / modals so they respect the sticky topbar */
+    --topbar-h: 56px;
 }
 
 /* Dracula — official palette from draculatheme.com.
@@ -415,6 +418,15 @@ body::before {
     padding: 0 20px;
 }
 .tab {
+    /* Defang browser <button> chrome — anchors and buttons must look
+       identical in the tab bar. Without these resets, <button class="tab">
+       inherits the platform's chunky-gray system style on macOS/Windows
+       Chrome / Safari, while <a class="tab"> renders flat. */
+    background: transparent;
+    font-family: inherit;
+    appearance: none;
+    -webkit-appearance: none;
+
     padding: 8px 16px;
     font-size: 12px; font-weight: 700; letter-spacing: 2px;
     color: var(--muted);
@@ -423,6 +435,11 @@ body::before {
     border-radius: var(--radius) var(--radius) 0 0;
     cursor: pointer;
     text-decoration: none;
+    transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.tab:hover {
+    color: var(--cyan);
+    background: rgba(34, 211, 238, 0.06);
 }
 .tab.active {
     color: var(--acid);
@@ -834,13 +851,21 @@ body::before {
 }
 
 /* ── Manifest side-sheet ──────────────────────────────────────────── */
+/* Sits BELOW the SPA's sticky .topbar (z-index: 50, ~56px tall) so the
+   global status row (clock + CONNECTED + SWAGGER) stays visible above
+   the sheet — opening the sheet shouldn't hide app-level chrome. The
+   z-index is higher than .topbar so when the sheet does cover content
+   below the topbar, it sits cleanly on top of project tabs + panels. */
 .side-sheet {
     position: fixed;
-    top: 0; right: 0; bottom: 0;
+    top: var(--topbar-h, 56px);
+    right: 0;
+    bottom: 0;
     width: min(720px, 92vw);
     background: var(--bg-panel, #0e1117);
     border-left: 1px solid rgba(34, 211, 238, 0.4);
-    z-index: 50;
+    border-top: 1px solid rgba(34, 211, 238, 0.18);
+    z-index: 60;
     display: flex;
     flex-direction: column;
     box-shadow: -8px 0 32px rgba(0, 0, 0, 0.6);
