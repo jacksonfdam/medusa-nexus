@@ -159,15 +159,17 @@ setup_python() {
     ok "mnexus installed in editable mode"
 }
 
-# ─── system tools (adb, jadx, apktool) ────────────────────────────────────
+# ─── system tools (adb, jadx, apktool, ripgrep) ────────────────────────────
 install_system_tools() {
-    step "installing external tools (adb / jadx / apktool)"
+    step "installing external tools (adb / jadx / apktool / ripgrep)"
 
     if [[ "$PLATFORM" == "darwin" ]]; then
         if ! command -v brew >/dev/null 2>&1; then
             fail "Homebrew not found. Install from https://brew.sh and re-run."
         fi
-        for pkg in android-platform-tools jadx apktool; do
+        # ripgrep is optional but arms the LibraryAttributionAudit fast
+        # path — 5-10× faster than the pure-Python fallback on release APKs.
+        for pkg in android-platform-tools jadx apktool ripgrep; do
             if brew list --formula "$pkg" >/dev/null 2>&1; then
                 hint "$pkg already installed"
             else
@@ -179,9 +181,9 @@ install_system_tools() {
 
     elif [[ "$PLATFORM" == "linux" ]]; then
         if command -v apt-get >/dev/null 2>&1; then
-            say "sudo apt-get install adb apktool unzip curl (may prompt for password)"
+            say "sudo apt-get install adb apktool ripgrep unzip curl (may prompt for password)"
             sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends adb apktool unzip curl default-jre-headless
+            sudo apt-get install -y --no-install-recommends adb apktool ripgrep unzip curl default-jre-headless
             if ! command -v jadx >/dev/null 2>&1; then
                 install_jadx_from_release
             fi
