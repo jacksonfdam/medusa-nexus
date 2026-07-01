@@ -6477,22 +6477,54 @@ window.projectChromeAttribute = async function (id) {
     // Re-run library attribution on the project's stored findings.
     // Designed for projects ingested before LibraryAttributionAudit
     // shipped — new scans get attribution for free.
-    const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/attribute`, { method: "POST" });
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
+    // Live spinner state on the clicked button because the workspace
+    // walk can take a few seconds on release APKs and a dead-looking
+    // button is exactly the "clicked twice, wondered if broken" UX.
+    const btn = document.querySelector(`.tab[onclick*="projectChromeAttribute('${id}')"]`);
+    const origLabel = btn ? btn.textContent : null;
+    const origColor = btn ? btn.style.color : null;
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = "⌖ attributing…";
+        btn.style.color = "var(--magenta)";
+    }
+    try {
+        const r = await fetch(`/v1/projects/${encodeURIComponent(id)}/attribute`, { method: "POST" });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            if (btn) {
+                btn.textContent = "⌖ FAILED";
+                btn.style.color = "var(--sev-high)";
+            }
+            await confirmModal({
+                title: `✗ Attribution failed (${r.status})`,
+                body: JSON.stringify(body, null, 2).slice(0, 400),
+                okLabel: "OK", okStyle: "primary", cancelLabel: null,
+            });
+            return;
+        }
+        if (btn) {
+            btn.textContent = `✓ ${body.newly_attributed} tagged`;
+            btn.style.color = "var(--acid)";
+        }
         await confirmModal({
-            title: `✗ Attribution failed (${r.status})`,
-            body: JSON.stringify(body, null, 2).slice(0, 400),
+            title: `⌖ Attribution done — ${body.attributed_after}/${body.total_findings} findings tagged`,
+            body: `<code>${body.newly_attributed}</code> newly attributed · <code>${body.attributed_before}</code> already had an owner.\n\nReloading the view so the chips show up.`,
             okLabel: "OK", okStyle: "primary", cancelLabel: null,
         });
-        return;
+        setTimeout(() => { renderRoute(); }, 200);
+    } finally {
+        // Restore the label ~2s later — long enough for the user to see
+        // the outcome, short enough that the ATTRIBUTE button reads
+        // normal by the time they look for it again.
+        setTimeout(() => {
+            if (btn) {
+                btn.disabled = false;
+                if (origLabel) btn.textContent = origLabel;
+                if (origColor !== null) btn.style.color = origColor;
+            }
+        }, 2000);
     }
-    await confirmModal({
-        title: `⌖ Attribution done — ${body.attributed_after}/${body.total_findings} findings tagged`,
-        body: `<code>${body.newly_attributed}</code> newly attributed · <code>${body.attributed_before}</code> already had an owner.\n\nReloading the view so the chips show up.`,
-        okLabel: "OK", okStyle: "primary", cancelLabel: null,
-    });
-    setTimeout(() => { renderRoute(); }, 200);
 };
 
 window.projectChromeBackup = async function (id) {
