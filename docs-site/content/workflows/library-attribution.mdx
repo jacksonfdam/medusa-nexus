@@ -61,10 +61,22 @@ The pipeline per finding:
 2. **Skip findings with no fingerprint** — e.g. `debuggable=true`
    findings are build-config issues, not library-attribution ones,
    so they stay untagged.
-3. **Locate** the longest fingerprint in the workspace via
-   `workspace_locator.find_in_workspace` — walks
-   `<workspace>/<pid>/jadx/`, `apktool/`, `apktool-manifest/`, and
-   `<workspace>/secrets/<package>/`.
+3. **Locate** the longest fingerprint in the workspace. The locator
+   cascade tries in order:
+   - **ripgrep** (`rg`) if on PATH — Rust, mmap, parallel. 5-10× faster
+     than the pure-Python walker on real release APKs. Install-hint
+     in `mnexus doctor`; `brew install ripgrep` / `apt-get install ripgrep`.
+   - A **bytes-based Python locator** — `os.scandir` walk, `bytes.find`
+     without utf-8 decode, `ThreadPoolExecutor` over N-1 CPUs, 256 KB
+     read cap per file, **8-second timeout per fingerprint**.
+   - The generic `workspace_locator.find_in_workspace` — flexible
+     (regex, snippets) but slower — only reached as a last-resort
+     fallback.
+
+   Walked subtrees in all three paths: `<workspace>/<pid>/jadx/`,
+   `apktool/`, `apktool-manifest/`, and `<workspace>/secrets/<package>/`.
+   Fingerprints are cached across findings within a single backfill —
+   two findings sharing the same `AIza…` key trigger one walk, not two.
 4. **Map each hit's path** to an owner. The app's own namespace wins
    over any vendor match. Otherwise, the **longest matching** prefix
    in `KNOWN_SDK_PREFIXES` wins (so `com/google/firebase` beats a
@@ -73,8 +85,11 @@ The pipeline per finding:
    is `high` (≥80% consensus), `medium` (≥50%), or `low` otherwise.
 
 The cost is bounded — only findings whose evidence carries a
-secret-shaped pattern trigger a workspace walk. A typical APK ingest
-adds well under one second.
+secret-shaped pattern trigger a workspace walk, the walk short-circuits
+at 10 hits, and each fingerprint has a hard 8-second ceiling. A typical
+APK ingest adds well under one second; a back-fill on a 100k-file
+release APK completes in seconds with `rg`, or under a minute worst-case
+via the Python fast path.
 
 ## What's in the registry
 

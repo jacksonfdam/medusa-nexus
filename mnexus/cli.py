@@ -144,6 +144,7 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/diff manifest|findings", "Diff the active project against the latest prior scan."),
         ("/manifest [--tree]", "View the decoded AndroidManifest.xml (--raw default, --tree colored, --output <path> writes to disk)."),
         ("/find <pattern>",  "Grep the project's static workspace (jadx + apktool + secrets) for a string or regex."),
+        ("/attribute",       "Re-tag findings with SDK / first-party owners (LibraryAttributionAudit back-fill)."),
         ("/backup [--all]",  "Zip up one project (or every project) — model + findings + workspace + reports."),
         ("/delete [--all]",  "Wipe one project (or every project) from disk + DB. Destructive; --yes required."),
         ("/pipeline list|run", "List built-in pipelines or run one against the active project."),

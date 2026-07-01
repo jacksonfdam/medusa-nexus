@@ -9,7 +9,7 @@ order; the next one assumes the previous one ran.
 
 | Time | Command | What you should see |
 | ---- | ------- | ------------------- |
-| 0:05 | `scripts/setup.sh --minimal` | Python venv + adb + jadx + apktool + frida land under `~/.mnexus/`. ~2 min. |
+| 0:05 | `scripts/setup.sh --minimal` | Python venv + adb + jadx + apktool + ripgrep + frida land under `~/.mnexus/`. ~2 min. |
 | 0:10 | `source ~/.mnexus/env.sh && mnexus doctor` | Engine matrix prints. The minimal engines should all be `● OK`. |
 | 0:20 | `mnexus scan ./target.apk` | Spinner runs, then a panel prints with the risk score + finding counts. ~30s on a 20 MB APK. |
 | 0:35 | `mnexus` | The REPL opens. You're in the cyberpunk terminal. Type `/help` if curious. |

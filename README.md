@@ -103,7 +103,7 @@ What the script does:
 
 1. Detects platform (macOS / Linux, arm64 / x86_64).
 2. Creates `.venv/` and installs `mnexus` in editable mode with dev extras.
-3. Installs `adb`, `jadx`, `apktool` via `brew` (macOS) or `apt-get` + GitHub releases (Linux).
+3. Installs `adb`, `jadx`, `apktool`, `ripgrep` via `brew` (macOS) or `apt-get` + GitHub releases (Linux). `ripgrep` is optional — arms the LibraryAttributionAudit fast path; without it attribution falls back to a bytes-based Python locator.
 4. Clones `ch0pin/medusa` and `ch0pin/Stheno` into `~/.mnexus/tools/`.
 5. *(full mode)* Downloads Ghidra (v11.1.2 by default, override with `GHIDRA_VERSION=`).
 6. *(full mode)* Pulls the MobSF docker image.
