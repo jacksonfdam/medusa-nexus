@@ -85,6 +85,11 @@ class MedusaNexus:
         Multiple keys may point at the same engine instance (the
         'firebase' / 'playintel' alias pair); we dedupe by object id
         so the doctor table doesn't render the same row twice.
+
+        Appends synthetic rows for **optional companion tools** we know
+        about (currently: ``ripgrep``, used by LibraryAttributionAudit
+        as a fast path). Missing companions never fail doctor — they
+        just report ``installed=False`` with a hint on how to install.
         """
         seen_ids: set[int] = set()
         unique_engines = []
@@ -94,7 +99,7 @@ class MedusaNexus:
             seen_ids.add(id(engine))
             unique_engines.append(engine)
         results = await asyncio.gather(*(e.health_check() for e in unique_engines))
-        return [
+        rows: list[dict[str, object]] = [
             {
                 "name": r.name,
                 "installed": r.installed,
@@ -104,6 +109,8 @@ class MedusaNexus:
             }
             for r in results
         ]
+        rows.extend(_companion_tool_rows())
+        return rows
 
     async def ingest(
         self,
@@ -494,6 +501,55 @@ class MedusaNexus:
             project.attack_surface.risk_score(),
         )
         return project
+
+
+def _companion_tool_rows() -> list[dict[str, object]]:
+    """Report on optional companion binaries that unlock fast paths.
+
+    These are NOT required to run mnexus. Missing rows here render as
+    a yellow "install-hint" in the UI — the pipeline degrades gracefully
+    to a pure-Python fallback. Currently:
+
+      * **ripgrep** (``rg``) — powers LibraryAttributionAudit's fast
+        workspace grep. Without it, attribution falls back to a
+        bytes-based Python locator (~2-5× slower on release APKs but
+        still bounded by an 8s per-fingerprint timeout).
+    """
+    import subprocess
+
+    rows: list[dict[str, object]] = []
+
+    rg_path = shutil.which("rg")
+    if rg_path:
+        version = "unknown"
+        try:
+            proc = subprocess.run([rg_path, "--version"], capture_output=True, text=True, timeout=2)
+            first = (proc.stdout or "").splitlines()[0] if proc.stdout else ""
+            if first.startswith("ripgrep "):
+                version = first.split(" ", 1)[1].split(" ", 1)[0]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        rows.append({
+            "name": "ripgrep",
+            "installed": True,
+            "version": version,
+            "path": rg_path,
+            "message": "fast path armed — attribution walks the workspace via rg.",
+        })
+    else:
+        rows.append({
+            "name": "ripgrep",
+            "installed": False,
+            "version": None,
+            "path": None,
+            "message": (
+                "optional — LibraryAttributionAudit falls back to a pure-Python "
+                "locator without it. macOS: `brew install ripgrep`. Debian/Ubuntu: "
+                "`sudo apt-get install ripgrep`."
+            ),
+        })
+
+    return rows
 
 
 def _prepare_scan_path(apk_path: Path, workspace: Path) -> tuple[Path, Path | None]:
