@@ -3541,16 +3541,20 @@ async def project_attribute(project_id: str) -> dict[str, Any]:
 
     before = sum(1 for f in findings if f.attributed_to)
 
-    def _do_work() -> None:
+    # Only the workspace walk runs in the threadpool — SQLite connections
+    # created in the main thread refuse cross-thread use by default
+    # (``sqlite3.ProgrammingError``), and `check_same_thread=False` opens
+    # the door to concurrent-write foot-guns we don't need here.
+    def _walk() -> None:
         attribute_findings(
             findings,
             workspace_dir=nexus.config.workspace,
             project_id=project_id,
             app_package=p.package_name,
         )
-        nexus.db.save_project(p)
 
-    await run_in_threadpool(_do_work)
+    await run_in_threadpool(_walk)
+    nexus.db.save_project(p)
 
     after = sum(1 for f in findings if f.attributed_to)
     return {
