@@ -124,6 +124,27 @@ function chip(sev) {
     return `<span class="chip ${cls}">${cls.toUpperCase()}</span>`;
 }
 
+/* Library-attribution chip — the acid/cyan/sev-high dot that tags a
+ * finding with its owner (first-party / named SDK / third-party unknown).
+ * Returns '' for findings the LibraryAttributionAudit didn't touch, so
+ * callers can drop it inline without a conditional. Colour coding:
+ *   - first-party         → acid       (your code, your fix)
+ *   - named SDK           → cyan       (vendor rotation + SDK override)
+ *   - unknown third-party → sev-high   (needs human review)
+ * Confidence encoded in the leading glyph: ● high · ◐ medium · ○ low. */
+function attrTag(f) {
+    if (!f || !f.attributed_to) return "";
+    const owner = f.attributed_to;
+    let color = "var(--magenta)";
+    if (owner === "first-party") color = "var(--acid)";
+    else if (owner === "third-party (unknown)") color = "var(--sev-high)";
+    else color = "var(--cyan)";
+    const conf = (f.attribution_confidence || "").toLowerCase();
+    const dot = conf === "high" ? "●" : conf === "medium" ? "◐" : "○";
+    const cat = f.sdk_category ? ` · ${f.sdk_category}` : "";
+    return `<span class="tag" title="LibraryAttributionAudit · ${conf || "?"} confidence" style="color:${color}">${dot} ${owner}${cat}</span>`;
+}
+
 /* Platform glyph — rendered next to the bundle id everywhere a project is listed. */
 function platformGlyph(platform) {
     if (platform === "ios") return `<span title="iOS" style="color:#fff">🍎</span>`;
@@ -1300,23 +1321,11 @@ function renderEngineFindingsBlock(findings) {
                 <div class="muted small">no findings emitted</div></div>`;
     }
     const sevColor = (s) => `var(--sev-${s})`;
-    const attrChip = (f) => {
-        if (!f.attributed_to) return "";
-        const owner = f.attributed_to;
-        let color = "var(--magenta)";
-        if (owner === "first-party") color = "var(--acid)";
-        else if (owner === "third-party (unknown)") color = "var(--sev-high)";
-        else color = "var(--cyan)";
-        const conf = (f.attribution_confidence || "").toLowerCase();
-        const dot = conf === "high" ? "●" : conf === "medium" ? "◐" : "○";
-        return `<div class="muted small" style="margin-top:3px;color:${color}">${dot} ${escapeHtml(owner)}${f.sdk_category ? ` · ${escapeHtml(f.sdk_category)}` : ""}</div>`;
-    };
     const rows = findings.map((f) => `
         <tr style="border-top:1px solid var(--border)">
           <td class="t-mono" style="padding:6px 8px;color:${sevColor(f.severity)};text-transform:uppercase;white-space:nowrap">${escapeHtml(f.severity)}</td>
           <td style="padding:6px 8px">
-            <div>${escapeHtml(f.title)}</div>
-            ${attrChip(f)}
+            <div>${escapeHtml(f.title)} ${attrTag(f)}</div>
             ${f.evidence ? `<div class="muted small" style="margin-top:2px;white-space:pre-wrap;font-family:monospace">${escapeHtml(f.evidence).slice(0, 600)}</div>` : ""}
           </td>
           <td class="muted small" style="padding:6px 8px;vertical-align:top;max-width:280px;word-break:break-all">${escapeHtml(f.location || "—")}</td>
@@ -3763,6 +3772,7 @@ async function mount_project_overview(ctx) {
         <a href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" class="row" style="padding:8px 12px;background:var(--bg-panel);border:1px solid var(--border);border-radius:2px;text-decoration:none;color:inherit">
             ${chip((f.severity || "info").toLowerCase())}
             <span class="grow">${f.title}</span>
+            ${attrTag(f)}
             <span class="t-muted">[${f.source_engine || "?"}]</span>
         </a>`).join("") || `<div class="empty-state">no findings yet — every static engine returned []. Wire real detection in iteration 2.</div>`;
 
@@ -4691,7 +4701,7 @@ async function mount_project_network(ctx) {
     const staticBlock = findings.length
         ? findings.map((f) => `
             <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
-              <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
+              <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span>${attrTag(f)}<span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
               <div class="title">${escapeHtml(f.title)}</div>
               <div class="meta">${escapeHtml(f.location || "—")} · ${f.cwe_id || ""} ${f.owasp_mobile || ""}</div>
             </a>`).join("")
@@ -6743,7 +6753,7 @@ async function mount_project_secrets(ctx) {
     } else {
         fEl.innerHTML = findings.map((f) => `
           <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
-            <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine || "?"}]</span></div>
+            <div class="head">${chip((f.severity || "info").toLowerCase())}<span class="tag">${f.id}</span>${attrTag(f)}<span class="spacer"></span><span class="tag">[${f.source_engine || "?"}]</span></div>
             <div class="title">${f.title}</div>
             <div class="meta">${f.location || "—"} · ${f.cwe_id || ""} ${f.owasp_mobile || ""}</div>
           </a>`).join("");
@@ -6986,7 +6996,7 @@ async function mount_project_native(ctx) {
     } else {
         fEl.innerHTML = data.findings.map((f) => `
           <a class="finding" href="#/project/${encodeURIComponent(id)}/finding/${encodeURIComponent(f.id)}" style="text-decoration:none">
-            <div class="head">${chip(f.severity)}<span class="tag">${f.id}</span><span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
+            <div class="head">${chip(f.severity)}<span class="tag">${f.id}</span>${attrTag(f)}<span class="spacer"></span><span class="tag">[${f.source_engine}]</span></div>
             <div class="title">${f.title}</div>
             <div class="meta">${f.location || "—"} · ${f.cwe_id || ""}</div>
           </a>`).join("");
