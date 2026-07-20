@@ -7755,6 +7755,8 @@ function setActiveSidebar(topLevel) {
 }
 
 async function renderRoute() {
+    // Stash the outgoing view's scroll into its chip before the DOM swaps out.
+    tabsSaveScroll();
     const raw = location.hash.replace(/^#\/?/, "") || "dashboard";
     const [pathPart] = raw.split("?");
     const hit = matchRoute(pathPart);
@@ -7773,10 +7775,15 @@ async function renderRoute() {
         setActiveSidebar(null);
         return;
     }
-    view.innerHTML = hit.route.view(ctx);
+    const html = hit.route.view(ctx);
+    view.innerHTML = html;
     // Update sidebar active based on top-level segment (sidebar only lists the 9 primaries).
     const topLevel = pathPart.split("/")[0];
     setActiveSidebar(topLevel);
+    // Redirect stubs return "" and immediately rewrite the hash — don't give
+    // them a chip; only real views earn a tab.
+    const isRealView = !!(html && html.trim());
+    if (isRealView) tabsTrack(location.hash || "#/dashboard");
     if (typeof hit.route.mount === "function") {
         try { await hit.route.mount(ctx); } catch (e) { console.error("mount failed:", e); }
     }
@@ -7784,6 +7791,8 @@ async function renderRoute() {
     // bind them once after every mount has finished rebuilding the DOM.
     if (pathPart.startsWith("project/")) bindProjectTabActions();
     document.title = `🔱 MEDUSA::NEXUS / ${pathPart}`;
+    // Mount may have reflowed the page — restore this chip's scroll after it settles.
+    if (isRealView) tabsRestoreScroll();
 }
 
 /* ─── live clock ─── */
@@ -8155,6 +8164,155 @@ function initCommandPalette() {
     $("#cmdk-trigger")?.addEventListener("click", openPalette);
 }
 
+/* ─── horizontal tab strip (Android-Studio style) ───
+ *
+ * Every place you land becomes a chip in a strip above the content. Revisit a
+ * spot and it re-focuses its chip instead of spawning a duplicate; wander off
+ * and the old chip waits with your scroll position intact. Close what you don't
+ * need; ＋ (or ⌘K) opens the next one.
+ *
+ * This is the "session-stack" model: switching a chip re-runs the router for its
+ * hash — no keep-alive DOM, so live streams (logcat, screen mirror) restart when
+ * you return. Cheap, predictable, and it never loses your place in the tree.
+ */
+const TABS_KEY = "nexus.tabs";
+const TABS_MAX = 14;
+const TAB_STATE = { list: [], active: null, seq: 0 };
+
+// Lazily invert the palette tables into hash→{label,icon} lookups for chip titles.
+let _tabGlobalMap = null, _tabViewMap = null;
+function tabLookups() {
+    if (!_tabGlobalMap) {
+        _tabGlobalMap = new Map(PALETTE_GLOBAL.map(([p, label, icon]) => [p, { label, icon: icon || "▸" }]));
+        _tabViewMap = new Map(PALETTE_PROJECT_VIEWS.map(([s, label, icon]) => [s, { label, icon: icon || "▸" }]));
+    }
+    return { g: _tabGlobalMap, v: _tabViewMap };
+}
+
+function tabMeta(hash) {
+    const raw = String(hash).replace(/^#\/?/, "");
+    const [path] = raw.split("?");
+    const { g, v } = tabLookups();
+    const proj = path.match(/^project\/([^/]+)\/(.+)$/);
+    if (proj) {
+        const id = decodeURIComponent(proj[1]);
+        const sub = proj[2];
+        const short = id.length > 13 ? id.slice(0, 12) + "…" : id;
+        if (/^finding\//.test(sub)) return { icon: "🔎", title: `Finding · ${short}` };
+        const hitv = v.get(sub);
+        return { icon: hitv?.icon || "▸", title: `${hitv?.label || sub} · ${short}` };
+    }
+    const fnd = path.match(/^finding\/(.+)$/);
+    if (fnd) return { icon: "🔎", title: `Finding ${fnd[1]}` };
+    const hitg = g.get(path);
+    if (hitg) return { icon: hitg.icon, title: hitg.label };
+    return { icon: "▸", title: path || "dashboard" };
+}
+
+function tabsPersist() {
+    try {
+        sessionStorage.setItem(TABS_KEY, JSON.stringify({
+            list: TAB_STATE.list.map((t) => ({ hash: t.hash, scroll: t.scroll })),
+            active: TAB_STATE.active,
+        }));
+    } catch (e) { /* private mode → tabs just won't survive a reload */ }
+}
+
+function tabsSaveScroll() {
+    if (!TAB_STATE.active) return;
+    const t = TAB_STATE.list.find((x) => x.hash === TAB_STATE.active);
+    if (t) t.scroll = window.scrollY || document.documentElement.scrollTop || 0;
+}
+
+function tabsRestoreScroll() {
+    const t = TAB_STATE.list.find((x) => x.hash === TAB_STATE.active);
+    const y = t?.scroll || 0;
+    requestAnimationFrame(() => window.scrollTo(0, y));
+}
+
+function tabsTrack(hash) {
+    hash = hash || "#/dashboard";
+    let t = TAB_STATE.list.find((x) => x.hash === hash);
+    if (!t) {
+        t = { hash, scroll: 0, seq: ++TAB_STATE.seq, ...tabMeta(hash) };
+        TAB_STATE.list.push(t);
+        // Evict the oldest non-active chip once we blow past the cap.
+        while (TAB_STATE.list.length > TABS_MAX) {
+            const victim = TAB_STATE.list.findIndex((x) => x.hash !== hash);
+            if (victim < 0) break;
+            TAB_STATE.list.splice(victim, 1);
+        }
+    } else {
+        t.seq = ++TAB_STATE.seq;
+        Object.assign(t, tabMeta(hash)); // a project id may resolve to a nicer title now
+    }
+    TAB_STATE.active = hash;
+    renderTabStrip();
+    tabsPersist();
+}
+
+function tabsClose(hash) {
+    const idx = TAB_STATE.list.findIndex((x) => x.hash === hash);
+    if (idx < 0) return;
+    const wasActive = TAB_STATE.active === hash;
+    TAB_STATE.list.splice(idx, 1);
+    if (!wasActive) { renderTabStrip(); tabsPersist(); return; }
+    // Hand focus to the chip that slid into this slot, else the left neighbor.
+    const next = TAB_STATE.list[idx] || TAB_STATE.list[idx - 1] || TAB_STATE.list[TAB_STATE.list.length - 1];
+    if (next) { location.hash = next.hash; }
+    else { TAB_STATE.active = null; tabsPersist(); location.hash = "#/dashboard"; }
+}
+
+function renderTabStrip() {
+    const strip = $("#tab-strip");
+    if (!strip) return;
+    if (!TAB_STATE.list.length) { strip.innerHTML = ""; strip.classList.remove("has-tabs"); return; }
+    strip.classList.add("has-tabs");
+    const chips = TAB_STATE.list.map((t) => {
+        const active = t.hash === TAB_STATE.active;
+        return `<div class="tab-chip${active ? " active" : ""}" data-hash="${escapeHtmlSafe(t.hash)}" title="${escapeHtmlSafe(t.hash)}">
+            <span class="tab-chip-ico">${escapeHtmlSafe(t.icon)}</span>
+            <span class="tab-chip-label">${escapeHtmlSafe(t.title)}</span>
+            <button class="tab-chip-close" data-close="${escapeHtmlSafe(t.hash)}" aria-label="close tab" title="close">✕</button>
+        </div>`;
+    }).join("");
+    strip.innerHTML = `<div class="tab-chips">${chips}</div>
+        <button class="tab-new" id="tab-new" title="open a new view (⌘K)" aria-label="new tab">＋</button>`;
+    $$("#tab-strip .tab-chip").forEach((chip) => {
+        chip.addEventListener("mousedown", (e) => {
+            if (e.target.closest(".tab-chip-close")) return;
+            if (e.button === 1) { e.preventDefault(); tabsClose(chip.dataset.hash); return; } // middle-click closes
+            if (e.button !== 0) return;
+            const hash = chip.dataset.hash;
+            if (hash && hash !== location.hash) location.hash = hash;
+        });
+    });
+    $$("#tab-strip .tab-chip-close").forEach((btn) =>
+        btn.addEventListener("click", (e) => { e.stopPropagation(); tabsClose(btn.dataset.close); }));
+    $("#tab-new")?.addEventListener("click", openPalette);
+    $("#tab-strip .tab-chip.active")?.scrollIntoView({ inline: "nearest", block: "nearest" });
+}
+
+function measureTopbar() {
+    const bar = $(".topbar");
+    if (bar) document.documentElement.style.setProperty("--topbar-h", `${bar.offsetHeight}px`);
+}
+
+function initTabs() {
+    measureTopbar();
+    window.addEventListener("resize", measureTopbar);
+    try {
+        const saved = JSON.parse(sessionStorage.getItem(TABS_KEY) || "null");
+        if (saved && Array.isArray(saved.list)) {
+            TAB_STATE.list = saved.list
+                .filter((t) => t && typeof t.hash === "string")
+                .map((t) => ({ hash: t.hash, scroll: t.scroll || 0, seq: ++TAB_STATE.seq, ...tabMeta(t.hash) }));
+            TAB_STATE.active = saved.active || null;
+        }
+    } catch (e) { /* corrupt state → start clean */ }
+    renderTabStrip();
+}
+
 /* ─── bootstrap ─── */
 window.addEventListener("hashchange", renderRoute);
 window.addEventListener("DOMContentLoaded", () => {
@@ -8162,6 +8320,7 @@ window.addEventListener("DOMContentLoaded", () => {
     applyThemeAttr();
     initSidebar();
     initCommandPalette();
+    initTabs();
     renderRoute();
     tickClock();
     setInterval(tickClock, 1000);

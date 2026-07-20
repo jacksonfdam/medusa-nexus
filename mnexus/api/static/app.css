@@ -1156,3 +1156,82 @@ input[type="checkbox"].projects-select:checked::after {
     color: var(--muted, rgba(0, 255, 255, 0.6));
     opacity: 0.7;
 }
+
+/* ─── horizontal tab strip (Android-Studio style) ───
+ * One chip per open view, above the content column. The strip sticks just under
+ * the topbar (height measured at runtime into --topbar-h) so tabs stay reachable
+ * while the page scrolls. Only shown once at least one chip exists. */
+.content-col { min-width: 0; display: flex; flex-direction: column; }
+.tab-strip {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    position: sticky;
+    top: var(--topbar-h, 49px);
+    z-index: 40;
+    padding: 6px 10px 0;
+    background: var(--bg-base);
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+}
+.tab-strip.has-tabs { display: flex; }
+.tab-chips {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+.tab-chips::-webkit-scrollbar { height: 4px; }
+.tab-chips::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.tab-chip {
+    display: flex; align-items: center; gap: 7px;
+    padding: 6px 6px 6px 11px;
+    max-width: 220px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+    flex: none;
+    transition: color .12s, background .12s, border-color .12s;
+}
+.tab-chip:hover { background: var(--bg-panel-hover); color: var(--cyan); }
+.tab-chip.active {
+    background: var(--bg-panel-hover);
+    border-color: var(--border-hover);
+    color: var(--cyan);
+    box-shadow: inset 0 2px 0 var(--cyan);
+}
+.tab-chip-ico { flex: none; font-size: 12px; }
+.tab-chip-label { overflow: hidden; text-overflow: ellipsis; }
+.tab-chip-close {
+    flex: none;
+    width: 16px; height: 16px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; border: none;
+    color: inherit; opacity: .45;
+    cursor: pointer; border-radius: 3px;
+    font-size: 11px; line-height: 1;
+    transition: opacity .12s, background .12s, color .12s;
+}
+.tab-chip-close:hover { opacity: 1; background: rgba(255, 56, 96, .22); color: var(--sev-crit); }
+.tab-new {
+    flex: none;
+    width: 26px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--cyan);
+    cursor: pointer;
+    font-size: 14px; line-height: 1;
+    transition: border-color .12s, background .12s;
+}
+.tab-new:hover { border-color: var(--border-hover); background: var(--bg-panel-hover); }
