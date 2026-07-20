@@ -7880,12 +7880,288 @@ function initSidebar() {
     });
 }
 
+/* ─── ⌘K command palette ───
+ *
+ * Fuzzy-search every destination and action, then run it blind — no mouse, no
+ * hunting through the sidebar. ⌘K / Ctrl+K (or the topbar search box) opens it;
+ * type, ↑/↓ to aim, Enter to fire, Esc to bail.
+ *
+ * The index is rebuilt on every open so project-scoped commands reflect wherever
+ * you currently are. Two kinds of entries live here:
+ *   - routes  → set location.hash and let the router do its thing
+ *   - actions → call a function (toggle sidebar, cycle theme, project chrome…)
+ *
+ * Zero dependencies, zero build step. The fuzzy scorer is a subsequence match
+ * with boundary/consecutive bonuses — good enough to feel psychic, small enough
+ * to read in one sitting.
+ */
+const PALETTE_STATE = { open: false, items: [], filtered: [], sel: 0 };
+
+// Last project we saw in the hash, so its sub-views stay one keystroke away even
+// after you wander off into /devices or /tools.
+let lastProjectId = null;
+
+function currentProjectId() {
+    const m = location.hash.match(/^#\/project\/([^/?]+)/);
+    if (m) lastProjectId = decodeURIComponent(m[1]);
+    return lastProjectId;
+}
+
+/* Static global destinations — curated labels/icons beat auto-deriving from the
+ * route table. Keywords widen the fuzzy net (synonyms the label doesn't spell). */
+const PALETTE_GLOBAL = [
+    ["dashboard",       "Dashboard",        "🏠", "home start overview"],
+    ["projects",        "Projects",         "📁", "apps list library"],
+    ["scan",            "Scan APK / IPA",   "🔬", "upload analyze static new"],
+    ["play-scan",       "Play Scan",        "▶", "google play store fetch"],
+    ["play-accounts",   "Play Accounts",    "👤", "google login credentials"],
+    ["devices",         "Devices",          "📱", "adb emulator phone"],
+    ["adb",             "ADB Console",      "⌁", "shell bridge android"],
+    ["device/pull",     "Pull App from Device", "↓", "extract apk dump"],
+    ["device/bridge",   "Device Bridge",    "🌉", "connect wifi tcp"],
+    ["ios/decrypt",     "iOS Decrypt",      "", "ipa frida dump"],
+    ["device/shell",    "Device Shell",     ">_", "adb terminal command"],
+    ["device/files",    "Device Files",     "🗂", "explorer sdcard push pull"],
+    ["device/screen",   "Screen Mirror",    "🖥", "scrcpy record cast"],
+    ["device/logcat",   "Logcat",           "📜", "logs crash stream"],
+    ["report",          "Report",           "📄", "export pdf findings"],
+    ["report/diff",     "Report Diff",      "±", "compare versions delta"],
+    ["pipeline",        "Pipeline",         "⛓", "automation stages ci"],
+    ["recipes",         "Recipes",          "📖", "presets playbook"],
+    ["tools",           "Tools",            "🧰", "utilities helpers"],
+    ["terminal",        "Terminal",         "▓", "repl console shell"],
+    ["settings",        "Settings",         "⚙", "config preferences theme"],
+    ["about",           "Credits",          "☠", "about license authors"],
+];
+
+/* Sub-views under a given project — offered only when we know an id. */
+const PALETTE_PROJECT_VIEWS = [
+    ["overview",         "Overview",        "◎", "summary risk"],
+    ["static",           "Static Analysis", "🔬", "code manifest"],
+    ["static/secrets",   "Secrets",         "🔑", "keys tokens api"],
+    ["static/components","Components",       "🧩", "activities services receivers"],
+    ["static/native",    "Native Libs",     "⚙", "so jni arm"],
+    ["dynamic",          "Dynamic Analysis","⚡", "runtime frida hook"],
+    ["runtime",          "Runtime",         "🎛", "live instrumentation"],
+    ["network",          "Network",         "🌐", "traffic http tls"],
+    ["api-map",          "API Map",         "🗺", "endpoints routes"],
+    ["ssl-map",          "SSL Map",         "🔒", "tls certificates pinning"],
+    ["surface",          "Attack Surface",  "🎯", "exposed entrypoints"],
+    ["dataflow",         "Dataflow",        "💧", "taint sources sinks"],
+    ["attack-tree",      "Attack Tree",     "🌳", "threat model paths"],
+    ["owasp",            "OWASP MASVS",     "🛡", "masvs compliance"],
+    ["tracer",           "Tracer",          "🧭", "call trace"],
+    ["manifest-diff",    "Manifest Diff",   "±", "compare permissions"],
+    ["findings-diff",    "Findings Diff",   "±", "compare regression"],
+    ["report",           "Project Report",  "📄", "export findings"],
+];
+
+function buildPaletteItems() {
+    const items = [];
+    // routes → hash
+    for (const [path, label, icon, kw] of PALETTE_GLOBAL) {
+        items.push({ label, icon: icon || "▸", hint: `#/${path}`, group: "Go to",
+                     keys: `${label} ${kw}`, run: () => { location.hash = `#/${path}`; } });
+    }
+    const pid = currentProjectId();
+    if (pid) {
+        const short = pid.length > 22 ? pid.slice(0, 21) + "…" : pid;
+        for (const [sub, label, icon, kw] of PALETTE_PROJECT_VIEWS) {
+            items.push({ label: `${label}`, icon: icon || "▸",
+                         hint: `${short} · ${sub}`, group: `Project · ${short}`,
+                         keys: `${label} ${kw} ${pid} project`,
+                         run: () => { location.hash = `#/project/${encodeURIComponent(pid)}/${sub}`; } });
+        }
+        // project chrome actions (only wired when the fns exist on the page)
+        const chrome = [
+            ["View Manifest", "📄", "manifest xml plist", () => window.projectChromeManifest?.(pid)],
+            ["Re-Attribute Findings", "⌖", "attribute sdk owner library", () => window.projectChromeAttribute?.(pid)],
+            ["Backup Project", "↓", "zip archive export save", () => window.projectChromeBackup?.(pid)],
+            ["Delete Project", "🗑", "wipe destroy remove", () => window.projectChromeDelete?.(pid)],
+        ];
+        for (const [label, icon, kw, fn] of chrome) {
+            items.push({ label, icon, hint: `${short}`, group: `Project · ${short}`,
+                         keys: `${label} ${kw} ${pid}`, danger: label.startsWith("Delete"),
+                         run: fn });
+        }
+    }
+    // global actions
+    items.push({ label: "Toggle Sidebar", icon: "☰", hint: "⌘B", group: "Actions",
+                 keys: "sidebar collapse expand nav", run: () => toggleSidebar() });
+    for (const t of AVAILABLE_THEMES) {
+        items.push({ label: `Theme · ${t.name}`, icon: "🎨", hint: t.kicker, group: "Actions",
+                     keys: `theme ${t.name} ${t.id} color`, run: () => setTheme(t.id) });
+    }
+    return items;
+}
+
+/* Subsequence fuzzy scorer. Returns {score, pos} on the LABEL, or a positive
+ * score with empty pos when the match only lived in the keywords. null = miss. */
+function fuzzyScore(query, label, keys) {
+    const q = query.toLowerCase();
+    const scoreOn = (text, trackPos) => {
+        const t = text.toLowerCase();
+        let qi = 0, score = 0, prev = -2; const pos = [];
+        for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+            if (t[ti] !== q[qi]) continue;
+            let bonus = 1;
+            if (ti === prev + 1) bonus += 3;                       // consecutive run
+            if (ti === 0 || /[^a-z0-9]/.test(t[ti - 1])) bonus += 6; // word boundary
+            score += bonus; prev = ti; qi++;
+            if (trackPos) pos.push(ti);
+        }
+        return qi === q.length ? { score: score - t.length * 0.04, pos } : null;
+    };
+    const onLabel = scoreOn(label, true);
+    if (onLabel) return onLabel;
+    const onKeys = scoreOn(keys, false);
+    return onKeys ? { score: onKeys.score * 0.5, pos: [] } : null;
+}
+
+function highlightLabel(label, pos) {
+    if (!pos || !pos.length) return escapeHtmlSafe(label);
+    const set = new Set(pos); let out = "";
+    for (let i = 0; i < label.length; i++) {
+        const c = escapeHtmlSafe(label[i]);
+        out += set.has(i) ? `<b>${c}</b>` : c;
+    }
+    return out;
+}
+
+// Minimal escaper — labels are ours, but never trust a string near innerHTML.
+function escapeHtmlSafe(s) {
+    return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function paletteFilter(query) {
+    const q = query.trim();
+    PALETTE_STATE.query = q;
+    if (!q) {
+        PALETTE_STATE.filtered = PALETTE_STATE.items.map((it) => ({ it, pos: [] }));
+    } else {
+        PALETTE_STATE.filtered = PALETTE_STATE.items
+            .map((it) => { const m = fuzzyScore(q, it.label, it.keys); return m ? { it, pos: m.pos, score: m.score } : null; })
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 40);
+    }
+    PALETTE_STATE.sel = 0;
+    renderPaletteResults();
+}
+
+function renderPaletteResults() {
+    const list = $("#cmdk-results");
+    if (!list) return;
+    const rows = PALETTE_STATE.filtered;
+    if (!rows.length) {
+        list.innerHTML = `<div class="cmdk-empty">no command matches // ghost query</div>`;
+        return;
+    }
+    // Group headers only make sense in the unfiltered list — once you're
+    // searching, the ranked order interleaves groups and repeated headers turn
+    // into noise. So: grouped when idle, flat when hunting.
+    const grouped = !PALETTE_STATE.query;
+    let lastGroup = null; let html = "";
+    rows.forEach(({ it, pos }, i) => {
+        if (grouped && it.group !== lastGroup) {
+            html += `<div class="cmdk-group">${escapeHtmlSafe(it.group)}</div>`;
+            lastGroup = it.group;
+        }
+        html += `<div class="cmdk-row${i === PALETTE_STATE.sel ? " sel" : ""}${it.danger ? " danger" : ""}" data-i="${i}">
+            <span class="cmdk-ico">${escapeHtmlSafe(it.icon)}</span>
+            <span class="cmdk-label">${highlightLabel(it.label, pos)}</span>
+            <span class="cmdk-hint">${escapeHtmlSafe(it.hint || "")}</span>
+        </div>`;
+    });
+    list.innerHTML = html;
+    $$("#cmdk-results .cmdk-row").forEach((row) => {
+        row.addEventListener("mousemove", () => {
+            const i = Number(row.dataset.i);
+            if (i === PALETTE_STATE.sel) return;
+            PALETTE_STATE.sel = i; paintPaletteSelection();
+        });
+        row.addEventListener("click", () => runPaletteSelection(Number(row.dataset.i)));
+    });
+    paintPaletteSelection();
+}
+
+function paintPaletteSelection() {
+    $$("#cmdk-results .cmdk-row").forEach((row, i) =>
+        row.classList.toggle("sel", i === PALETTE_STATE.sel));
+    const sel = $("#cmdk-results .cmdk-row.sel");
+    if (sel) sel.scrollIntoView({ block: "nearest" });
+}
+
+function runPaletteSelection(i) {
+    const row = PALETTE_STATE.filtered[i ?? PALETTE_STATE.sel];
+    if (!row) return;
+    closePalette();
+    try { row.it.run(); } catch (e) { console.error("palette action failed:", e); }
+}
+
+function openPalette() {
+    if (PALETTE_STATE.open) return;
+    PALETTE_STATE.open = true;
+    PALETTE_STATE.items = buildPaletteItems();
+    const wrap = document.createElement("div");
+    wrap.className = "cmdk-overlay";
+    wrap.id = "cmdk-overlay";
+    wrap.innerHTML = `
+      <div class="cmdk" role="dialog" aria-label="command palette">
+        <div class="cmdk-search">
+          <span class="cmdk-prompt">⌘K</span>
+          <input id="cmdk-input" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="search features // jump anywhere…" />
+          <span class="cmdk-esc">ESC</span>
+        </div>
+        <div class="cmdk-results" id="cmdk-results"></div>
+        <div class="cmdk-foot"><span>↑↓ move</span><span>⏎ run</span><span>esc close</span></div>
+      </div>`;
+    document.body.appendChild(wrap);
+    wrap.addEventListener("mousedown", (e) => { if (e.target === wrap) closePalette(); });
+    const inp = $("#cmdk-input");
+    inp.addEventListener("input", () => paletteFilter(inp.value));
+    inp.addEventListener("keydown", onPaletteKey);
+    paletteFilter("");
+    inp.focus();
+}
+
+function closePalette() {
+    PALETTE_STATE.open = false;
+    $("#cmdk-overlay")?.remove();
+}
+
+function onPaletteKey(e) {
+    const n = PALETTE_STATE.filtered.length;
+    if (e.key === "Escape") { e.preventDefault(); closePalette(); return; }
+    if (e.key === "Enter") { e.preventDefault(); runPaletteSelection(); return; }
+    if (e.key === "ArrowDown" || (e.key === "n" && e.ctrlKey)) {
+        e.preventDefault(); if (n) { PALETTE_STATE.sel = (PALETTE_STATE.sel + 1) % n; paintPaletteSelection(); } return;
+    }
+    if (e.key === "ArrowUp" || (e.key === "p" && e.ctrlKey)) {
+        e.preventDefault(); if (n) { PALETTE_STATE.sel = (PALETTE_STATE.sel - 1 + n) % n; paintPaletteSelection(); } return;
+    }
+}
+
+function initCommandPalette() {
+    window.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && !e.shiftKey && !e.altKey) {
+            e.preventDefault();
+            PALETTE_STATE.open ? closePalette() : openPalette();
+        }
+    });
+    // Topbar search box → same palette. The box is a decoy; the palette is real.
+    $("#cmdk-trigger")?.addEventListener("click", openPalette);
+}
+
 /* ─── bootstrap ─── */
 window.addEventListener("hashchange", renderRoute);
 window.addEventListener("DOMContentLoaded", () => {
     if (!location.hash) location.replace("#/dashboard");
     applyThemeAttr();
     initSidebar();
+    initCommandPalette();
     renderRoute();
     tickClock();
     setInterval(tickClock, 1000);

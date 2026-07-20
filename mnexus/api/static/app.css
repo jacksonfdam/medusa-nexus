@@ -1023,3 +1023,136 @@ input[type="checkbox"].projects-select:checked::after {
     font-size: 12px;
     font-weight: 700;
 }
+
+/* ─── ⌘K command palette ───
+ * Topbar trigger reads as a search box; the overlay is a centered command list
+ * that leans on the same theme vars as everything else, so both nexus + dracula
+ * skins come along for free. */
+.cmdk-trigger {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: 14px;
+    padding: 5px 10px;
+    min-width: 210px;
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid var(--border, rgba(0, 255, 255, 0.3));
+    border-radius: 4px;
+    color: var(--muted, rgba(0, 255, 255, 0.6));
+    font-family: monospace;
+    font-size: 12px;
+    cursor: text;
+    transition: border-color 0.12s ease, color 0.12s ease;
+}
+.cmdk-trigger:hover { border-color: var(--border-hover, rgba(0, 255, 255, 0.5)); color: var(--cyan, #22d3ee); }
+.cmdk-trigger-ico { color: var(--cyan, #22d3ee); font-size: 13px; }
+.cmdk-trigger-text { flex: 1; text-align: left; opacity: 0.85; }
+.cmdk-trigger-kbd {
+    padding: 1px 6px;
+    border: 1px solid var(--border, rgba(0, 255, 255, 0.3));
+    border-radius: 3px;
+    font-size: 10.5px;
+    letter-spacing: 0.05em;
+    opacity: 0.75;
+}
+@media (max-width: 900px) {
+    .cmdk-trigger { min-width: 0; }
+    .cmdk-trigger-text, .cmdk-trigger-kbd { display: none; }
+}
+
+.cmdk-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 12vh;
+    z-index: 200;
+    animation: cmdk-fade 0.1s ease;
+}
+@keyframes cmdk-fade { from { opacity: 0; } to { opacity: 1; } }
+.cmdk {
+    width: min(680px, 94vw);
+    max-height: 68vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-base, #0a0a0a);
+    border: 1px solid var(--border-hover, rgba(0, 255, 255, 0.5));
+    border-radius: 8px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(0, 255, 255, 0.06);
+    overflow: hidden;
+    font-family: monospace;
+}
+.cmdk-search {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border, rgba(0, 255, 255, 0.3));
+}
+.cmdk-prompt { color: var(--cyan, #22d3ee); font-size: 12px; opacity: 0.8; }
+#cmdk-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text, #cbd5e1);
+    font-family: monospace;
+    font-size: 15px;
+    caret-color: var(--acid, #22DE80);
+}
+#cmdk-input::placeholder { color: var(--muted, rgba(0, 255, 255, 0.6)); opacity: 0.6; }
+.cmdk-esc {
+    padding: 1px 6px;
+    border: 1px solid var(--border, rgba(0, 255, 255, 0.3));
+    border-radius: 3px;
+    font-size: 10px;
+    color: var(--muted, rgba(0, 255, 255, 0.6));
+}
+.cmdk-results { overflow-y: auto; padding: 6px 0; }
+.cmdk-group {
+    padding: 8px 16px 4px;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted, rgba(0, 255, 255, 0.6));
+    opacity: 0.7;
+}
+.cmdk-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 7px 16px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+}
+.cmdk-row.sel {
+    background: var(--bg-panel-hover, rgba(8, 51, 68, 0.3));
+    border-left-color: var(--cyan, #22d3ee);
+}
+.cmdk-row.sel.danger { border-left-color: var(--sev-crit, #FF3860); }
+.cmdk-ico { width: 18px; text-align: center; color: var(--cyan, #22d3ee); font-size: 13px; }
+.cmdk-row.danger .cmdk-ico, .cmdk-row.danger.sel .cmdk-label { color: var(--sev-crit, #FF3860); }
+.cmdk-label { flex: 1; color: var(--text, #cbd5e1); font-size: 13px; }
+.cmdk-label b { color: var(--acid, #22DE80); font-weight: 700; }
+.cmdk-hint {
+    color: var(--muted, rgba(0, 255, 255, 0.6));
+    font-size: 11px;
+    opacity: 0.7;
+    max-width: 46%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.cmdk-empty { padding: 22px 16px; color: var(--muted, rgba(0, 255, 255, 0.6)); font-size: 12px; }
+.cmdk-foot {
+    display: flex;
+    gap: 16px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border, rgba(0, 255, 255, 0.3));
+    font-size: 10.5px;
+    color: var(--muted, rgba(0, 255, 255, 0.6));
+    opacity: 0.7;
+}
