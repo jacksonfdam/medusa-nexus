@@ -407,6 +407,10 @@ a JSON API that the SPA + external tooling can both consume. Highlights:
   logcat tail with filter.
 - **Recipes / Tools / Settings / Terminal** — the Pencil deck's full 31-screen
   surface, all wired.
+- **Tab strip** — every view you open becomes a chip above the content, Android-
+  Studio style: revisit a spot and it re-focuses (never duplicates), wander off
+  and the old chip waits with your scroll position intact. Close with `✕` or
+  middle-click; `＋` (or `⌘K`) opens the next one. Chips survive a reload.
 - **Command palette** — `⌘K` / `Ctrl-K` (or the topbar search box) fuzzy-searches
   every view and action and fires it blind — no mouse, no sidebar-hunting. Knows
   where you are: inside a project it also lists that project's sub-views and
