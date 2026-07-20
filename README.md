@@ -407,6 +407,10 @@ a JSON API that the SPA + external tooling can both consume. Highlights:
   logcat tail with filter.
 - **Recipes / Tools / Settings / Terminal** — the Pencil deck's full 31-screen
   surface, all wired.
+- **Command palette** — `⌘K` / `Ctrl-K` (or the topbar search box) fuzzy-searches
+  every view and action and fires it blind — no mouse, no sidebar-hunting. Knows
+  where you are: inside a project it also lists that project's sub-views and
+  chrome (manifest, attribute, backup, delete). `↑/↓` to aim, `⏎` to run, `esc` to bail.
 - **Collapsible sidebar** — `[☰]` toggle in the topbar (or `⌘B` / `Ctrl-B`),
   state persists across reloads. Phones get a slide-in drawer with backdrop.
 
