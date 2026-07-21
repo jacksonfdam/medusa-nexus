@@ -73,13 +73,15 @@ app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 def _asset_version() -> str:
     """Short fingerprint of the SPA assets — used as a cache-busting query.
 
-    Hashing the (filename, mtime) pairs is enough: every edit to app.js or
-    app.css updates an mtime, the hash rolls, and the browser refetches.
+    Hashing the (path, mtime) pairs is enough: every edit to app.css or any
+    of the split js/*.js modules updates an mtime, the hash rolls, and the
+    browser refetches.
     """
     try:
+        paths = sorted(_STATIC.glob("app.*")) + sorted(_STATIC.glob("js/*.js"))
         sig = ":".join(
-            f"{p.name}@{p.stat().st_mtime_ns}"
-            for p in sorted(_STATIC.glob("app.*"))
+            f"{p.relative_to(_STATIC).as_posix()}@{p.stat().st_mtime_ns}"
+            for p in paths
         )
     except Exception:  # noqa: BLE001
         return "dev"
@@ -105,7 +107,7 @@ async def _no_cache_static(request, call_next):  # type: ignore[no-untyped-def]
     into the first time it shipped.
     """
     response = await call_next(request)
-    if request.url.path.startswith("/static/app."):
+    if request.url.path.startswith(("/static/app.", "/static/js/")):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return response
 
