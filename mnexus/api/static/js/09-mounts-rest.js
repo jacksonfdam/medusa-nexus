@@ -1,4 +1,4 @@
-// ── auto-wired ES-module imports (phase B) ──
+// ── auto-wired ES-module imports ──
 import { $, $$, escapeHtml, getJSON } from "./01-core.js";
 import { bindThemePicker } from "./05-misc-screens.js";
 

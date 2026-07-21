@@ -1,4 +1,4 @@
-// ── auto-wired ES-module imports (phase B) ──
+// ── auto-wired ES-module imports ──
 import { $, $$, chip, classifyRisk, getJSON, h, platformGlyph, sectionHeader } from "./01-core.js";
 
 /* ═══════════════════════════════════════════════════════════════════════════

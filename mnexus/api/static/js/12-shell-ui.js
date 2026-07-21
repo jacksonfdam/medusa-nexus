@@ -1,6 +1,6 @@
-// ── auto-wired ES-module imports (phase B) ──
+// ── auto-wired ES-module imports ──
 import { $, $$, AVAILABLE_THEMES, chip, h, setTheme } from "./01-core.js";
-import { bar } from "./06-devices.js";
+import { bar } from "./06b-project-overview-mounts.js";
 
 /* ─── live clock ─── */
 function tickClock() {

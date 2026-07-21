@@ -1,31 +1,36 @@
 /* MEDUSA NEXUS — SPA (01-core: shared helpers + theme + formatters).
  *
- * The SPA used to be one ~8.3k-line app.js. It's now split into ES modules
- * under static/js/, each exporting its public functions and importing what it
- * needs. index.html loads a single entry (13-bootstrap, type="module") and the
- * browser resolves the whole graph from there:
+ * The SPA used to be one ~8.3k-line app.js. It's now 19 ES modules under
+ * static/js/, each exporting its public functions and importing what it needs.
+ * index.html loads a single entry (13-bootstrap, type="module") and the browser
+ * resolves the whole graph. Numeric prefixes are a rough reading order, not a
+ * load requirement (the import graph drives evaluation):
  *
- *   01-core            this file — $, $$, h, getJSON, pollingScope, formatters, stub
- *   02-screens-main    dashboard, projects, scan
- *   03-playintel       play-scan / play-accounts + firebase/probe/secret blocks
- *   04-project-views   device pull/bridge/ios + project overview/static/... views
- *   05-misc-screens    report/recipes/tools/settings/about/boot/finding views
- *   06-devices         multi-device manager, mirror, shell wiring, some mounts
- *   07-project-mounts  dynamic / memory-inspector / network / device-io mounts
- *   08-adb-device-io   ADB control panel + device shell/files/screen/logcat
- *   09-mounts-rest     recipes/settings/finding/report mounts
- *   10-project-detail  projectChrome + project sub-screens (secrets/native/…)
- *   11-router          ROUTES table + matchRoute + renderRoute
- *   12-shell-ui        clock, sidebar, ⌘K command palette, tab strip
- *   13-bootstrap       DOMContentLoaded wiring
+ *   01-core                       $, $$, h, getJSON, pollingScope, formatters, stub, escapeHtml
+ *   02-screens-main               dashboard, projects, scan
+ *   03-playintel                  play-scan / play-accounts + firebase/probe/secret blocks
+ *   04a-project-views             device pull/bridge/ios + project overview/static/dynamic views
+ *   04b-project-runtime           runtime view + mount (Frida introspection)
+ *   04c-project-diffs             manifest/findings diff + network/report views
+ *   05-misc-screens               report/recipes/tools/settings/about/boot/finding views
+ *   06a-devices                   multi-device manager, mirror, shell wiring
+ *   06b-project-overview-mounts   overview / play-intel-overview / exports / static mounts
+ *   07a-project-mounts            dynamic / memory-inspector / network mounts
+ *   07b-device-io-mounts          device pull / bridge mounts
+ *   08a-adb                       ADB control panel (helpers + view + mount)
+ *   08b-device-io                 device shell / files / screen / logcat
+ *   09-mounts-rest                recipes / settings / finding / report mounts
+ *   10a-project-chrome            projectChrome + secrets/components/native/tracer sub-screens
+ *   10b-project-analysis          api-map/ssl/surface/dataflow/attack-tree/owasp + diff/pipeline/terminal
+ *   11-router                     ROUTES table + matchRoute + renderRoute
+ *   12-shell-ui                   clock, sidebar, ⌘K command palette, tab strip
+ *   13-bootstrap                  entry — DOMContentLoaded wiring
  *
- * Numeric prefixes are historical (they were load-order for the plain-script
- * phase); order is now driven by the import graph. Circular edges exist (router
- * ⇄ views via renderRoute) and resolve fine — imported bindings are live and
- * functions are hoisted at instantiation. Inline onclick handlers still call a
- * few globals, so those stay assigned to window (projectChrome*, confirmModal).
- * Every route is a fn of (ctx) returning an HTML string; the router injects it
- * into #view and calls an optional mount().
+ * Circular edges exist (router ⇄ views via renderRoute) and resolve fine —
+ * imported bindings are live and functions are hoisted at instantiation. Inline
+ * onclick handlers still call a few globals, so those stay on window
+ * (projectChrome*, confirmModal). Every route is a fn of (ctx) returning an HTML
+ * string; the router injects it into #view and calls an optional mount().
  */
 
 /* ─── tiny helpers ─── */
@@ -211,7 +216,7 @@ function stub({ id, kicker, title, hero, detail, features = [], cta }) {
 }
 
 
-/* Shared HTML escaper (was duplicated across playintel + project-detail). */
+/* Shared HTML escaper (was duplicated across playintel + project-chrome). */
 function escapeHtml(s) {
     return String(s == null ? "" : s)
         .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")

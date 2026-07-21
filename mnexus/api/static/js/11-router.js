@@ -1,14 +1,20 @@
-// ── auto-wired ES-module imports (phase B) ──
+// ── auto-wired ES-module imports ──
 import { $, $$, h } from "./01-core.js";
 import { mount_dashboard, mount_projects, mount_scan, mount_scan_after_upload_wiring, view_dashboard, view_projects, view_scan } from "./02-screens-main.js";
 import { mount_play_accounts, mount_play_scan, view_play_accounts, view_play_scan } from "./03-playintel.js";
-import { bindProjectTabActions, mount_ios_decrypt, mount_project_findings_diff, mount_project_manifest_diff, mount_project_runtime, view_device_bridge, view_device_pull, view_ios_decrypt, view_project_dynamic, view_project_findings_diff, view_project_manifest_diff, view_project_network, view_project_overview, view_project_report, view_project_runtime, view_project_static } from "./04-project-views.js";
+import { bindProjectTabActions, mount_ios_decrypt, view_device_bridge, view_device_pull, view_ios_decrypt, view_project_dynamic, view_project_overview, view_project_static } from "./04a-project-views.js";
+import { mount_project_runtime, view_project_runtime } from "./04b-project-runtime.js";
+import { mount_project_findings_diff, mount_project_manifest_diff, view_project_findings_diff, view_project_manifest_diff, view_project_network, view_project_report } from "./04c-project-diffs.js";
 import { mount_tools, view_about, view_boot, view_finding_detail, view_recipes, view_report, view_settings, view_tools } from "./05-misc-screens.js";
-import { mount_devices, mount_project_overview, mount_project_static, view_devices } from "./06-devices.js";
-import { mount_device_bridge, mount_device_pull, mount_project_dynamic, mount_project_network } from "./07-project-mounts.js";
-import { mount_adb, mount_device_files, mount_device_logcat, mount_device_screen, mount_device_shell, view_adb, view_device_files, view_device_logcat, view_device_screen, view_device_shell } from "./08-adb-device-io.js";
+import { mount_devices, view_devices } from "./06a-devices.js";
+import { mount_project_overview, mount_project_static } from "./06b-project-overview-mounts.js";
+import { mount_project_dynamic, mount_project_network } from "./07a-project-mounts.js";
+import { mount_device_bridge, mount_device_pull } from "./07b-device-io-mounts.js";
+import { mount_adb, view_adb } from "./08a-adb.js";
+import { mount_device_files, mount_device_logcat, mount_device_screen, mount_device_shell, view_device_files, view_device_logcat, view_device_screen, view_device_shell } from "./08b-device-io.js";
 import { mount_finding_detail, mount_recipes, mount_report, mount_settings } from "./09-mounts-rest.js";
-import { mount_pipeline, mount_project_api_map, mount_project_attack_tree, mount_project_components, mount_project_dataflow, mount_project_native, mount_project_owasp, mount_project_secrets, mount_project_ssl_map, mount_project_surface, mount_project_tracer, mount_report_diff, mount_terminal, view_pipeline, view_project_api_map, view_project_attack_tree, view_project_components, view_project_dataflow, view_project_native, view_project_owasp, view_project_secrets, view_project_ssl_map, view_project_surface, view_project_tracer, view_report_diff, view_states, view_terminal, view_toasts } from "./10-project-detail.js";
+import { mount_project_components, mount_project_native, mount_project_secrets, mount_project_tracer, view_project_components, view_project_native, view_project_secrets, view_project_tracer } from "./10a-project-chrome.js";
+import { mount_pipeline, mount_project_api_map, mount_project_attack_tree, mount_project_dataflow, mount_project_owasp, mount_project_ssl_map, mount_project_surface, mount_report_diff, mount_terminal, view_pipeline, view_project_api_map, view_project_attack_tree, view_project_dataflow, view_project_owasp, view_project_ssl_map, view_project_surface, view_report_diff, view_states, view_terminal, view_toasts } from "./10b-project-analysis.js";
 import { tabsRestoreScroll, tabsSaveScroll, tabsTrack } from "./12-shell-ui.js";
 
 /* ═══════════════════════════════════════════════════════════════════════════

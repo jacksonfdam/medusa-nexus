@@ -1,4 +1,4 @@
-// ── auto-wired ES-module imports (phase B) ──
+// ── auto-wired ES-module imports ──
 import { $, AVAILABLE_THEMES, getJSON, getTheme, h, sectionHeader, setTheme } from "./01-core.js";
 
 /* ═══════════════════════════════════════════════════════════════════════════
