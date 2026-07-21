@@ -8171,40 +8171,48 @@ function initCommandPalette() {
  * and the old chip waits with your scroll position intact. Close what you don't
  * need; ＋ (or ⌘K) opens the next one.
  *
- * This is the "session-stack" model: switching a chip re-runs the router for its
- * hash — no keep-alive DOM, so live streams (logcat, screen mirror) restart when
- * you return. Cheap, predictable, and it never loses your place in the tree.
+ * Grouping — this is the reconciliation with the in-project sub-nav (projectTabs):
+ * every `#/project/<id>/*` sub-view collapses into ONE chip keyed by the project.
+ * The strip is your top-level workspaces (projects, devices, tools…); the sub-nav
+ * inside a project is that project's own tabs. Two systems, zero overlap. A chip
+ * remembers the last sub-view you were on, so clicking it drops you back there.
+ *
+ * Session-stack model: switching a chip re-runs the router for its hash — no
+ * keep-alive DOM, so live streams (logcat, screen mirror) restart on return.
+ * Scroll is tracked per real hash (TAB_SCROLL), independent of the grouping.
  */
 const TABS_KEY = "nexus.tabs";
 const TABS_MAX = 14;
-const TAB_STATE = { list: [], active: null, seq: 0 };
+const TAB_STATE = { list: [], activeKey: null, currentHash: null, seq: 0 };
+const TAB_SCROLL = new Map(); // real hash → scrollY, decoupled from chip grouping
 
-// Lazily invert the palette tables into hash→{label,icon} lookups for chip titles.
-let _tabGlobalMap = null, _tabViewMap = null;
+// Lazily invert the global palette table into path→{label,icon} for chip titles.
+let _tabGlobalMap = null;
 function tabLookups() {
     if (!_tabGlobalMap) {
         _tabGlobalMap = new Map(PALETTE_GLOBAL.map(([p, label, icon]) => [p, { label, icon: icon || "▸" }]));
-        _tabViewMap = new Map(PALETTE_PROJECT_VIEWS.map(([s, label, icon]) => [s, { label, icon: icon || "▸" }]));
     }
-    return { g: _tabGlobalMap, v: _tabViewMap };
+    return _tabGlobalMap;
+}
+
+// One chip per project (all sub-views share it); every other route is its own chip.
+function tabGroupKey(hash) {
+    const path = String(hash).replace(/^#\/?/, "").split("?")[0];
+    const proj = path.match(/^project\/([^/]+)(?:\/|$)/);
+    return proj ? `proj:${decodeURIComponent(proj[1])}` : `hash:${hash}`;
 }
 
 function tabMeta(hash) {
     const raw = String(hash).replace(/^#\/?/, "");
     const [path] = raw.split("?");
-    const { g, v } = tabLookups();
-    const proj = path.match(/^project\/([^/]+)\/(.+)$/);
+    const proj = path.match(/^project\/([^/]+)/);
     if (proj) {
         const id = decodeURIComponent(proj[1]);
-        const sub = proj[2];
-        const short = id.length > 13 ? id.slice(0, 12) + "…" : id;
-        if (/^finding\//.test(sub)) return { icon: "🔎", title: `Finding · ${short}` };
-        const hitv = v.get(sub);
-        return { icon: hitv?.icon || "▸", title: `${hitv?.label || sub} · ${short}` };
+        return { icon: "📦", title: id.length > 16 ? id.slice(0, 15) + "…" : id };
     }
     const fnd = path.match(/^finding\/(.+)$/);
     if (fnd) return { icon: "🔎", title: `Finding ${fnd[1]}` };
-    const hitg = g.get(path);
+    const hitg = tabLookups().get(path);
     if (hitg) return { icon: hitg.icon, title: hitg.label };
     return { icon: "▸", title: path || "dashboard" };
 }
@@ -8212,55 +8220,60 @@ function tabMeta(hash) {
 function tabsPersist() {
     try {
         sessionStorage.setItem(TABS_KEY, JSON.stringify({
-            list: TAB_STATE.list.map((t) => ({ hash: t.hash, scroll: t.scroll })),
-            active: TAB_STATE.active,
+            list: TAB_STATE.list.map((t) => ({ key: t.key, hash: t.hash })),
+            activeKey: TAB_STATE.activeKey,
+            scroll: Object.fromEntries(TAB_SCROLL),
         }));
     } catch (e) { /* private mode → tabs just won't survive a reload */ }
 }
 
 function tabsSaveScroll() {
-    if (!TAB_STATE.active) return;
-    const t = TAB_STATE.list.find((x) => x.hash === TAB_STATE.active);
-    if (t) t.scroll = window.scrollY || document.documentElement.scrollTop || 0;
+    if (TAB_STATE.currentHash) {
+        TAB_SCROLL.set(TAB_STATE.currentHash, window.scrollY || document.documentElement.scrollTop || 0);
+    }
 }
 
 function tabsRestoreScroll() {
-    const t = TAB_STATE.list.find((x) => x.hash === TAB_STATE.active);
-    const y = t?.scroll || 0;
+    const y = TAB_SCROLL.get(location.hash) || 0;
     requestAnimationFrame(() => window.scrollTo(0, y));
 }
 
 function tabsTrack(hash) {
     hash = hash || "#/dashboard";
-    let t = TAB_STATE.list.find((x) => x.hash === hash);
+    const key = tabGroupKey(hash);
+    let t = TAB_STATE.list.find((x) => x.key === key);
     if (!t) {
-        t = { hash, scroll: 0, seq: ++TAB_STATE.seq, ...tabMeta(hash) };
+        t = { key, hash, seq: ++TAB_STATE.seq, ...tabMeta(hash) };
         TAB_STATE.list.push(t);
         // Evict the oldest non-active chip once we blow past the cap.
         while (TAB_STATE.list.length > TABS_MAX) {
-            const victim = TAB_STATE.list.findIndex((x) => x.hash !== hash);
+            const victim = TAB_STATE.list.findIndex((x) => x.key !== key);
             if (victim < 0) break;
-            TAB_STATE.list.splice(victim, 1);
+            const [gone] = TAB_STATE.list.splice(victim, 1);
+            if (gone) TAB_SCROLL.delete(gone.hash);
         }
     } else {
+        t.hash = hash;                   // remember where we are inside this chip
         t.seq = ++TAB_STATE.seq;
-        Object.assign(t, tabMeta(hash)); // a project id may resolve to a nicer title now
+        Object.assign(t, tabMeta(hash));
     }
-    TAB_STATE.active = hash;
+    TAB_STATE.activeKey = key;
+    TAB_STATE.currentHash = hash;
     renderTabStrip();
     tabsPersist();
 }
 
-function tabsClose(hash) {
-    const idx = TAB_STATE.list.findIndex((x) => x.hash === hash);
+function tabsClose(key) {
+    const idx = TAB_STATE.list.findIndex((x) => x.key === key);
     if (idx < 0) return;
-    const wasActive = TAB_STATE.active === hash;
-    TAB_STATE.list.splice(idx, 1);
+    const wasActive = TAB_STATE.activeKey === key;
+    const [gone] = TAB_STATE.list.splice(idx, 1);
+    if (gone) TAB_SCROLL.delete(gone.hash);
     if (!wasActive) { renderTabStrip(); tabsPersist(); return; }
     // Hand focus to the chip that slid into this slot, else the left neighbor.
     const next = TAB_STATE.list[idx] || TAB_STATE.list[idx - 1] || TAB_STATE.list[TAB_STATE.list.length - 1];
     if (next) { location.hash = next.hash; }
-    else { TAB_STATE.active = null; tabsPersist(); location.hash = "#/dashboard"; }
+    else { TAB_STATE.activeKey = null; TAB_STATE.currentHash = null; tabsPersist(); location.hash = "#/dashboard"; }
 }
 
 function renderTabStrip() {
@@ -8269,11 +8282,11 @@ function renderTabStrip() {
     if (!TAB_STATE.list.length) { strip.innerHTML = ""; strip.classList.remove("has-tabs"); return; }
     strip.classList.add("has-tabs");
     const chips = TAB_STATE.list.map((t) => {
-        const active = t.hash === TAB_STATE.active;
-        return `<div class="tab-chip${active ? " active" : ""}" data-hash="${escapeHtmlSafe(t.hash)}" title="${escapeHtmlSafe(t.hash)}">
+        const active = t.key === TAB_STATE.activeKey;
+        return `<div class="tab-chip${active ? " active" : ""}" data-key="${escapeHtmlSafe(t.key)}" data-hash="${escapeHtmlSafe(t.hash)}" title="${escapeHtmlSafe(t.hash)}">
             <span class="tab-chip-ico">${escapeHtmlSafe(t.icon)}</span>
             <span class="tab-chip-label">${escapeHtmlSafe(t.title)}</span>
-            <button class="tab-chip-close" data-close="${escapeHtmlSafe(t.hash)}" aria-label="close tab" title="close">✕</button>
+            <button class="tab-chip-close" data-close="${escapeHtmlSafe(t.key)}" aria-label="close tab" title="close">✕</button>
         </div>`;
     }).join("");
     strip.innerHTML = `<div class="tab-chips">${chips}</div>
@@ -8281,7 +8294,7 @@ function renderTabStrip() {
     $$("#tab-strip .tab-chip").forEach((chip) => {
         chip.addEventListener("mousedown", (e) => {
             if (e.target.closest(".tab-chip-close")) return;
-            if (e.button === 1) { e.preventDefault(); tabsClose(chip.dataset.hash); return; } // middle-click closes
+            if (e.button === 1) { e.preventDefault(); tabsClose(chip.dataset.key); return; } // middle-click closes
             if (e.button !== 0) return;
             const hash = chip.dataset.hash;
             if (hash && hash !== location.hash) location.hash = hash;
@@ -8305,9 +8318,10 @@ function initTabs() {
         const saved = JSON.parse(sessionStorage.getItem(TABS_KEY) || "null");
         if (saved && Array.isArray(saved.list)) {
             TAB_STATE.list = saved.list
-                .filter((t) => t && typeof t.hash === "string")
-                .map((t) => ({ hash: t.hash, scroll: t.scroll || 0, seq: ++TAB_STATE.seq, ...tabMeta(t.hash) }));
-            TAB_STATE.active = saved.active || null;
+                .filter((t) => t && typeof t.key === "string" && typeof t.hash === "string")
+                .map((t) => ({ key: t.key, hash: t.hash, seq: ++TAB_STATE.seq, ...tabMeta(t.hash) }));
+            TAB_STATE.activeKey = saved.activeKey || null;
+            if (saved.scroll) for (const [h, y] of Object.entries(saved.scroll)) TAB_SCROLL.set(h, y);
         }
     } catch (e) { /* corrupt state → start clean */ }
     renderTabStrip();
