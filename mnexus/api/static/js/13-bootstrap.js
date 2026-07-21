@@ -1,3 +1,8 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { applyThemeAttr } from "./01-core.js";
+import { renderRoute } from "./11-router.js";
+import { initCommandPalette, initSidebar, initTabs, tickClock } from "./12-shell-ui.js";
+
 /* ─── bootstrap ─── */
 window.addEventListener("hashchange", renderRoute);
 window.addEventListener("DOMContentLoaded", () => {

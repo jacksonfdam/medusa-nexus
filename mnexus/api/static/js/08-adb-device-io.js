@@ -1,3 +1,8 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, $$, escapeHtml, getJSON, h, sectionHeader } from "./01-core.js";
+import { fmtBytes } from "./02-screens-main.js";
+import { deviceTabs, fillDeviceStatusStrip } from "./04-project-views.js";
+
 /* ═══════════════════════════════════════════════════════════════════════════
  *  ADB CONTROL PANEL — ADBugger-style command surface
  *
@@ -15,6 +20,7 @@ window.NEXUS_ADB = window.NEXUS_ADB || (function () {
     try { stored = JSON.parse(sessionStorage.getItem("nexus.adb") || "{}"); } catch (e) {}
     return { serial: stored.serial || null, package: stored.package || null, devices: [] };
 })();
+const NEXUS_ADB = window.NEXUS_ADB; // module-local alias for the window global
 
 function adbStateSave() {
     try { sessionStorage.setItem("nexus.adb", JSON.stringify({ serial: NEXUS_ADB.serial, package: NEXUS_ADB.package })); } catch (e) {}
@@ -931,3 +937,5 @@ function mount_device_logcat() {
     fetchOnce();
 }
 
+
+export { mount_adb, mount_device_files, mount_device_logcat, mount_device_screen, mount_device_shell, view_adb, view_device_files, view_device_logcat, view_device_screen, view_device_shell };

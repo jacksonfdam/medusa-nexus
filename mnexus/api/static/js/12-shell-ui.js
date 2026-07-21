@@ -1,3 +1,7 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, $$, AVAILABLE_THEMES, chip, h, setTheme } from "./01-core.js";
+import { bar } from "./06-devices.js";
+
 /* ─── live clock ─── */
 function tickClock() {
     const d = new Date();
@@ -530,3 +534,5 @@ function initTabs() {
     renderTabStrip();
 }
 
+
+export { initCommandPalette, initSidebar, initTabs, tabsRestoreScroll, tabsSaveScroll, tabsTrack, tickClock };

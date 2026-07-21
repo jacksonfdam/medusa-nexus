@@ -1,3 +1,7 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, $$, escapeHtml, getJSON } from "./01-core.js";
+import { bindThemePicker } from "./05-misc-screens.js";
+
 async function mount_recipes() {
     const grid = $("#recipes-grid");
     const catStrip = $("#recipes-categories");
@@ -509,3 +513,5 @@ async function mount_report(ctx) {
     });
 }
 
+
+export { mount_finding_detail, mount_recipes, mount_report, mount_settings };

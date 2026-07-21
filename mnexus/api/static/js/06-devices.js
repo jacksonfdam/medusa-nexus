@@ -1,3 +1,8 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, $$, attrTag, chip, escapeHtml, fmtAgo, getJSON, h, platformGlyph, sectionHeader } from "./01-core.js";
+import { fmtBytes } from "./02-screens-main.js";
+import { projectTabs } from "./04-project-views.js";
+
 /* ═══════════════════════════════════════════════════════════════════════════
  *  SCREEN — Devices (multi-device ADB manager)
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -1026,3 +1031,5 @@ async function mount_project_static(ctx) {
     }));
 }
 
+
+export { _exports_panel, bar, mount_devices, mount_project_overview, mount_project_static, view_devices };

@@ -1,3 +1,6 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, $$, chip, classifyRisk, getJSON, h, platformGlyph, sectionHeader } from "./01-core.js";
+
 /* ═══════════════════════════════════════════════════════════════════════════
  *  SCREEN 01 — Dashboard
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -448,3 +451,5 @@ function fmtBytes(n) {
     return `${n} B`;
 }
 
+
+export { fmtBytes, mount_dashboard, mount_projects, mount_scan, mount_scan_after_upload_wiring, view_dashboard, view_projects, view_scan };

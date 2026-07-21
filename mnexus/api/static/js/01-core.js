@@ -1,8 +1,9 @@
 /* MEDUSA NEXUS — SPA (01-core: shared helpers + theme + formatters).
  *
- * The SPA used to be one ~8.3k-line app.js. It's now split into ordered,
- * concern-scoped files under static/js/ that share ONE global scope (plain
- * <script>s, no ES modules yet) and load in numeric order from index.html:
+ * The SPA used to be one ~8.3k-line app.js. It's now split into ES modules
+ * under static/js/, each exporting its public functions and importing what it
+ * needs. index.html loads a single entry (13-bootstrap, type="module") and the
+ * browser resolves the whole graph from there:
  *
  *   01-core            this file — $, $$, h, getJSON, pollingScope, formatters, stub
  *   02-screens-main    dashboard, projects, scan
@@ -18,9 +19,13 @@
  *   12-shell-ui        clock, sidebar, ⌘K command palette, tab strip
  *   13-bootstrap       DOMContentLoaded wiring
  *
- * Load order matters: 11's ROUTES table references view_/mount_ functions from
- * 02–10, and 13 boots everything. Every route is a fn of (ctx) returning an
- * HTML string; the router injects it into #view and calls an optional mount().
+ * Numeric prefixes are historical (they were load-order for the plain-script
+ * phase); order is now driven by the import graph. Circular edges exist (router
+ * ⇄ views via renderRoute) and resolve fine — imported bindings are live and
+ * functions are hoisted at instantiation. Inline onclick handlers still call a
+ * few globals, so those stay assigned to window (projectChrome*, confirmModal).
+ * Every route is a fn of (ctx) returning an HTML string; the router injects it
+ * into #view and calls an optional mount().
  */
 
 /* ─── tiny helpers ─── */
@@ -205,3 +210,12 @@ function stub({ id, kicker, title, hero, detail, features = [], cta }) {
     </div>`;
 }
 
+
+/* Shared HTML escaper (was duplicated across playintel + project-detail). */
+function escapeHtml(s) {
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
+export { $, $$, AVAILABLE_THEMES, applyThemeAttr, attrTag, chip, classifyRisk, escapeHtml, fmtAgo, getJSON, getTheme, h, platformGlyph, pollingScope, sectionHeader, setTheme, stub };

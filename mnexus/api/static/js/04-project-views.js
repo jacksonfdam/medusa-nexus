@@ -1,3 +1,9 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, $$, chip, escapeHtml, getJSON, h, pollingScope, sectionHeader } from "./01-core.js";
+import { view_report } from "./05-misc-screens.js";
+import { _exports_panel } from "./06-devices.js";
+import { renderRoute } from "./11-router.js";
+
 /* ═══════════════════════════════════════════════════════════════════════════
  *  SCREEN 05 — Pull from Device
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -1340,3 +1346,5 @@ function view_project_report(ctx) {
     return view_report(ctx);
 }
 
+
+export { bindProjectTabActions, deviceTabs, fillDeviceStatusStrip, mount_ios_decrypt, mount_project_findings_diff, mount_project_manifest_diff, mount_project_runtime, projectTabs, view_device_bridge, view_device_pull, view_ios_decrypt, view_project_dynamic, view_project_findings_diff, view_project_manifest_diff, view_project_network, view_project_overview, view_project_report, view_project_runtime, view_project_static };

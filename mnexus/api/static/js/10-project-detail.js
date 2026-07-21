@@ -1,3 +1,9 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, $$, attrTag, chip, escapeHtml, fmtAgo, getJSON, h, pollingScope, sectionHeader, stub } from "./01-core.js";
+import { fmtBytes } from "./02-screens-main.js";
+import { projectTabs } from "./04-project-views.js";
+import { renderRoute } from "./11-router.js";
+
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Project sub-screens (09 / 10 / 11 / 13 / 15 / 16 / 17 / 18 / 19 / 20)
  *  Every view is now backed by a real endpoint. Views render the chrome,
@@ -651,10 +657,6 @@ function classifyTraceClass(ch) {
     return {nexus: "nexus", crypto: "crypto", intent: "intent", meta: "meta", crit: "crit"}[ch] || "muted";
 }
 
-function escapeHtml(s) {
-    return String(s || "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-}
-
 /* SCREEN 15 — API Endpoint Map */
 function view_project_api_map(ctx) {
     const id = ctx.params.id;
@@ -1274,3 +1276,5 @@ function view_toasts() {
     </div>`;
 }
 
+
+export { classifyTraceClass, mount_pipeline, mount_project_api_map, mount_project_attack_tree, mount_project_components, mount_project_dataflow, mount_project_native, mount_project_owasp, mount_project_secrets, mount_project_ssl_map, mount_project_surface, mount_project_tracer, mount_report_diff, mount_terminal, view_pipeline, view_project_api_map, view_project_attack_tree, view_project_components, view_project_dataflow, view_project_native, view_project_owasp, view_project_secrets, view_project_ssl_map, view_project_surface, view_project_tracer, view_report_diff, view_states, view_terminal, view_toasts };

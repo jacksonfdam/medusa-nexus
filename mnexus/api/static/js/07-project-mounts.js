@@ -1,3 +1,9 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, $$, attrTag, chip, escapeHtml, getJSON, h } from "./01-core.js";
+import { fmtBytes } from "./02-screens-main.js";
+import { fillDeviceStatusStrip } from "./04-project-views.js";
+import { classifyTraceClass } from "./10-project-detail.js";
+
 async function mount_project_dynamic(ctx) {
     const id = ctx.params.id;
     if (!id) return;
@@ -852,3 +858,5 @@ async function mount_device_bridge() {
     });
 }
 
+
+export { mount_device_bridge, mount_device_pull, mount_project_dynamic, mount_project_network };

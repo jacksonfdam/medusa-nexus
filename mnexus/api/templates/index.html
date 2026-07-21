@@ -58,7 +58,7 @@
     </nav>
 
     <section class="content-col">
-      <!-- Android-Studio-style tab strip: one chip per open view. Populated by app.js. -->
+      <!-- Android-Studio-style tab strip: one chip per open view. Populated by 12-shell-ui. -->
       <div class="tab-strip" id="tab-strip"></div>
       <main id="view"><div class="empty-state">loading…</div></main>
     </section>
@@ -66,22 +66,10 @@
 
   <div class="footer">_ SYSTEM READY _</div>
 
-  <!-- app.js was split into ordered, concern-scoped files. They share one global
-       scope (plain scripts, no modules) and MUST load in this order: the router's
-       ROUTES table (11) references view_/mount_ functions defined in 02–10, and
-       bootstrap (13) wires everything on DOMContentLoaded. -->
-  <script src="/static/js/01-core.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/02-screens-main.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/03-playintel.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/04-project-views.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/05-misc-screens.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/06-devices.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/07-project-mounts.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/08-adb-device-io.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/09-mounts-rest.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/10-project-detail.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/11-router.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/12-shell-ui.js?v=__ASSET_VERSION__"></script>
-  <script src="/static/js/13-bootstrap.js?v=__ASSET_VERSION__"></script>
+  <!-- ES-module entry. 13-bootstrap imports the router, which imports every
+       view/mount module, so the browser resolves the whole graph from this one
+       tag. The /static/js/ no-cache middleware keeps imported modules fresh
+       (import specifiers can't carry the ?v= hash). -->
+  <script type="module" src="/static/js/13-bootstrap.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

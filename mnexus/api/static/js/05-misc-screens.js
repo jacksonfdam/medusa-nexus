@@ -1,3 +1,6 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, AVAILABLE_THEMES, getJSON, getTheme, h, sectionHeader, setTheme } from "./01-core.js";
+
 /* ═══════════════════════════════════════════════════════════════════════════
  *  SCREEN 22 — Report Generator
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -355,3 +358,5 @@ function view_finding_detail(ctx) {
     </div>`;
 }
 
+
+export { bindThemePicker, mount_tools, view_about, view_boot, view_finding_detail, view_recipes, view_report, view_settings, view_tools };

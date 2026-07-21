@@ -1,3 +1,6 @@
+// ── auto-wired ES-module imports (phase B) ──
+import { $, $$, attrTag, escapeHtml, h, sectionHeader } from "./01-core.js";
+
 /* ═══════════════════════════════════════════════════════════════════════════
  *  SCREEN 04b — Play Scan (stream APK from CDN, scan Firebase config + secrets)
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -437,7 +440,6 @@ async function renderPlayAccountsList() {
     }
 }
 
-
 function renderPlayScanResults(out, title, data) {
     title.textContent = `// ${data.package}  ·  ${data.source}`;
     out.innerHTML = [
@@ -716,10 +718,5 @@ function renderSavedFilesBlock(saved, savedDir) {
             </div>`;
 }
 
-function escapeHtml(s) {
-    return String(s == null ? "" : s)
-        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-}
 
-
+export { mount_play_accounts, mount_play_scan, view_play_accounts, view_play_scan };
