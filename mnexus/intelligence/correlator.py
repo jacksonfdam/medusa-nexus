@@ -1,6 +1,17 @@
-"""Cross-engine correlator.
+"""Cross-engine correlator — the co-location heuristic.
 
-Example correlations we want to emit eventually:
+This is the coarse pass: any file+line that collects more than one finding
+is probably one root cause wearing several hats, so it gets promoted into a
+single `CorrelatedFinding` the analyst can read top-down. Cheap, engine-
+agnostic, no template catalogue.
+
+The *named* attack chains — 1-click ATO via deeplink → WebView → intent
+redirect, and friends — live next door in `chain_correlator.py`, which
+matches typed `ChainTemplate`s over the finding set and is what the scan
+pipeline runs automatically. This module stays the "same spot, stacked
+signals" fallback for findings that no template names yet.
+
+Correlations the co-location pass is meant to surface:
 
 1. JADX finds `SecretKeySpec` with hardcoded key
    + Ghidra finds the same bytes in `.rodata` of a `.so`
@@ -14,8 +25,6 @@ Example correlations we want to emit eventually:
 3. Static: SSL pinning detected (OkHttp CertificatePinner)
    + Dynamic: Frida bypass succeeds
    = CONFIRMED: bypassable, interception viable.
-
-The shipped skeleton covers the data model; the detection rules are stubbed.
 """
 
 from __future__ import annotations
@@ -42,7 +51,8 @@ class FindingCorrelator:
         """Group related findings + promote severity where signals stack."""
         chains: list[CorrelatedFinding] = []
 
-        # Stub rules — expand in iteration 2.
+        # Co-location rule: >1 finding at the same file:line → one root cause.
+        # Named multi-step chains are handled by chain_correlator.py.
         by_location = self._group_by_location(all_findings)
         for loc, group in by_location.items():
             if len(group) > 1:
