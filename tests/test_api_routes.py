@@ -19,7 +19,8 @@ def client() -> TestClient:
 
 
 def test_root_serves_spa_shell(client: TestClient) -> None:
-    """GET / now returns the SPA shell: topbar + sidebar + #view + loads app.js/css."""
+    """GET / now returns the SPA shell: topbar + sidebar + #view + loads the
+    ES-module entrypoint + css."""
     r = client.get("/")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
@@ -40,9 +41,12 @@ def test_root_serves_spa_shell(client: TestClient) -> None:
     assert ">DYNAMIC<" not in body, "DYNAMIC should be reached via project tabs, not the sidebar"
     assert ">NETWORK<" not in body, "NETWORK should be reached via project tabs, not the sidebar"
 
-    # Static asset references wired
+    # Static asset references wired. The SPA is now an ES-module graph rooted
+    # at 13-bootstrap.js (which imports the router + every view); the old
+    # monolithic app.js is gone.
     assert '/static/app.css' in body
-    assert '/static/app.js' in body
+    assert '/static/js/13-bootstrap.js' in body
+    assert '/static/app.js' not in body
 
     # The main pane is empty until the router renders on the client.
     assert 'id="view"' in body
@@ -50,21 +54,28 @@ def test_root_serves_spa_shell(client: TestClient) -> None:
 
 
 def test_spa_static_assets_served(client: TestClient) -> None:
-    """app.css and app.js are reachable — otherwise the SPA is a brick."""
+    """app.css and the JS module graph are reachable — otherwise the SPA is a brick."""
     css = client.get("/static/app.css")
     assert css.status_code == 200
     assert css.headers["content-type"].startswith("text/css")
     assert "--cyan: #00FFFF" in css.text  # design token present
 
-    js = client.get("/static/app.js")
-    assert js.status_code == 200
-    assert js.headers["content-type"].startswith(("application/javascript", "text/javascript"))
-    assert "renderRoute" in js.text  # router entrypoint present
+    # The module entrypoint the shell loads, plus the router it pulls in.
+    boot = client.get("/static/js/13-bootstrap.js")
+    assert boot.status_code == 200
+    assert boot.headers["content-type"].startswith(("application/javascript", "text/javascript"))
+    assert "renderRoute" in boot.text          # wires the router on hashchange
+    assert "./11-router.js" in boot.text        # module graph resolves from here
+
+    router = client.get("/static/js/11-router.js")
+    assert router.status_code == 200
+    assert "function renderRoute" in router.text
 
 
 def test_every_sidebar_route_has_a_handler(client: TestClient) -> None:
-    """Pin that every primary sidebar label corresponds to an entry in the JS route table."""
-    js = client.get("/static/app.js").text
+    """Pin that every primary sidebar label corresponds to an entry in the JS
+    route table — which now lives in 11-router.js."""
+    js = client.get("/static/js/11-router.js").text
     for route in ("dashboard", "projects", "scan", "dynamic", "network",
                   "report", "tools", "recipes", "settings",
                   "about", "boot", "terminal"):
@@ -77,9 +88,10 @@ def test_mitigation_is_pinned_in_spa(client: TestClient) -> None:
 
     Demo content was removed when the SPA went fully data-driven, so we pin
     the structural anchors instead — the slot ids the mount hooks fill, the
-    CSS class, and the playbook header.
+    CSS class, and the playbook header. All live in the finding-detail module
+    (09-mounts-rest.js) after the app.js split.
     """
-    js = client.get("/static/app.js").text
+    js = client.get("/static/js/09-mounts-rest.js").text
     assert "MITIGATION PLAYBOOK" in js
     assert "mitigation" in js                  # CSS class on the highlighted block
     assert "finding-mitigation" in js          # finding-detail slot id
