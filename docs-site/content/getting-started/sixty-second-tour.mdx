@@ -13,7 +13,7 @@ order; the next one assumes the previous one ran.
 | 0:10 | `source ~/.mnexus/env.sh && mnexus doctor` | Engine matrix prints. The minimal engines should all be `● OK`. |
 | 0:20 | `mnexus scan ./target.apk` | Spinner runs, then a panel prints with the risk score + finding counts. ~30s on a 20 MB APK. |
 | 0:35 | `mnexus` | The REPL opens. You're in the cyberpunk terminal. Type `/help` if curious. |
-| 0:45 | `/serve` followed by `/open` | The web UI launches in your browser. Sidebar lists every project tab. Hit `⌘K` to fuzzy-jump anywhere. |
+| 0:45 | `/serve` followed by `/open` | The web UI launches in your browser. Sidebar lists every project tab; the tab strip keeps open views warm — tab away from a logcat or screen mirror and the stream keeps running until you close the tab. Hit `⌘K` to fuzzy-jump anywhere. |
 | 0:55 | `/report html` | `~/.mnexus/workspace/reports/PRJ-….html` lands on disk. Open it. Mitigation Playbook is at the bottom. |
 
 That's the entire happy path. If any step fails the doctor explains

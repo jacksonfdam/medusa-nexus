@@ -79,7 +79,11 @@ both fall back to HTML when the dependency is missing.
 
 FastAPI app — 136 endpoints across 21 resource buckets. SPA-friendly
 JSON, plus SSE for live dynamic streams. Static SPA assets live in
-`mnexus/api/static/` and are served at `/`.
+`mnexus/api/static/` and are served at `/`. The SPA is vanilla ES modules
+(no framework): `static/js/NN-*.js` loaded in order from
+`13-bootstrap.js`, with a keep-alive pane pool in `11-router.js` that
+keeps backgrounded tabs' DOM and live streams running until their tab is
+closed.
 
 ### CLI (`mnexus/cli.py`)
 
@@ -164,4 +168,4 @@ the analyst's state on another machine, no migrations required.
 | A 500 from the API | `mnexus/api/main.py` (route handler) + the orchestrator method it calls |
 | A Frida hook that won't load | `mnexus/runtime/frida_session.py` + the generated hook in `~/.mnexus/workspace/<pid>/hooks/` |
 | A report rendering wrong | `mnexus/reporting/generator.py` + the template in `mnexus/reporting/templates/` |
-| The web UI talks to a missing route | `mnexus/api/static/app.js` |
+| The web UI talks to a missing route | `mnexus/api/static/js/11-router.js` (route map) |
