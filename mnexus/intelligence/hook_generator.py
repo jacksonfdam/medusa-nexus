@@ -151,15 +151,62 @@ Java.perform(function () {{
         )
 
     def _method_tracer(self, finding: Finding) -> GeneratedHook:
-        script = f"""// auto: tracer hook for {finding.title}
-// TODO: resolve class/method from finding.location and replace below.
+        cls = _fqcn_from_location(finding.location)
+        if cls is None:
+            # No class we can trust — a location-less finding or a path that
+            # doesn't decode to a package. Ship an honest comment hook instead
+            # of a lying tracer; the analyst fills in the class by hand.
+            script = f"""// auto: tracer hook for {finding.title}
+// Couldn't resolve a class from finding.location ({finding.location!r}).
+// Drop the fully-qualified class name in below and uncomment to trace it.
 Java.perform(function () {{
-    console.log('[NEXUS][TRACE] placeholder for {finding.id}');
+    // var CLS = 'com.target.auth.WhateverManager';
+    // Java.use(CLS);  // then hook the overloads you care about.
+    console.log('[NEXUS][TRACE] no class resolved for {finding.id} — edit me');
+}});
+"""
+            return GeneratedHook(
+                name=f"tracer::{finding.id}",
+                description=f"Trace scaffold for {finding.id} (class not auto-resolved).",
+                script=script,
+                source_finding_id=finding.id,
+            )
+
+        # Real tracer: enumerate the class's declared methods and wrap every
+        # overload so each call logs its args + return. Blind to the exact
+        # method (static findings rarely pin one down), loud about the class.
+        script = f"""// auto: method tracer for {finding.title}
+// Class resolved from finding.location: {finding.location}
+Java.perform(function () {{
+    var CLS = '{cls}';
+    try {{
+        var K = Java.use(CLS);
+        var seen = {{}};
+        K.class.getDeclaredMethods().forEach(function (m) {{
+            var name = m.getName();
+            if (seen[name]) return;   // one wrap per name covers all overloads
+            seen[name] = true;
+            (K[name].overloads || []).forEach(function (ov) {{
+                ov.implementation = function () {{
+                    var args = Array.prototype.slice.call(arguments);
+                    console.log('[NEXUS][TRACE] ' + CLS + '.' + name +
+                                '(' + args.map(String).join(', ') + ')');
+                    var ret = ov.apply(this, arguments);
+                    console.log('[NEXUS][TRACE] ' + CLS + '.' + name + ' => ' + ret);
+                    return ret;
+                }};
+            }});
+        }});
+        console.log('[NEXUS][TRACE] wrapped ' + Object.keys(seen).length +
+                    ' method(s) on ' + CLS);
+    }} catch (e) {{
+        console.log('[NEXUS][TRACE] class not loaded yet: ' + CLS + ' (' + e + ')');
+    }}
 }});
 """
         return GeneratedHook(
             name=f"tracer::{finding.id}",
-            description=f"Trace the method implicated by {finding.id}.",
+            description=f"Trace every method of {cls} (from {finding.id}).",
             script=script,
             source_finding_id=finding.id,
         )
@@ -267,3 +314,63 @@ if (CCCrypt) {{
             description=f"Log CCCrypt calls (target: {algorithm} at {location}).",
             script=script,
         )
+
+
+# ─── location → class-name resolver ───
+
+# jadx/apktool drop their output under one of these roots; everything after
+# the root segment is the package path we can turn back into an FQCN.
+_SOURCE_ROOTS = ("sources", "src", "smali", "java", "kotlin", "main")
+_CLASS_SUFFIXES = (".java", ".kt", ".smali")
+
+
+def _fqcn_from_location(location: str | None) -> str | None:
+    """Turn a decompiled-source path into a fully-qualified Java class name.
+
+    ``sources/com/target/auth/LoginManager.java:42`` → ``com.target.auth.LoginManager``.
+    Handles ``:line`` suffixes, nested-class ``Outer$Inner`` files, and the
+    smali ``smali_classes3/`` variants. Returns ``None`` when the path doesn't
+    decode to something class-shaped — better a comment hook than a bogus one.
+    """
+    if not location:
+        return None
+
+    # Drop a trailing ``:line`` (but not a Windows drive colon, which we don't
+    # expect in workspace paths anyway).
+    path = location.strip().rsplit(":", 1)[0] if location.rsplit(":", 1)[-1].isdigit() else location.strip()
+    path = path.replace("\\", "/").strip("/")
+    if not path:
+        return None
+
+    # Strip a recognised source extension off the final segment.
+    lower = path.lower()
+    for suffix in _CLASS_SUFFIXES:
+        if lower.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    else:
+        # No source extension → not a class file we can name.
+        return None
+
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return None
+
+    # Trim everything up to and including the last source-root marker
+    # (``sources``, ``smali``, ``smali_classes3``, …).
+    cut = 0
+    for i, seg in enumerate(segments):
+        if seg in _SOURCE_ROOTS or seg.startswith("smali_classes"):
+            cut = i + 1
+    segments = segments[cut:]
+    if not segments:
+        return None
+
+    fqcn = ".".join(segments)
+    # Sanity: a class name is dotted identifiers, with ``$`` allowed for nested
+    # classes. Reject anything with whitespace or path-ish leftovers.
+    if not fqcn or " " in fqcn:
+        return None
+    if not all(part.replace("$", "_").isidentifier() for part in fqcn.split(".")):
+        return None
+    return fqcn
