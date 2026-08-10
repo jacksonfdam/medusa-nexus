@@ -144,6 +144,9 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/diff manifest|findings", "Diff the active project against the latest prior scan."),
         ("/manifest [--tree]", "View the decoded AndroidManifest.xml (--raw default, --tree colored, --output <path> writes to disk)."),
         ("/find <pattern>",  "Grep the project's static workspace (jadx + apktool + secrets) for a string or regex."),
+        ("/decompile [jadx|apktool]", "Materialise the decompiled source tree on disk (needed before /source + /classes)."),
+        ("/source <fqcn>",   "Print one decompiled class by fully-qualified name (--smali for the apktool tree)."),
+        ("/classes [keyword]", "List/filter decompiled classes by fqcn (--smali for the apktool tree)."),
         ("/attribute",       "Re-tag findings with SDK / first-party owners (LibraryAttributionAudit back-fill)."),
         ("/backup [--all]",  "Zip up one project (or every project) — model + findings + workspace + reports."),
         ("/delete [--all]",  "Wipe one project (or every project) from disk + DB. Destructive; --yes required."),
@@ -1494,6 +1497,146 @@ def _find(state: ReplState, args: list[str]) -> None:
         console.print(f"[dim]…+{len(hits) - 40} more (use --max smaller or --regex to narrow)[/dim]")
 
 
+# ─── /decompile + /source + /classes — read the decompiled code ───────
+
+def _decompile(state: ReplState, args: list[str]) -> None:
+    """`/decompile [jadx|apktool] [--project <id>] [--force]`.
+
+    Materialise the decompiled source tree on disk so /source and /classes
+    have something to read — the default scan only walks DEX byte-strings.
+    ``jadx`` writes Java/Kotlin (heavy: 30–60s on a release APK), ``apktool``
+    writes smali + resources (lighter). Caches; ``--force`` re-runs.
+    """
+    if args and args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /decompile [jadx|apktool] [--project <id>] [--force]")
+        return
+    engine = "jadx"
+    project_id = state.active_project_id
+    force = False
+    it = iter(args)
+    for tok in it:
+        if tok in ("jadx", "apktool"):
+            engine = tok
+        elif tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--force":
+            force = True
+        else:
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+    if not _require_server(state):
+        return
+
+    import urllib.parse
+    params = {"engine": engine}
+    if force:
+        params["force"] = "true"
+    qs = urllib.parse.urlencode(params)
+    console.print(f"[dim]decompiling ({engine})… jadx can take 30–60s on a release APK[/dim]")
+    status, body = _api_request(state, "POST", f"/v1/projects/{project_id}/decompile?{qs}")
+    if status != 200:
+        # 503 = tool not on PATH; surface the honest message, don't fake it.
+        console.print(f"[red]decompile failed[/red] [{status}] {str(body.get("detail", body) if isinstance(body, dict) else body)[:200]}")
+        return
+    cached = body.get("cached") if isinstance(body, dict) else None
+    count = body.get("class_count") if isinstance(body, dict) else None
+    verb = "already cached" if cached else "decompiled"
+    console.print(f"[green]{verb}[/green] [cyan]{engine}[/cyan] — [bold]{count}[/bold] classes on disk")
+
+
+def _source(state: ReplState, args: list[str]) -> None:
+    """`/source <fqcn> [--smali] [--project <id>]`.
+
+    Print one decompiled class body by fully-qualified name. Reads the jadx
+    tree by default; ``--smali`` reads the apktool tree. Run /decompile first.
+    """
+    if not args or args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /source <fqcn> [--smali] [--project <id>]")
+        return
+    fqcn = args[0]
+    fmt = "java"
+    project_id = state.active_project_id
+    it = iter(args[1:])
+    for tok in it:
+        if tok == "--smali":
+            fmt = "smali"
+        elif tok == "--project":
+            project_id = next(it, "") or project_id
+        else:
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+    if not _require_server(state):
+        return
+
+    import urllib.parse
+    qs = urllib.parse.urlencode({"fqcn": fqcn, "fmt": fmt})
+    status, body = _api_request(state, "GET", f"/v1/projects/{project_id}/source?{qs}")
+    if status != 200 or not isinstance(body, dict):
+        detail = body.get("detail", body) if isinstance(body, dict) else body
+        console.print(f"[red]source failed[/red] [{status}] {str(detail)[:200]}")
+        return
+    from rich.syntax import Syntax
+    lang = body.get("lang", "text")
+    lexer = {"java": "java", "kotlin": "kotlin", "smali": "text"}.get(lang, "text")
+    console.print(f"[cyan]{body.get('fqcn')}[/cyan]  [dim]{body.get('file')}[/dim]"
+                  + ("  [yellow](truncated)[/yellow]" if body.get("truncated") else ""))
+    console.print(Syntax(body.get("source", ""), lexer, line_numbers=True, theme="ansi_dark"))
+
+
+def _classes(state: ReplState, args: list[str]) -> None:
+    """`/classes [keyword] [--smali] [--project <id>] [--max <N>]`.
+
+    List decompiled classes whose fqcn contains ``keyword`` (empty = all).
+    ``--smali`` walks the apktool tree instead of jadx. Run /decompile first.
+    """
+    if args and args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /classes [keyword] [--smali] [--project <id>] [--max <N>]")
+        return
+    keyword = ""
+    fmt = "java"
+    project_id = state.active_project_id
+    max_results = 200
+    it = iter(args)
+    for tok in it:
+        if tok == "--smali":
+            fmt = "smali"
+        elif tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--max":
+            try:
+                max_results = int(next(it, "200"))
+            except ValueError:
+                pass
+        elif tok.startswith("-"):
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+        else:
+            keyword = tok
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+    if not _require_server(state):
+        return
+
+    import urllib.parse
+    qs = urllib.parse.urlencode({"q": keyword, "fmt": fmt, "limit": str(max_results)})
+    status, body = _api_request(state, "GET", f"/v1/projects/{project_id}/classes?{qs}")
+    if status != 200 or not isinstance(body, dict):
+        detail = body.get("detail", body) if isinstance(body, dict) else body
+        console.print(f"[red]classes failed[/red] [{status}] {str(detail)[:200]}")
+        return
+    rows = body.get("classes", [])
+    if not rows:
+        console.print(f"[dim]no classes match[/dim] [cyan]{keyword or '*'}[/cyan]"); return
+    console.print(f"[cyan]{len(rows)}[/cyan] class(es)"
+                  + (" [yellow](truncated)[/yellow]" if body.get("truncated") else "")
+                  + f" [dim]({fmt})[/dim]")
+    for c in rows[:60]:
+        console.print(f"  [white]{c.get('fqcn')}[/white]  [dim]{c.get('file')}[/dim]")
+    if len(rows) > 60:
+        console.print(f"[dim]…+{len(rows) - 60} more (narrow with a keyword or --max)[/dim]")
+
+
 # ─── /backup + /delete — project lifecycle ────────────────────────────
 
 def _backup(state: ReplState, args: list[str]) -> None:
@@ -1969,8 +2112,11 @@ SLASH_COMMANDS = {
     "pipeline":  _pipeline,
     "recipes":   _recipes,
     "manifest":  _manifest,
-    # Lifecycle + workspace search
+    # Lifecycle + workspace search + code navigation
     "find":      _find,
+    "decompile": _decompile,
+    "source":    _source,
+    "classes":   _classes,
     "attribute": _attribute,
     "backup":    _backup,
     "delete":    _delete,
