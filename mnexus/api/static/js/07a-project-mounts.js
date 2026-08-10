@@ -1,5 +1,5 @@
 // ── auto-wired ES-module imports ──
-import { $, $$, attrTag, chip, escapeHtml, getJSON, h } from "./01-core.js";
+import { $, $$, attrTag, chip, escapeHtml, getJSON, h, onTeardown } from "./01-core.js";
 import { fmtBytes } from "./02-screens-main.js";
 import { classifyTraceClass } from "./10a-project-chrome.js";
 
@@ -130,6 +130,9 @@ async function mount_project_dynamic(ctx) {
         const url = `/v1/projects/${encodeURIComponent(id)}/dynamic/stream?session_id=${encodeURIComponent(sessionId)}`;
         const es = new EventSource(url);
         activeStream = es;
+        // keep-alive: the SSE stream keeps flowing into its (detached) console
+        // when you switch tabs; it's closed only when the project tab closes.
+        onTeardown(() => { try { es.close(); } catch (_) { /* already gone */ } });
         // Each backend event-type lands on its own EventSource event;
         // we register a generic + named handlers so unknown channels
         // (future recipes adding their own send({channel:...})) still surface.

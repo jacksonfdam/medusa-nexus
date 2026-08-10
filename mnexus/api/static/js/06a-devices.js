@@ -1,5 +1,5 @@
 // ── auto-wired ES-module imports ──
-import { $, $$, chip, getJSON, h, sectionHeader } from "./01-core.js";
+import { $, $$, chip, getJSON, h, onTeardown, sectionHeader } from "./01-core.js";
 import { fmtBytes } from "./02-screens-main.js";
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -69,10 +69,10 @@ let _activeSerial = null;
 async function mount_devices() {
     await refreshDevices();
     clearInterval(_devicesPollTimer);
-    _devicesPollTimer = setInterval(() => {
-        if (location.hash.startsWith("#/devices")) refreshDevices();
-        else { clearInterval(_devicesPollTimer); clearInterval(_mirrorTimer); }
-    }, 4000);
+    _devicesPollTimer = setInterval(refreshDevices, 4000);
+    // keep-alive: the device poll + any mirror die when the /devices tab is
+    // closed, not when you navigate away — the mirror stays warm in the pool.
+    onTeardown(() => { clearInterval(_devicesPollTimer); clearInterval(_mirrorTimer); });
 
     const form = $("#connect-form");
     if (form) form.addEventListener("submit", async (ev) => {
@@ -480,11 +480,13 @@ function bindMirror(serial, w, h) {
         pollOnce();
         clearInterval(pollTimer);
         pollTimer = setInterval(() => {
-            if (!location.hash.startsWith("#/devices")) { clearInterval(pollTimer); return; }
+            // keep-alive: stop mirroring only when the selected device changes;
+            // switching tabs leaves the stream warm (reaped on tab close).
             if (_activeSerial !== serial) { clearInterval(pollTimer); return; }
             pollOnce();
         }, 800);
         _mirrorTimer = pollTimer;
+        onTeardown(() => clearInterval(pollTimer));
     }
 
     // ── 3. tap-to-click ──────────────────────────────────────────────────────

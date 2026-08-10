@@ -1,5 +1,5 @@
 // ── auto-wired ES-module imports ──
-import { $, $$, escapeHtml, getJSON, h, sectionHeader } from "./01-core.js";
+import { $, $$, escapeHtml, getJSON, h, onTeardown, sectionHeader } from "./01-core.js";
 import { fmtBytes } from "./02-screens-main.js";
 import { renderKeycodeButtons } from "./08b-device-io.js";
 
@@ -627,6 +627,8 @@ async function mount_adb() {
         if (on) logTimer = setInterval(pollLog, 2000);
     };
     setAuto(true);
+    // keep-alive: the log poll keeps running when backgrounded; reaped on close.
+    onTeardown(() => { if (logTimer) clearInterval(logTimer); });
     $("#adb-log-auto").addEventListener("change", (e) => setAuto(e.target.checked));
     $("#adb-log-clear").addEventListener("click", async () => {
         await fetch("/v1/adb/log/clear", { method: "POST" });

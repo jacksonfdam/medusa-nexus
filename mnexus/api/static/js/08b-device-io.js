@@ -1,5 +1,5 @@
 // ── auto-wired ES-module imports ──
-import { $, $$, escapeHtml, getJSON, h, sectionHeader } from "./01-core.js";
+import { $, $$, escapeHtml, getJSON, h, onTeardown, sectionHeader } from "./01-core.js";
 import { fmtBytes } from "./02-screens-main.js";
 import { deviceTabs, fillDeviceStatusStrip } from "./04a-project-views.js";
 
@@ -304,6 +304,8 @@ function mount_device_logcat() {
         if (e.target.checked) timer = setInterval(fetchOnce, 3000);
     });
     fetchOnce();
+    // keep-alive: auto-refresh survives tab switches, reaped on tab close.
+    onTeardown(() => { if (timer) clearInterval(timer); });
 }
 
 
