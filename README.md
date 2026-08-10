@@ -409,10 +409,13 @@ a JSON API that the SPA + external tooling can both consume. Highlights:
   surface, all wired.
 - **Tab strip** — every view you open becomes a chip above the content, Android-
   Studio style: revisit a spot and it re-focuses (never duplicates), wander off
-  and the old chip waits with your scroll position intact. A whole project is a
-  single chip (its sub-views live in the in-project nav) that remembers the last
-  sub-view you were on. Close with `✕` or middle-click; `＋` (or `⌘K`) opens the
-  next one. Chips survive a reload.
+  and the old chip waits with your scroll position intact. Backgrounded tabs stay
+  **warm** — their DOM lives on and their live streams keep running while you're
+  elsewhere, so logcat, the screen mirror, the dynamic (Frida/SSE) console and the
+  runtime monitor never miss a beat when you tab away and back; the stream only
+  dies when you close the tab. A whole project is a single chip (its sub-views
+  live in the in-project nav) that remembers the last sub-view you were on. Close
+  with `✕` or middle-click; `＋` (or `⌘K`) opens the next one. Chips survive a reload.
 - **Command palette** — `⌘K` / `Ctrl-K` (or the topbar search box) fuzzy-searches
   every view and action and fires it blind — no mouse, no sidebar-hunting. Knows
   where you are: inside a project it also lists that project's sub-views and
