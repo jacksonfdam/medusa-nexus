@@ -3518,6 +3518,145 @@ async def project_find(
     }
 
 
+@app.post("/v1/projects/{project_id}/decompile")
+async def project_decompile(project_id: str, engine: str = "jadx", force: bool = False) -> dict[str, Any]:
+    """Materialise a decompiled source tree on disk so /source + /classes
+    have something to read.
+
+    The default static scan only walks DEX byte-strings — it never writes a
+    source tree. This runs the real decompiler once and caches the output
+    under ``<workspace>/<project_id>/{jadx,apktool}/``. A second call is a
+    no-op unless ``force=true``.
+
+    Query params:
+      * ``engine=jadx`` (default) — full Java/Kotlin decompile into ``jadx/``.
+        Heavy: 30–60s and 100k+ files on a 20 MB release APK. Requires jadx
+        on PATH; the byte-string fallback does NOT produce source, so we
+        return 503 with an honest message when it's missing.
+      * ``engine=apktool`` — smali + resource decode into ``apktool/``. Lighter.
+      * ``force=true`` — re-run even if the tree is already cached.
+
+    404 unknown project. 410 artefact gone. 503 tool missing.
+    """
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+
+    engine_norm = (engine or "jadx").lower()
+    if engine_norm not in {"jadx", "apktool"}:
+        raise HTTPException(400, f"unknown engine: {engine_norm} (use 'jadx' or 'apktool')")
+
+    apk_path = p.apk_path if isinstance(p.apk_path, Path) else Path(str(p.apk_path))
+    if not apk_path.exists():
+        raise HTTPException(410, f"source artefact missing on disk: {apk_path}")
+
+    out_dir = nexus.config.workspace / project_id / engine_norm
+    cached = out_dir.exists() and any(out_dir.rglob("*"))
+    if not (cached and not force):
+        engine_obj = nexus.engines.get(engine_norm)
+        if engine_obj is None:
+            raise HTTPException(503, f"{engine_norm} engine not registered")
+        try:
+            if engine_norm == "jadx":
+                await engine_obj.decompile(apk_path, out_dir)   # type: ignore[attr-defined]
+            else:
+                await engine_obj.decode(apk_path, out_dir)       # type: ignore[attr-defined]
+        except RuntimeError as exc:
+            # jadx/apktool not on PATH — the honest failure, not a fake tree.
+            raise HTTPException(503, str(exc)) from exc
+        cached = False
+
+    suffix = ".smali" if engine_norm == "apktool" else ".java"
+    class_count = sum(1 for f in out_dir.rglob(f"*{suffix}")) if out_dir.exists() else 0
+    return {
+        "project_id": project_id,
+        "engine": engine_norm,
+        "tree": out_dir.name,
+        "cached": cached,
+        "class_count": class_count,
+    }
+
+
+@app.get("/v1/projects/{project_id}/source")
+async def project_source(project_id: str, fqcn: str, fmt: str = "java") -> dict[str, Any]:
+    """Read one decompiled class body out of the materialised workspace.
+
+    ``fqcn`` is a fully-qualified class name (``com.target.auth.LoginManager``);
+    inner classes (``Outer$Inner``) resolve to their outer file. ``fmt=java``
+    reads the jadx tree, ``fmt=smali`` the apktool tree.
+
+    409 when the relevant tree hasn't been decompiled yet (POST /decompile
+    first). 404 when the class isn't in that tree.
+    """
+    from mnexus.intelligence.source_reader import read_class_source
+
+    _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+
+    fmt_norm = (fmt or "java").lower()
+    if fmt_norm not in {"java", "smali"}:
+        raise HTTPException(400, f"unknown fmt: {fmt_norm} (use 'java' or 'smali')")
+    tree = "jadx" if fmt_norm == "java" else "apktool"
+    if not (nexus.config.workspace / project_id / tree).exists():
+        raise HTTPException(
+            409,
+            f"{tree} tree not materialised — POST /v1/projects/{project_id}/decompile?engine={tree} first",
+        )
+
+    src = read_class_source(nexus.config.workspace, project_id, fqcn, fmt_norm)
+    if src is None:
+        raise HTTPException(404, f"class not found in {tree} tree: {fqcn}")
+    return {
+        "project_id": project_id,
+        "fqcn": src.fqcn,
+        "fmt": fmt_norm,
+        "file": src.file,
+        "lang": src.lang,
+        "truncated": src.truncated,
+        "source": src.text,
+    }
+
+
+@app.get("/v1/projects/{project_id}/classes")
+async def project_classes(project_id: str, q: str = "", fmt: str = "java", limit: int = 200) -> dict[str, Any]:
+    """List decompiled classes whose fqcn contains ``q`` (empty = every class).
+
+    Case-insensitive substring over the fully-qualified name. ``fmt`` picks
+    the jadx (java) or apktool (smali) tree. 409 when that tree hasn't been
+    decompiled yet.
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    from mnexus.intelligence.source_reader import search_classes
+
+    _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+
+    fmt_norm = (fmt or "java").lower()
+    if fmt_norm not in {"java", "smali"}:
+        raise HTTPException(400, f"unknown fmt: {fmt_norm} (use 'java' or 'smali')")
+    tree = "jadx" if fmt_norm == "java" else "apktool"
+    if not (nexus.config.workspace / project_id / tree).exists():
+        raise HTTPException(
+            409,
+            f"{tree} tree not materialised — POST /v1/projects/{project_id}/decompile?engine={tree} first",
+        )
+
+    capped = max(1, min(limit, 2000))
+    # The walk can chew through 100k+ files on a release APK — keep the
+    # event loop responsive while it grinds.
+    hits = await run_in_threadpool(
+        search_classes, nexus.config.workspace, project_id, q, fmt=fmt_norm, limit=capped
+    )
+    return {
+        "project_id": project_id,
+        "query": q,
+        "fmt": fmt_norm,
+        "count": len(hits),
+        "truncated": len(hits) >= capped,
+        "classes": [{"fqcn": h.fqcn, "file": h.file, "lang": h.lang} for h in hits],
+    }
+
+
 @app.post("/v1/projects/{project_id}/attribute")
 async def project_attribute(project_id: str) -> dict[str, Any]:
     """Re-run library attribution against this project's stored findings.

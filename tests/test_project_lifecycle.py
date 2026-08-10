@@ -111,6 +111,92 @@ def test_locator_endpoint_404_for_unknown_project(lifecycle_client) -> None:
     assert r.status_code == 404
 
 
+# ─── source / classes / decompile ────────────────────────────────────────
+
+
+def _fake_jadx(workspace: Path, pid: str) -> None:
+    base = workspace / pid / "jadx" / "sources"
+    for rel, body in (
+        ("com/target/auth/LoginManager.java", "package com.target.auth;\nclass LoginManager {}\n"),
+        ("com/target/ui/Home.java", "package com.target.ui;\nclass Home {}\n"),
+    ):
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+
+
+def test_source_409_before_decompile(lifecycle_client) -> None:
+    client, pid, _ = lifecycle_client
+    r = client.get(f"/v1/projects/{pid}/source", params={"fqcn": "com.target.auth.LoginManager"})
+    assert r.status_code == 409
+    assert "decompile" in r.json()["detail"]
+
+
+def test_source_reads_class(lifecycle_client) -> None:
+    client, pid, _ = lifecycle_client
+    _fake_jadx(Path(client.app.state.nexus.config.workspace), pid)
+    r = client.get(f"/v1/projects/{pid}/source", params={"fqcn": "com.target.auth.LoginManager"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["fqcn"] == "com.target.auth.LoginManager"
+    assert "class LoginManager" in body["source"]
+    assert body["lang"] == "java"
+
+
+def test_source_404_for_unknown_class(lifecycle_client) -> None:
+    client, pid, _ = lifecycle_client
+    _fake_jadx(Path(client.app.state.nexus.config.workspace), pid)
+    r = client.get(f"/v1/projects/{pid}/source", params={"fqcn": "com.target.Ghost"})
+    assert r.status_code == 404
+
+
+def test_source_rejects_hostile_fqcn(lifecycle_client) -> None:
+    client, pid, _ = lifecycle_client
+    _fake_jadx(Path(client.app.state.nexus.config.workspace), pid)
+    r = client.get(f"/v1/projects/{pid}/source", params={"fqcn": "../../../../etc/passwd"})
+    assert r.status_code == 404  # resolver refuses to leave the subtree
+
+
+def test_classes_lists_and_filters(lifecycle_client) -> None:
+    client, pid, _ = lifecycle_client
+    _fake_jadx(Path(client.app.state.nexus.config.workspace), pid)
+    allc = client.get(f"/v1/projects/{pid}/classes")
+    assert allc.status_code == 200
+    assert allc.json()["count"] == 2
+    one = client.get(f"/v1/projects/{pid}/classes", params={"q": "auth"})
+    assert [c["fqcn"] for c in one.json()["classes"]] == ["com.target.auth.LoginManager"]
+
+
+def test_classes_409_before_decompile(lifecycle_client) -> None:
+    client, pid, _ = lifecycle_client
+    r = client.get(f"/v1/projects/{pid}/classes", params={"fmt": "smali"})
+    assert r.status_code == 409
+
+
+def test_decompile_missing_tool_is_503(lifecycle_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, pid, _ = lifecycle_client
+    # Force the honest "tool not on PATH" path deterministically.
+    from mnexus.engines import jadx_engine
+    monkeypatch.setattr(jadx_engine.shutil, "which", lambda _: None)
+    r = client.post(f"/v1/projects/{pid}/decompile", params={"engine": "jadx"})
+    assert r.status_code == 503
+    assert "jadx" in r.json()["detail"].lower()
+
+
+def test_decompile_cached_noop(lifecycle_client) -> None:
+    client, pid, _ = lifecycle_client
+    # Pre-seed a smali tree so the endpoint takes the cached path and never
+    # needs apktool on PATH.
+    smali = Path(client.app.state.nexus.config.workspace) / pid / "apktool" / "smali" / "com" / "target" / "A.smali"
+    smali.parent.mkdir(parents=True, exist_ok=True)
+    smali.write_text(".class public Lcom/target/A;\n", encoding="utf-8")
+    r = client.post(f"/v1/projects/{pid}/decompile", params={"engine": "apktool"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["cached"] is True
+    assert body["class_count"] == 1
+
+
 # ─── backup ────────────────────────────────────────────────────────────
 
 
