@@ -1162,6 +1162,12 @@ input[type="checkbox"].projects-select:checked::after {
  * the topbar (height measured at runtime into --topbar-h) so tabs stay reachable
  * while the page scrolls. Only shown once at least one chip exists. */
 .content-col { min-width: 0; display: flex; flex-direction: column; }
+
+/* Keep-alive view panes — one wrapper per open view; only the active pane is
+ * attached under #view, the rest live detached in the router's pool with their
+ * streams still running. display:contents keeps the wrapper transparent to
+ * layout so the inner .main behaves exactly as a direct child of #view. */
+.view-pane { display: contents; }
 .tab-strip {
     display: none;
     align-items: center;

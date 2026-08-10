@@ -88,14 +88,43 @@ async function getJSON(url) {
 }
 
 /* ──────────────────────────────────────────────────────────────────
- *  Polling helper — runs `tick()` every `intervalMs` until the route
- *  changes (hashchange) or the scope is explicitly cancelled. Used by
- *  the SSL Map / API Map / Dynamic console screens.
+ *  Per-pane lifecycle scope — the keep-alive tab strip keeps every open
+ *  view's DOM (plus its pollers/streams) warm in the background, so a
+ *  poller must NOT die just because you switched tabs. It dies when its
+ *  TAB is closed. Every mount runs inside an "active scope"; pollers,
+ *  intervals and EventSources register their teardown via onTeardown()
+ *  and the router fires them all when that pane is evicted. Deferred
+ *  handlers (a click that opens a stream) only fire while their pane is
+ *  the visible/active one, so onTeardown always lands in the right scope.
+ *  See renderRoute() + the pane pool in 11-router.
+ * ────────────────────────────────────────────────────────────────── */
+let _activeScope = null;
+function makeScope() { return { teardowns: [] }; }
+function setActiveScope(scope) { _activeScope = scope; }
+function runScope(scope) {
+    if (!scope) return;
+    for (const fn of scope.teardowns.splice(0)) {
+        try { fn(); } catch (_) { /* one bad teardown shouldn't block the rest */ }
+    }
+}
+function onTeardown(fn) {
+    if (typeof fn === "function" && _activeScope) _activeScope.teardowns.push(fn);
+    // No active scope → the poller just won't be auto-reaped; its own guards
+    // (serial change, checkbox off) still apply. Shouldn't happen in a mount.
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ *  Polling helper — runs `tick()` every `intervalMs` until its owning
+ *  TAB is closed (pane teardown) or the scope is explicitly cancelled.
+ *  Used by the SSL Map / API Map / Dynamic console / runtime screens.
  *
- *  Returns a `{ stop }` handle; calling stop() detaches the listener
- *  and cancels any pending tick. The harness also re-runs `tick()`
- *  once when the page regains visibility so a tab that was hidden
- *  for a minute doesn't show stale data for one more interval.
+ *  Keep-alive: the loop no longer stops on `hashchange` — a backgrounded
+ *  tab keeps streaming so live data survives a tab switch. Its stop() is
+ *  registered with the active pane scope and fires on tab close. Returns
+ *  a `{ stop }` handle for callers that toggle it manually (auto-refresh
+ *  checkboxes). The harness also re-runs `tick()` once when the page
+ *  regains visibility so a browser tab hidden for a minute doesn't show
+ *  stale data for one more interval.
  * ────────────────────────────────────────────────────────────────── */
 function pollingScope(tick, intervalMs = 3000) {
     let cancelled = false;
@@ -110,18 +139,16 @@ function pollingScope(tick, intervalMs = 3000) {
         if (!cancelled) timer = setTimeout(run, intervalMs);
     };
 
-    const onHashChange = () => stop();
     const onVisibilityChange = () => { if (!document.hidden) run(); };
     const stop = () => {
         if (cancelled) return;
         cancelled = true;
         if (timer) clearTimeout(timer);
-        window.removeEventListener("hashchange", onHashChange);
         document.removeEventListener("visibilitychange", onVisibilityChange);
     };
 
-    window.addEventListener("hashchange", onHashChange);
     document.addEventListener("visibilitychange", onVisibilityChange);
+    onTeardown(stop);
     // First tick immediate; subsequent ones every intervalMs.
     run();
     return { stop };
@@ -223,4 +250,4 @@ function escapeHtml(s) {
         .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-export { $, $$, AVAILABLE_THEMES, applyThemeAttr, attrTag, chip, classifyRisk, escapeHtml, fmtAgo, getJSON, getTheme, h, platformGlyph, pollingScope, sectionHeader, setTheme, stub };
+export { $, $$, AVAILABLE_THEMES, applyThemeAttr, attrTag, chip, classifyRisk, escapeHtml, fmtAgo, getJSON, getTheme, h, makeScope, onTeardown, platformGlyph, pollingScope, runScope, sectionHeader, setActiveScope, setTheme, stub };

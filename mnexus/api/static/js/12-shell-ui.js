@@ -402,6 +402,12 @@ function tabLookups() {
     return _tabGlobalMap;
 }
 
+// Tell the router to reap the keep-alive panes belonging to a closed/evicted
+// chip — fires that group's scope teardowns (pollers stop, streams close).
+function paneEvict(key) {
+    window.dispatchEvent(new CustomEvent("nexus:pane-evict", { detail: { key } }));
+}
+
 // One chip per project (all sub-views share it); every other route is its own chip.
 function tabGroupKey(hash) {
     const path = String(hash).replace(/^#\/?/, "").split("?")[0];
@@ -457,7 +463,7 @@ function tabsTrack(hash) {
             const victim = TAB_STATE.list.findIndex((x) => x.key !== key);
             if (victim < 0) break;
             const [gone] = TAB_STATE.list.splice(victim, 1);
-            if (gone) TAB_SCROLL.delete(gone.hash);
+            if (gone) { TAB_SCROLL.delete(gone.hash); paneEvict(gone.key); }
         }
     } else {
         t.hash = hash;                   // remember where we are inside this chip
@@ -476,6 +482,7 @@ function tabsClose(key) {
     const wasActive = TAB_STATE.activeKey === key;
     const [gone] = TAB_STATE.list.splice(idx, 1);
     if (gone) TAB_SCROLL.delete(gone.hash);
+    paneEvict(key);   // reap the closed chip's keep-alive panes + their streams
     if (!wasActive) { renderTabStrip(); tabsPersist(); return; }
     // Hand focus to the chip that slid into this slot, else the left neighbor.
     const next = TAB_STATE.list[idx] || TAB_STATE.list[idx - 1] || TAB_STATE.list[TAB_STATE.list.length - 1];
@@ -535,4 +542,4 @@ function initTabs() {
 }
 
 
-export { initCommandPalette, initSidebar, initTabs, tabsRestoreScroll, tabsSaveScroll, tabsTrack, tickClock };
+export { initCommandPalette, initSidebar, initTabs, tabGroupKey, tabsRestoreScroll, tabsSaveScroll, tabsTrack, tickClock };

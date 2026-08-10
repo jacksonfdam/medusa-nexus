@@ -1,5 +1,5 @@
 // ── auto-wired ES-module imports ──
-import { $, $$, h } from "./01-core.js";
+import { $, $$, h, makeScope, runScope, setActiveScope } from "./01-core.js";
 import { mount_dashboard, mount_projects, mount_scan, mount_scan_after_upload_wiring, view_dashboard, view_projects, view_scan } from "./02-screens-main.js";
 import { mount_play_accounts, mount_play_scan, view_play_accounts, view_play_scan } from "./03-playintel.js";
 import { bindProjectTabActions, mount_ios_decrypt, view_device_bridge, view_device_pull, view_ios_decrypt, view_project_dynamic, view_project_overview, view_project_static } from "./04a-project-views.js";
@@ -15,7 +15,7 @@ import { mount_device_files, mount_device_logcat, mount_device_screen, mount_dev
 import { mount_finding_detail, mount_recipes, mount_report, mount_settings } from "./09-mounts-rest.js";
 import { mount_project_components, mount_project_native, mount_project_secrets, mount_project_tracer, view_project_components, view_project_native, view_project_secrets, view_project_tracer } from "./10a-project-chrome.js";
 import { mount_pipeline, mount_project_api_map, mount_project_attack_tree, mount_project_dataflow, mount_project_owasp, mount_project_ssl_map, mount_project_surface, mount_report_diff, mount_terminal, view_pipeline, view_project_api_map, view_project_attack_tree, view_project_dataflow, view_project_owasp, view_project_ssl_map, view_project_surface, view_report_diff, view_states, view_terminal, view_toasts } from "./10b-project-analysis.js";
-import { tabsRestoreScroll, tabsSaveScroll, tabsTrack } from "./12-shell-ui.js";
+import { tabGroupKey, tabsRestoreScroll, tabsSaveScroll, tabsTrack } from "./12-shell-ui.js";
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Route map + router
@@ -106,6 +106,32 @@ function setActiveSidebar(topLevel) {
     $$(".nav-item").forEach((el) => el.classList.toggle("active", el.dataset.route === topLevel));
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  Keep-alive pane pool
+ *  ───────────────────
+ *  Each distinct hash gets its own <div class="view-pane"> that lives on in
+ *  memory. Only the active pane is attached under #view; the rest are DETACHED
+ *  but alive, so their pollers/streams (logcat, screen mirror, frida runtime,
+ *  dynamic SSE) keep running in the background — and because a detached node is
+ *  invisible to document.querySelector, panes never collide on element IDs with
+ *  the visible one (no $ rescoping needed). A pane dies only when its TAB is
+ *  evicted or closed: the strip fires `nexus:pane-evict` with the chip's group
+ *  key, and destroyGroup() runs every matching pane's scope teardowns.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const PANES = new Map(); // location.hash → { el, scope, groupKey }
+let _activePaneKey = null;
+
+function destroyGroup(groupKey) {
+    for (const [key, p] of PANES) {
+        if (p.groupKey !== groupKey) continue;
+        if (p.el.parentNode) p.el.remove();
+        runScope(p.scope);           // stop pollers, close EventSources, clear intervals
+        PANES.delete(key);
+        if (_activePaneKey === key) _activePaneKey = null;
+    }
+}
+window.addEventListener("nexus:pane-evict", (e) => destroyGroup(e.detail?.key));
+
 async function renderRoute() {
     // Stash the outgoing view's scroll into its chip before the DOM swaps out.
     tabsSaveScroll();
@@ -115,7 +141,11 @@ async function renderRoute() {
     const ctx = { params: hit?.params || {}, hash: raw };
     const view = $("#view");
     if (!view) return;
+    const topLevel = pathPart.split("/")[0];
+    const paneKey = location.hash || "#/dashboard";
+
     if (!hit) {
+        // 404 — no keep-alive pane; the active pane detaches into the pool.
         view.innerHTML = h`
         <div class="main">
           <div class="empty-state">
@@ -124,18 +154,50 @@ async function renderRoute() {
             <div style="margin-top:16px"><a class="btn primary" href="#/dashboard">[ HOME ]</a></div>
           </div>
         </div>`;
+        _activePaneKey = null;
+        setActiveScope(null);
         setActiveSidebar(null);
         return;
     }
+
+    // Fast path: this exact view is already alive → bring its warm DOM forward,
+    // skip view()/mount() entirely. Its pollers never stopped.
+    const existing = PANES.get(paneKey);
+    if (existing) {
+        view.replaceChildren(existing.el);
+        _activePaneKey = paneKey;
+        setActiveScope(existing.scope);
+        setActiveSidebar(topLevel);
+        tabsTrack(paneKey);
+        document.title = `🔱 MEDUSA::NEXUS / ${pathPart}`;
+        tabsRestoreScroll();
+        return;
+    }
+
     const html = hit.route.view(ctx);
-    view.innerHTML = html;
+    // Redirect stubs return "" and immediately rewrite the hash — they never
+    // earn a pane or a chip; let the follow-up hashchange render the target.
+    if (!(html && html.trim())) {
+        setActiveSidebar(topLevel);
+        return;
+    }
+
+    // New view → build a detached pane, make it the sole child of #view, then
+    // mount into it. setActiveScope() before mount so pollingScope/onTeardown
+    // register into this pane's scope.
+    const pane = document.createElement("div");
+    pane.className = "view-pane";
+    pane.dataset.hash = paneKey;
+    pane.innerHTML = html;
+    const scope = makeScope();
+    PANES.set(paneKey, { el: pane, scope, groupKey: tabGroupKey(paneKey) });
+    view.replaceChildren(pane);
+    _activePaneKey = paneKey;
+    setActiveScope(scope);
+
     // Update sidebar active based on top-level segment (sidebar only lists the 9 primaries).
-    const topLevel = pathPart.split("/")[0];
     setActiveSidebar(topLevel);
-    // Redirect stubs return "" and immediately rewrite the hash — don't give
-    // them a chip; only real views earn a tab.
-    const isRealView = !!(html && html.trim());
-    if (isRealView) tabsTrack(location.hash || "#/dashboard");
+    tabsTrack(paneKey);   // may evict an old chip → destroyGroup reaps its panes
     if (typeof hit.route.mount === "function") {
         try { await hit.route.mount(ctx); } catch (e) { console.error("mount failed:", e); }
     }
@@ -144,7 +206,7 @@ async function renderRoute() {
     if (pathPart.startsWith("project/")) bindProjectTabActions();
     document.title = `🔱 MEDUSA::NEXUS / ${pathPart}`;
     // Mount may have reflowed the page — restore this chip's scroll after it settles.
-    if (isRealView) tabsRestoreScroll();
+    tabsRestoreScroll();
 }
 
 
