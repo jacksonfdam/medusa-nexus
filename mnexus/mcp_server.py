@@ -17,6 +17,16 @@ What the assistant can do once wired:
   * ``manifest_diff``        — surface delta against the prior scan
   * ``findings_diff``        — security delta against the prior scan
   * ``firebase_probe``       — standalone RTDB / Firestore / Storage check
+  * ``decompile_project``    — materialise the jadx / apktool source tree
+  * ``get_class_source``     — read one class body by fully-qualified name
+  * ``search_classes``       — list / filter decompiled classes by fqcn
+  * ``search_source``        — grep the decompiled workspace for a string
+  * ``get_manifest``         — decoded AndroidManifest.xml / Info.plist
+
+The last five turn the assistant from a report reader into a code
+reader — the jadx-GUI-plugin workflow (zinja-coder's jadx-mcp-server &
+friends), minus the dependency on a running jadx GUI, because Nexus has
+already decompiled the APK to its own workspace.
 
 Every tool hits the local FastAPI server (default ``localhost:8765``)
 via ``urllib.request`` — we don't reach into the orchestrator
@@ -303,6 +313,99 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "decompile_project",
+        "description": (
+            "Materialise a decompiled source tree on disk so get_class_source / "
+            "search_classes have something to read. The default scan only walks "
+            "DEX byte-strings — it writes no source. engine='jadx' does a full "
+            "Java/Kotlin decompile (heavy: 30–60s on a 20 MB APK; needs jadx on "
+            "PATH), engine='apktool' decodes smali + resources (lighter). Caches; "
+            "pass force=true to re-run. Call this once before navigating code."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "engine":     {"type": "string", "enum": ["jadx", "apktool"], "default": "jadx"},
+                "force":      {"type": "boolean", "default": False},
+            },
+            "required": ["project_id"],
+        },
+    },
+    {
+        "name": "get_class_source",
+        "description": (
+            "Read one decompiled class body by fully-qualified name "
+            "(e.g. com.target.auth.LoginManager). fmt='java' reads the jadx tree, "
+            "fmt='smali' the apktool tree. Inner classes (Outer$Inner) resolve to "
+            "their outer file. Returns 409 until decompile_project has run for that "
+            "engine; 404 if the class isn't in the tree."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "fqcn":       {"type": "string", "description": "e.g. com.target.auth.LoginManager"},
+                "fmt":        {"type": "string", "enum": ["java", "smali"], "default": "java"},
+            },
+            "required": ["project_id", "fqcn"],
+        },
+    },
+    {
+        "name": "search_classes",
+        "description": (
+            "List decompiled classes whose fully-qualified name contains a keyword "
+            "(empty = every class). Case-insensitive substring. fmt picks the jadx "
+            "(java) or apktool (smali) tree. Needs decompile_project first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "q":          {"type": "string", "description": "keyword; empty lists all classes"},
+                "fmt":        {"type": "string", "enum": ["java", "smali"], "default": "java"},
+                "limit":      {"type": "integer", "default": 200},
+            },
+            "required": ["project_id"],
+        },
+    },
+    {
+        "name": "search_source",
+        "description": (
+            "Grep the project's decompiled workspace (jadx + apktool + manifest "
+            "cache + PlayIntel secrets) for a string or regex and get back "
+            "file:line hits with snippets and library attribution. Answers 'which "
+            "file actually contains this key/URL/string?'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id":       {"type": "string"},
+                "q":                {"type": "string", "description": "pattern (substring, or regex if regex=true)"},
+                "regex":            {"type": "boolean", "default": False},
+                "case_insensitive": {"type": "boolean", "default": False},
+                "max_results":      {"type": "integer", "default": 200},
+            },
+            "required": ["project_id", "q"],
+        },
+    },
+    {
+        "name": "get_manifest",
+        "description": (
+            "Fetch the decoded AndroidManifest.xml (or iOS Info.plist) for a "
+            "project. fmt='xml' returns the decoded XML, fmt='json' the structured "
+            "parse (package, permissions, exported components, sdk levels)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "fmt":        {"type": "string", "enum": ["xml", "json"], "default": "xml"},
+            },
+            "required": ["project_id"],
+        },
+    },
+    {
         "name": "analyze_native_lib",
         "description": (
             "Run the native-lib analyser against a specific .so in a project. Returns "
@@ -420,6 +523,57 @@ def _handle_run_pipeline(args: dict[str, Any]) -> dict[str, Any]:
     return {"status": status, "run": body}
 
 
+def _handle_decompile_project(args: dict[str, Any]) -> dict[str, Any]:
+    pid = urllib.parse.quote(args["project_id"])
+    params = {"engine": args.get("engine", "jadx")}
+    if args.get("force"):
+        params["force"] = "true"
+    qs = "?" + urllib.parse.urlencode(params)
+    # Full jadx decompile can run a minute — give it room before urllib bails.
+    status, body = _api("POST", f"/v1/projects/{pid}/decompile{qs}", timeout=600.0)
+    return {"status": status, "decompile": body}
+
+
+def _handle_get_class_source(args: dict[str, Any]) -> dict[str, Any]:
+    pid = urllib.parse.quote(args["project_id"])
+    params = {"fqcn": args["fqcn"], "fmt": args.get("fmt", "java")}
+    qs = "?" + urllib.parse.urlencode(params)
+    status, body = _api("GET", f"/v1/projects/{pid}/source{qs}")
+    return {"status": status, "source": body}
+
+
+def _handle_search_classes(args: dict[str, Any]) -> dict[str, Any]:
+    pid = urllib.parse.quote(args["project_id"])
+    params = {"q": args.get("q", ""), "fmt": args.get("fmt", "java")}
+    if args.get("limit"):
+        params["limit"] = args["limit"]
+    qs = "?" + urllib.parse.urlencode(params)
+    status, body = _api("GET", f"/v1/projects/{pid}/classes{qs}")
+    return {"status": status, "classes": body}
+
+
+def _handle_search_source(args: dict[str, Any]) -> dict[str, Any]:
+    pid = urllib.parse.quote(args["project_id"])
+    params: dict[str, Any] = {"q": args["q"]}
+    if args.get("regex"):
+        params["regex"] = "true"
+    if args.get("case_insensitive"):
+        params["case_insensitive"] = "true"
+    if args.get("max_results"):
+        params["max_results"] = args["max_results"]
+    qs = "?" + urllib.parse.urlencode(params)
+    status, body = _api("GET", f"/v1/projects/{pid}/find{qs}")
+    return {"status": status, "hits": body}
+
+
+def _handle_get_manifest(args: dict[str, Any]) -> dict[str, Any]:
+    pid = urllib.parse.quote(args["project_id"])
+    fmt = args.get("fmt", "xml")
+    qs = "?" + urllib.parse.urlencode({"fmt": fmt})
+    status, body = _api("GET", f"/v1/projects/{pid}/manifest{qs}")
+    return {"status": status, "fmt": fmt, "manifest": body}
+
+
 def _handle_analyze_native_lib(args: dict[str, Any]) -> dict[str, Any]:
     pid = urllib.parse.quote(args["project_id"])
     qs = "?" + urllib.parse.urlencode({"lib": args["lib_path"]})
@@ -438,6 +592,13 @@ _HANDLERS = {
     "findings_diff":       _handle_findings_diff,
     "firebase_probe":      _handle_firebase_probe,
     "doctor":              _handle_doctor,
+    # code navigation — let the assistant read the decompiled source, not
+    # just the report (the jadx-GUI-plugin workflow, minus the jadx GUI)
+    "decompile_project":   _handle_decompile_project,
+    "get_class_source":    _handle_get_class_source,
+    "search_classes":      _handle_search_classes,
+    "search_source":       _handle_search_source,
+    "get_manifest":        _handle_get_manifest,
     # write tools — let the assistant drive a full inspection
     "scan_apk":            _handle_scan_apk,
     "run_pipeline":        _handle_run_pipeline,

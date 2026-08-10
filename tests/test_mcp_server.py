@@ -174,6 +174,53 @@ def test_findings_diff_without_against_passes_no_querystring(api_recorder) -> No
     assert calls[-1]["path"] == "/v1/projects/PRJ-1/findings-diff"
 
 
+# ─── code navigation tools ─────────────────────────────────────────────
+
+
+def test_decompile_project_defaults_to_jadx(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("decompile_project", {"project_id": "PRJ-1"})
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["path"] == "/v1/projects/PRJ-1/decompile?engine=jadx"
+
+
+def test_decompile_project_passes_engine_and_force(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("decompile_project", {"project_id": "PRJ-1", "engine": "apktool", "force": True})
+    assert calls[-1]["path"] == "/v1/projects/PRJ-1/decompile?engine=apktool&force=true"
+
+
+def test_get_class_source_builds_source_path(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("get_class_source", {"project_id": "PRJ-1", "fqcn": "com.target.auth.LoginManager"})
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["path"] == "/v1/projects/PRJ-1/source?fqcn=com.target.auth.LoginManager&fmt=java"
+
+
+def test_get_class_source_honours_smali_fmt(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("get_class_source", {"project_id": "PRJ-1", "fqcn": "com.target.A", "fmt": "smali"})
+    assert calls[-1]["path"].endswith("fmt=smali")
+
+
+def test_search_classes_defaults_empty_query(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("search_classes", {"project_id": "PRJ-1"})
+    assert calls[-1]["path"] == "/v1/projects/PRJ-1/classes?q=&fmt=java"
+
+
+def test_search_source_maps_to_find_endpoint(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("search_source", {"project_id": "PRJ-1", "q": "AIzaSy", "regex": True})
+    assert calls[-1]["path"] == "/v1/projects/PRJ-1/find?q=AIzaSy&regex=true"
+
+
+def test_get_manifest_defaults_to_xml(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("get_manifest", {"project_id": "PRJ-1"})
+    assert calls[-1]["path"] == "/v1/projects/PRJ-1/manifest?fmt=xml"
+
+
 def test_firebase_probe_strips_empty_fields_from_body(api_recorder) -> None:
     """The /v1/firebase/probe endpoint 400s when fed an empty config. We
     drop blank fields so the assistant can over-specify without errors."""
