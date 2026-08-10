@@ -7,8 +7,9 @@ title: MCP driver
 `mnexus mcp-serve` exposes the running Nexus instance as a
 [Model Context Protocol](https://modelcontextprotocol.io) server so
 Claude Desktop, Cursor, Zed, and any other MCP-aware client can read
-projects, walk findings, and fire Firebase probes through tool calls —
-without you copy-pasting `curl` lines into the chat.
+projects, walk findings, **read the decompiled source itself**, and fire
+Firebase probes through tool calls — without you copy-pasting `curl`
+lines into the chat.
 
 The wire format is plain JSON-RPC 2.0 over stdio. There's no `mcp`
 Python dep — the protocol is small and we'd rather pin nothing than
@@ -60,6 +61,28 @@ The assistant calls `list_findings` → `get_finding` → reads the
 | `run_pipeline` | Execute a named pipeline against an existing project (stacks engines). | `POST /v1/pipelines/{name}/run` |
 | `analyze_native_lib` | Per-`.so` analyser — JNI exports + hardcoded URLs + crypto routines. | `GET /v1/projects/{id}/native/analyze?lib=…` |
 
+### Code-navigation tools — read the decompiled source, not just the report
+
+The default scan walks DEX byte-strings; it writes no source tree. These
+tools materialise the real jadx/apktool output on disk and then let the
+assistant read its way through the code — the
+[jadx-mcp-server](https://github.com/zinja-coder/jadx-mcp-server) workflow
+(zinja-coder), minus the running jadx GUI, because Nexus already owns the
+decompiled workspace.
+
+| tool | purpose | underlying route |
+| ---- | ------- | ---------------- |
+| `decompile_project` | Materialise the jadx (Java/Kotlin) or apktool (smali) tree on disk. Caches; heavy on the jadx side. Run once before reading code. | `POST /v1/projects/{id}/decompile?engine=` |
+| `get_class_source` | One class body by fully-qualified name; inner classes fold into their outer file. `fmt=java`/`smali`. | `GET /v1/projects/{id}/source?fqcn=&fmt=` |
+| `search_classes` | List / filter decompiled classes by fqcn substring. | `GET /v1/projects/{id}/classes?q=&fmt=` |
+| `search_source` | Grep the whole decompiled workspace for a string/regex → file:line hits with attribution. | `GET /v1/projects/{id}/find?q=` |
+| `get_manifest` | Decoded `AndroidManifest.xml` (or iOS `Info.plist`), `fmt=xml`/`json`. | `GET /v1/projects/{id}/manifest?fmt=` |
+
+`get_class_source` / `search_classes` return **409** until
+`decompile_project` has run for that engine — an honest "no source on
+disk yet", never a fabricated body. When jadx isn't on PATH,
+`decompile_project` returns **503** rather than a fake tree.
+
 Mitigation is first-class: `get_finding` always returns the
 `remediation` block, so any assistant-generated plan starts from
 ground truth rather than fabricated advice.
@@ -79,6 +102,9 @@ Claude ▸ calls scan_apk(apk_path="~/Downloads/target.apk")        → PRJ-A5B7
                              severity="critical")
        ▸ for each chain finding:
            get_finding(finding_id=…) → reads evidence + remediation
+       ▸ calls decompile_project(project_id="PRJ-A5B7C291", engine="jadx")
+       ▸ calls get_class_source(fqcn=…) on each link's class → reads the
+         real code path instead of guessing
        ▸ synthesises a written report citing each link's code path.
 ```
 
@@ -105,7 +131,7 @@ and add the entry under `mcpServers`:
 ```
 
 Restart Claude Desktop. The hammer icon next to the prompt should now
-list ten `medusa-nexus` tools. The `MNEXUS_API_BASE` env var lets you
+list the `medusa-nexus` tools. The `MNEXUS_API_BASE` env var lets you
 point the driver at a remote Nexus — anywhere `urllib` can reach.
 
 ## Cursor / Zed
