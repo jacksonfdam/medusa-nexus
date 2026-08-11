@@ -679,6 +679,10 @@ body::before {
     border-radius: var(--radius);
     cursor: pointer;
     text-decoration: none;
+    /* Labels are bracketed ASCII ([ SWAGGER ]) — wrapping them across three
+       lines shreds the shape, so buttons never break their text. */
+    white-space: nowrap;
+    flex: none;
 }
 .btn:hover { background: var(--bg-panel-hover); border-color: var(--border-hover); }
 .btn.primary { color: var(--acid); border-color: var(--border-accent); }
@@ -693,6 +697,7 @@ body::before {
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--muted);
+    white-space: nowrap;
 }
 .badge.connected { color: var(--acid); border-color: var(--border-accent); background: var(--bg-accent-panel); }
 .badge.scanning  { color: var(--sev-high); border-color: rgba(255, 149, 0, 0.60); background: var(--bg-high-panel); }
@@ -1090,6 +1095,10 @@ body::before {
 
 /* Tablet ── narrower sidebar, smaller panel padding */
 @media (max-width: 1280px) {
+    /* Topbar runs out of room around here; the version string is the first
+       thing nobody misses, and dropping it keeps the right-hand controls
+       (clock · CONNECTED · [ SWAGGER ]) on one line instead of clipping. */
+    .version { display: none; }
     .body-grid { grid-template-columns: 220px 1fr; }
     .body-grid.collapsed { grid-template-columns: 60px 1fr; }
     .main { padding: 20px; gap: 18px; }
@@ -1392,7 +1401,11 @@ input[type="checkbox"].projects-select:checked::after {
     gap: 8px;
     margin-left: 14px;
     padding: 5px 10px;
-    min-width: 210px;
+    /* Shrinks before anything else in the topbar — the search box losing a few
+       pixels beats the CONNECTED badge or [ SWAGGER ] getting squeezed. */
+    flex: 0 1 210px;
+    min-width: 0;
+    overflow: hidden;
     background: rgba(0, 0, 0, 0.28);
     border: 1px solid var(--border, rgba(0, 255, 255, 0.3));
     border-radius: 4px;
@@ -1404,7 +1417,15 @@ input[type="checkbox"].projects-select:checked::after {
 }
 .cmdk-trigger:hover { border-color: var(--border-hover, rgba(0, 255, 255, 0.5)); color: var(--cyan, #22d3ee); }
 .cmdk-trigger-ico { color: var(--cyan, #22d3ee); font-size: 13px; }
-.cmdk-trigger-text { flex: 1; text-align: left; opacity: 0.85; }
+.cmdk-trigger-text {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    opacity: 0.85;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 .cmdk-trigger-kbd {
     padding: 1px 6px;
     border: 1px solid var(--border, rgba(0, 255, 255, 0.3));
