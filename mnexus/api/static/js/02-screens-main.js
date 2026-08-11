@@ -1,5 +1,5 @@
 // ── auto-wired ES-module imports ──
-import { $, $$, chip, classifyRisk, getJSON, h, platformGlyph, sectionHeader } from "./01-core.js";
+import { $, $$, chip, classifyRisk, escapeHtml, getJSON, h, platformGlyph, sectionHeader } from "./01-core.js";
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  SCREEN 01 — Dashboard
@@ -89,7 +89,9 @@ function renderProjects(projects) {
           <div class="project-head">
             <div class="project-icon" style="background:${iconColor(p.package_name || p.id)}"></div>
             <div class="project-title">
-              <span class="pkg">${platformGlyph(p.platform)} ${p.package_name || p.name || p.id}</span>
+              <!-- CSS ellipsises long package names; the title attr keeps the
+                   full string one hover away. -->
+              <span class="pkg" title="${escapeHtml(p.package_name || p.name || p.id)}">${platformGlyph(p.platform)} ${p.package_name || p.name || p.id}</span>
               <span class="ver">${p.version_name || ""}${p.updated_at ? " · " + p.updated_at.slice(0, 10) : ""}</span>
             </div>
             ${chip(sev.toLowerCase())}
@@ -192,7 +194,7 @@ async function mount_projects() {
         return;
     }
     const header = `
-      <div class="table-hdr" style="grid-template-columns: 28px 40px 1fr 140px 90px 100px 120px 140px">
+      <div class="table-hdr" style="grid-template-columns: 28px 36px 1fr 90px 64px 150px 110px 84px">
         <span></span><span></span><span>PACKAGE</span><span>VERSION</span><span>RISK</span><span>SEVERITIES</span><span>UPDATED</span><span></span>
       </div>`;
     const rows = projects.map((p) => {
@@ -200,14 +202,14 @@ async function mount_projects() {
         const sevColor = classifyRisk(score);
         const pid = p.id;
         return `
-        <div class="table-row" style="grid-template-columns: 28px 40px 1fr 140px 90px 100px 120px 140px">
+        <div class="table-row" style="grid-template-columns: 28px 36px 1fr 90px 64px 150px 110px 84px">
           <label style="display:inline-flex;align-items:center" onclick="event.stopPropagation()">
             <input type="checkbox" class="projects-select" data-pid="${pid}" data-pkg="${(p.package_name || p.id)}" />
           </label>
           <a href="#/project/${encodeURIComponent(pid)}/overview" style="text-decoration:none">
             <div class="project-icon" style="background:${iconColor(p.package_name || p.id)};width:24px;height:24px"></div>
           </a>
-          <a href="#/project/${encodeURIComponent(pid)}/overview" class="t-mono" style="font-weight:700;text-decoration:none;color:inherit">${platformGlyph(p.platform)} ${p.package_name || p.name || pid}</a>
+          <a href="#/project/${encodeURIComponent(pid)}/overview" class="t-mono" title="${escapeHtml(p.package_name || p.name || pid)}" style="font-weight:700;text-decoration:none;color:inherit">${platformGlyph(p.platform)} ${p.package_name || p.name || pid}</a>
           <span class="t-muted">${p.version_name || "—"}</span>
           <span class="t-mono" style="color:var(--sev-${sevColor})">${score.toFixed(1)}</span>
           <span class="t-muted">${p.counts || "—"}</span>

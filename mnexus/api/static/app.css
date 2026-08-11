@@ -746,21 +746,47 @@ body::before {
     color: inherit;
 }
 .project-card:hover { border-color: var(--border-hover); background: var(--bg-panel-hover); }
-.project-head { display: flex; align-items: center; gap: 10px; }
-.project-icon { width: 32px; height: 32px; border-radius: var(--radius); border: 1px solid var(--border); }
-.project-title { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+/* Package names run long (com.mcdonalds.mobileapp.testproduction) — the title
+   column is the only part allowed to shrink, and it ellipsises instead of
+   shoving the severity chip out through the card's right edge. */
+.project-card { min-width: 0; overflow: hidden; }
+.project-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.project-icon {
+    width: 32px; height: 32px; flex: none;
+    border-radius: var(--radius); border: 1px solid var(--border);
+}
+.project-head .chip { flex: none; }
+.project-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.project-title .pkg,
+.project-title .ver { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .project-title .pkg { font-size: 13px; font-weight: 700; color: var(--cyan); }
 .project-title .ver { font-size: 10px; color: var(--muted); }
-.project-stats { display: flex; align-items: center; gap: 6px; }
-.project-score { font-size: 28px; font-weight: 700; }
-.project-score-suffix { font-size: 14px; color: var(--muted); }
-.project-counts { margin-left: auto; font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+.project-stats { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.project-score { font-size: 28px; font-weight: 700; flex: none; }
+.project-score-suffix { font-size: 14px; color: var(--muted); flex: none; }
+.project-counts {
+    margin-left: auto;
+    font-size: 11px; color: var(--muted); letter-spacing: 1px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* ─── tables ─── */
 .table-hdr, .table-row {
     display: grid; gap: 12px;
     padding: 10px 16px;
     align-items: center;
+}
+/* Grid cells default to min-width:auto, so a long mono package name refuses to
+   shrink, blows the 1fr column past the panel edge and clips the last column
+   (the severity chip). min-width:0 lets the fraction column actually give, and
+   text cells ellipsise on one line instead of wrapping out of their row. */
+.table-hdr > *, .table-row > * { min-width: 0; }
+.table-row > .t-mono,
+.table-row > .t-muted,
+.table-row > span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .table-hdr {
     background: var(--bg-accent-panel);
