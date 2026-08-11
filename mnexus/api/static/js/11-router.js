@@ -17,6 +17,7 @@ import { mount_project_components, mount_project_native, mount_project_secrets, 
 import { mount_pipeline, mount_project_api_map, mount_project_attack_tree, mount_project_dataflow, mount_project_owasp, mount_project_ssl_map, mount_project_surface, mount_report_diff, mount_terminal, view_pipeline, view_project_api_map, view_project_attack_tree, view_project_dataflow, view_project_owasp, view_project_ssl_map, view_project_surface, view_report_diff, view_states, view_terminal, view_toasts } from "./10b-project-analysis.js";
 import { tabGroupKey, tabsRestoreScroll, tabsSaveScroll, tabsTrack } from "./12-shell-ui.js";
 import { mount_mcp, view_mcp } from "./14-mcp-panel.js";
+import { mount_project_attack, view_project_attack } from "./15-attack-panel.js";
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Route map + router
@@ -70,6 +71,7 @@ const ROUTES = [
     { path: "project/:id/static/native",        view: view_project_native,     mount: mount_project_native },
     { path: "project/:id/dynamic",              view: view_project_dynamic,   mount: mount_project_dynamic },
     { path: "project/:id/runtime",              view: view_project_runtime,   mount: mount_project_runtime },
+    { path: "project/:id/attack",               view: view_project_attack,    mount: mount_project_attack },
     { path: "project/:id/manifest-diff",        view: view_project_manifest_diff, mount: mount_project_manifest_diff },
     { path: "project/:id/findings-diff",        view: view_project_findings_diff, mount: mount_project_findings_diff },
     { path: "project/:id/tracer",               view: view_project_tracer,    mount: mount_project_tracer },

@@ -116,7 +116,7 @@ function view_ios_decrypt() {
             <span class="spacer"></span>
             <button class="btn primary" id="ios-dec-go" style="white-space:nowrap">[ ▶ DECRYPT ]</button>
           </div>
-          <div id="ios-dec-out" class="muted small" style="display:none;padding:8px 10px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap;font-family:'Courier Prime',monospace;max-height:220px;overflow:auto"></div>
+          <div id="ios-dec-out" class="muted small" style="display:none;padding:8px 10px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px;white-space:pre-wrap;font-family:'Courier Prime',monospace;max-height:220px;overflow:auto"></div>
         </div>
       </section>
 
@@ -124,9 +124,9 @@ function view_ios_decrypt() {
         <div class="panel-head"><span>// HOW TO FIND THE BUNDLE ID</span></div>
         <div class="panel-body col" style="gap:6px;color:var(--muted)">
           <div class="small">On the connected JB device, over SSH:</div>
-          <div class="t-mono small" style="padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px">ssh root@iphone "ls /var/containers/Bundle/Application/*/*.app/Info.plist | xargs grep -l -A1 'CFBundleIdentifier'"</div>
+          <div class="t-mono small" style="padding:6px 8px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px">ssh root@iphone "ls /var/containers/Bundle/Application/*/*.app/Info.plist | xargs grep -l -A1 'CFBundleIdentifier'"</div>
           <div class="small">Or pull the apps list from frida directly:</div>
-          <div class="t-mono small" style="padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px">frida-ps -Uai</div>
+          <div class="t-mono small" style="padding:6px 8px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px">frida-ps -Uai</div>
         </div>
       </section>
     </div>`;
@@ -247,6 +247,7 @@ function projectTabs(id, active) {
         ["dynamic", "DYNAMIC"],
         ["runtime", "RUNTIME"],
         ["network", "NETWORK"],
+        ["attack", "ATTACK"],
         ["report", "REPORT"],
     ];
     return `
@@ -409,7 +410,7 @@ function view_project_dynamic(ctx) {
             <input id="dyn-mem-max" class="input t-mono" type="number" min="1" max="2000" value="100" style="width:80px">
             <button class="btn primary" id="dyn-mem-scan-go" style="white-space:nowrap">[ SCAN ]</button>
           </div>
-          <div id="dyn-mem-results" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;max-height:200px;overflow:auto"></div>
+          <div id="dyn-mem-results" class="muted small" style="display:none;padding:6px 8px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px;max-height:200px;overflow:auto"></div>
 
           <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
             <span class="muted small uppercase" style="letter-spacing:2px;width:90px">peek:</span>
@@ -417,7 +418,7 @@ function view_project_dynamic(ctx) {
             <input id="dyn-mem-size" class="input t-mono" type="number" min="1" max="4096" value="64" style="width:80px">
             <button class="btn" id="dyn-mem-read-go" style="white-space:nowrap">[ READ ]</button>
           </div>
-          <div id="dyn-mem-hex" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;font-family:'Courier Prime',monospace;white-space:pre-wrap;word-break:break-all"></div>
+          <div id="dyn-mem-hex" class="muted small" style="display:none;padding:6px 8px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px;font-family:'Courier Prime',monospace;white-space:pre-wrap;word-break:break-all"></div>
 
           <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
             <span class="muted small uppercase" style="letter-spacing:2px;width:90px;color:var(--sev-high)">write:</span>
@@ -425,7 +426,7 @@ function view_project_dynamic(ctx) {
             <input id="dyn-mem-write-hex" class="input t-mono" placeholder="65 79 4a 68 …" style="flex:2;min-width:200px">
             <button class="btn" id="dyn-mem-write-go" style="white-space:nowrap;color:var(--sev-high);border-color:var(--sev-high)">[ OVERWRITE ]</button>
           </div>
-          <div id="dyn-mem-write-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap"></div>
+          <div id="dyn-mem-write-out" class="muted small" style="display:none;padding:6px 8px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px;white-space:pre-wrap"></div>
 
           <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;border-top:1px dashed var(--border);padding-top:8px">
             <span class="muted small uppercase" style="letter-spacing:2px;width:90px">trace:</span>
