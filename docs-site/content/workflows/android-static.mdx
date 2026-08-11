@@ -119,7 +119,7 @@ curl http://127.0.0.1:8765/v1/projects/PRJ-355151DF/manifest?fmt=json # applicat
 
 **Web UI** — Components tab → `[ VIEW RAW MANIFEST ]` button → side-sheet with copy + download.
 
-Caching: the first request runs `apktool d -f` (or the built-in AXML fallback when apktool isn't on PATH) and stores the result at `<workspace>/<project_id>/apktool-manifest/AndroidManifest.xml`. Subsequent requests stream the cached file in <10ms. Re-ingesting the APK produces a new project id (content-addressed), so the cache is implicitly versioned.
+Caching: the first request runs `apktool d -f` (or the built-in AXML fallback when apktool isn't on PATH) and stores the result at `<workspace>/<project_id>/apktool-manifest/AndroidManifest.xml`. Subsequent requests stream the cached file in `<10ms`. Re-ingesting the APK produces a new project id (content-addressed), so the cache is implicitly versioned.
 
 ## Re-scanning
 
