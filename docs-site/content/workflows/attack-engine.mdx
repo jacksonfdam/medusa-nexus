@@ -1,0 +1,89 @@
+---
+title: Proactive attack engine
+---
+
+# Proactive attack engine — from "we found it" to "here's the trigger"
+
+The static engines tell you *what's* wrong. The attack engine tells you *how
+you'd prove it*: for every angle it recognises it emits a concrete PoC — a
+Frida snippet, an `adb` command, a `curl` line — and a verdict that separates
+what's demonstrable from what actually reproduced on a device.
+
+The whole thing is **two moves**:
+
+1. **Plan** — offline, deterministic, no device, no network. Maps the surface
+   and findings to PoCs, every one marked `PROVABLE`. Always safe to run.
+2. **Execute** — opt-in. Fires the device-executable subset (the `adb` PoCs)
+   against a bridged device and upgrades each to `CONFIRMED` or `DISPROVEN`.
+   **Dry-run by default** — you have to explicitly ask it to fire.
+
+Both feed the report.
+
+## Verdicts
+
+| verdict | meaning |
+| ------- | ------- |
+| `PROVABLE` | A working PoC exists offline (or the static evidence is conclusive). |
+| `CONFIRMED` | The PoC was fired against a live device and the expected outcome was observed. |
+| `DISPROVEN` | The PoC was fired and did **not** reproduce — the mitigation held. |
+| `MANUAL` | No automated template; a human has to drive the repro. A CRITICAL/HIGH finding with no template lands here so the report never quietly drops a blocker. |
+
+## What it maps
+
+| source | technique | PoC |
+| ------ | --------- | --- |
+| Unprotected exported activity / service / receiver | `exported-*` | `adb shell am start / startservice / broadcast -n <pkg>/<comp>` |
+| Exported provider | `exported-provider` | MANUAL (needs a `content://` path enumerated by hand) |
+| Deep link | `deeplink` | `adb shell am start -W -a VIEW -d <uri>` (+ the drive-by HTML endpoint) |
+| SSL pinning / root detection | `ssl-pin-bypass`, `root-bypass` | Frida script (reuses the hook synthesiser) |
+| Crypto ops, AUTH findings | `crypto-logger`, `method-tracer` | Frida script |
+| Firebase-shaped finding | `firebase-open-db` | `curl <rtdb>/.json` |
+
+Frida and `curl` PoCs stay `PROVABLE` even after Execute — Frida belongs to the
+live [`/dynamic`](/workflows/dynamic) session, and auto-firing a request at
+someone's backend is a human decision, not a scan side effect. Only the `adb`
+subset is auto-fired.
+
+## Drive it
+
+**REPL:**
+
+```bash
+/use PRJ-355151DF
+/attack               # build the offline plan (default)
+/attack show          # print the stored plan
+/attack run           # DRY-RUN: what would fire, nothing triggered
+/attack run --go      # actually fire the adb PoCs against the device
+```
+
+**HTTP:**
+
+```bash
+curl -X POST localhost:8765/v1/projects/PRJ-355151DF/attack/plan
+curl -X POST 'localhost:8765/v1/projects/PRJ-355151DF/attack/execute'            # dry-run
+curl -X POST 'localhost:8765/v1/projects/PRJ-355151DF/attack/execute?execute=true'  # fire
+curl localhost:8765/v1/projects/PRJ-355151DF/attack                              # stored plan
+```
+
+**Web UI:** the **ATTACK** tab on a project — `BUILD PLAN`, `DRY-RUN`, and a
+confirm-gated `EXECUTE ⚠`.
+
+**MCP:** `plan_attack`, `execute_attack` (dry-run unless `execute=true`), and
+`get_attack_plan` — so an assistant can plan, read the PoCs, and (on opt-in)
+confirm them. Gate them in the [MCP control plane](/integrations/mcp) like any
+other tool.
+
+## In the report
+
+Every report (`markdown` + `json`) grows an **Exploitation Plan** section after
+the Mitigation Playbook: verdict, PoC in a fenced block, captured device output
+when it was fired, and the mitigation. An empty plan renders an honest one-liner
+— it never fabricates exploitation it didn't do.
+
+## Safety
+
+Execute is active exploitation against a **connected device you control** —
+keep it to authorised targets on your own bench or an engagement you have
+scope for. The dry-run default, the confirm dialog in the UI, and the
+`execute=true` flag are all there so nothing fires by accident. Frida/`curl`
+PoCs never auto-fire.

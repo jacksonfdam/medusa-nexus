@@ -26,7 +26,7 @@
 | Read | When |
 | ---- | ---- |
 | [Getting started](docs-site/content/getting-started/index.mdx) — install, requirements, env vars, first scan, 60-second tour | First-day setup. |
-| [Workflows](docs-site/content/workflows/index.mdx) — Android static, iOS, dynamic Frida, Memory Inspector, PlayIntel, diff, **chain detection**, **library attribution**, pipelines, **CI/CD**, reporting | "I want to do X" — analyst stories. |
+| [Workflows](docs-site/content/workflows/index.mdx) — Android static, iOS, dynamic Frida, Memory Inspector, PlayIntel, diff, **chain detection**, **proactive attack engine**, **library attribution**, pipelines, **CI/CD**, reporting | "I want to do X" — analyst stories. |
 | [Integrations](docs-site/content/integrations/index.mdx) — Burp, Caido, Moxy, super-tart-vphone, MCP | Per-tool wiring + auth + pitfalls. |
 | [Reference](docs-site/content/reference/index.mdx) — architecture, env vars, CLI, REPL, HTTP API (136+ endpoints) | The matrix when you need a flag or a route. |
 
@@ -63,6 +63,19 @@ Walkthrough — every link, every detector, how to add a new chain shape — in 
 "Hardcoded Google API key" is correct but useless on its own — the dev needs to know *whose code* is holding the key. After every static scan MedusaNexus walks the workspace, traces each secret-shaped piece of evidence back to the file that hosts it, and tags the finding with the owner: **first-party** (their code, their fix), a **named SDK** like `Google Places SDK` / `Firebase` / `Amplitude` (~50 vendors catalogued), or **third-party (unknown)** (needs a human eye). The chip shows in the Findings table and the per-finding detail view, and `/v1/projects/{pid}/find` returns the same attribution on every hit.
 
 Walkthrough — registry, confidence model, how to add a vendor — in [`docs-site/content/workflows/library-attribution.mdx`](docs-site/content/workflows/library-attribution.mdx).
+
+### Proactive attack engine in one block
+
+Findings say *what's* wrong; the attack engine says *how you'd prove it*. It maps the surface to concrete PoCs — `adb am start` for unprotected exported components, `am start -a VIEW` for deep links, a Frida bypass for SSL pinning / root detection, a `curl` read for an open Firebase RTDB — each marked `PROVABLE`. That's the **offline plan**, always safe. On explicit opt-in it **executes** the device-runnable subset (the `adb` PoCs) against a bridged device and upgrades each to `CONFIRMED` or `DISPROVEN`; Frida + curl PoCs stay `PROVABLE` (never auto-fired). Everything lands in the report's **Exploitation Plan** section.
+
+```bash
+mnexus> /use PRJ-355151DF
+mnexus> /attack            # build the offline plan
+mnexus> /attack run        # dry-run: what would fire
+mnexus> /attack run --go   # fire the adb subset at the connected device
+```
+
+Dry-run by default, confirm-gated in the web UI (the **ATTACK** project tab). Walkthrough in [`docs-site/content/workflows/attack-engine.mdx`](docs-site/content/workflows/attack-engine.mdx).
 
 ### MCP — drive a full inspection from your AI assistant
 

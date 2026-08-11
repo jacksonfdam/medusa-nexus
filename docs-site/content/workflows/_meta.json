@@ -7,6 +7,7 @@
   "playintel": "PlayIntel",
   "diff": "Diff reports",
   "chain-detection": "Chain detection",
+  "attack-engine": "Proactive attack engine",
   "library-attribution": "Library attribution",
   "pipelines": "Pipelines",
   "ci-cd": "CI / CD",

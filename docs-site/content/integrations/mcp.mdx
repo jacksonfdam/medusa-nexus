@@ -60,6 +60,9 @@ The assistant calls `list_findings` → `get_finding` → reads the
 | `scan_apk` | Upload an APK + run the full static pipeline (apktool + jadx + ghidra + mobsf + deeplink_audit + webview_audit + chain_correlator). Returns the new project_id. Blocking 30–60s. | `POST /v1/apks/upload` (multipart) |
 | `run_pipeline` | Execute a named pipeline against an existing project (stacks engines). | `POST /v1/pipelines/{name}/run` |
 | `analyze_native_lib` | Per-`.so` analyser — JNI exports + hardcoded URLs + crypto routines. | `GET /v1/projects/{id}/native/analyze?lib=…` |
+| `plan_attack` | Build the offline [attack plan](/workflows/attack-engine) — PoCs + PROVABLE verdicts. Nothing fired. | `POST /v1/projects/{id}/attack/plan` |
+| `execute_attack` | Fire the adb PoC subset (dry-run unless `execute=true`) → CONFIRMED/DISPROVEN. | `POST /v1/projects/{id}/attack/execute` |
+| `get_attack_plan` | Read the stored attack plan + verdicts. | `GET /v1/projects/{id}/attack` |
 
 ### Code-navigation tools — read the decompiled source, not just the report
 
