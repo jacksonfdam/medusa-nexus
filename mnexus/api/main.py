@@ -134,6 +134,100 @@ async def doctor() -> list[dict[str, Any]]:
     return await nexus.doctor()
 
 
+# ─── MCP control plane ──────────────────────────────────────────────────────
+# The settings panel drives which tools the stdio MCP driver may expose, shows
+# per-agent setup snippets, and reports whether a driver is currently talking
+# to us (heartbeat). See mnexus/mcp_config.py for the persistence + catalogue.
+
+
+def _mcp_status() -> dict[str, Any]:
+    import time
+    last = getattr(app.state, "mcp_last_seen", None)
+    client = getattr(app.state, "mcp_client", None)
+    ago = (time.time() - last) if isinstance(last, (int, float)) else None
+    return {
+        "api_reachable": True,          # if you can read this, the API is up
+        "last_seen_ts": last,
+        "last_seen_ago_s": round(ago, 1) if ago is not None else None,
+        "client": client,
+        # A driver seen in the last 30s is "connected" for the panel's dot.
+        "connected": ago is not None and ago <= 30,
+    }
+
+
+@app.get("/v1/mcp/config")
+async def mcp_get_config() -> dict[str, Any]:
+    """Current allowlist state + full tool catalogue + live driver status."""
+    from mnexus import mcp_config, mcp_server
+
+    nexus: MedusaNexus = app.state.nexus
+    cfg = mcp_config.load_config(nexus.config.workspace)
+    return {
+        "enabled": cfg.enabled,
+        "allowed_tools": cfg.allowed_tools,
+        "tools": mcp_config.catalogue(mcp_server.TOOLS, cfg),
+        "status": _mcp_status(),
+    }
+
+
+@app.put("/v1/mcp/config")
+async def mcp_put_config(body: dict[str, Any]) -> dict[str, Any]:
+    """Update the master switch and/or the tool allowlist.
+
+    Body: ``{"enabled": bool?, "allowed_tools": [str]|null?}``. Unknown tool
+    names in the allowlist are dropped (a tool that no longer ships can't be
+    allowed). ``allowed_tools: null`` restores the open default.
+    """
+    from mnexus import mcp_config, mcp_server
+
+    nexus: MedusaNexus = app.state.nexus
+    cfg = mcp_config.load_config(nexus.config.workspace)
+
+    if "enabled" in body:
+        cfg.enabled = bool(body["enabled"])
+    if "allowed_tools" in body:
+        allowed = body["allowed_tools"]
+        if allowed is None:
+            cfg.allowed_tools = None
+        elif isinstance(allowed, list):
+            known = {t["name"] for t in mcp_server.TOOLS}
+            cfg.allowed_tools = [n for n in allowed if n in known]
+        else:
+            raise HTTPException(400, "allowed_tools must be a list or null")
+
+    mcp_config.save_config(nexus.config.workspace, cfg)
+    return {
+        "enabled": cfg.enabled,
+        "allowed_tools": cfg.allowed_tools,
+        "tools": mcp_config.catalogue(mcp_server.TOOLS, cfg),
+        "status": _mcp_status(),
+    }
+
+
+@app.post("/v1/mcp/heartbeat")
+async def mcp_heartbeat(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The driver pings this on each dispatch so the panel can show a live
+    connection dot. Also the driver's way of asking 'am I still allowed?'."""
+    import time
+    from mnexus import mcp_config
+
+    nexus: MedusaNexus = app.state.nexus
+    app.state.mcp_last_seen = time.time()
+    app.state.mcp_client = (body or {}).get("client") if isinstance(body, dict) else None
+    cfg = mcp_config.load_config(nexus.config.workspace)
+    return {"ok": True, "enabled": cfg.enabled, "allowed_tools": cfg.allowed_tools}
+
+
+@app.get("/v1/mcp/setup/{agent}")
+async def mcp_setup(agent: str, request: Request) -> dict[str, Any]:
+    """Config snippet the user pastes into their MCP client. The API base in
+    the snippet points back at whatever host served this request."""
+    from mnexus import mcp_config
+
+    api_base = str(request.base_url).rstrip("/")
+    return mcp_config.setup_snippet(agent, api_base)
+
+
 # ─── projects ─────────────────────────────────────────────────────────────
 
 @app.get("/v1/projects")
