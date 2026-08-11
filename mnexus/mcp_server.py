@@ -166,6 +166,37 @@ def _api_upload(path: str, file_path: str, *, fields: dict | None = None, timeou
         return 0, f"Nexus API not reachable at {_api_base()}: {exc.reason}"
 
 
+# The MCP client's name, learned at `initialize`, echoed back on every
+# heartbeat so the settings panel can show *who* is connected.
+_CLIENT_NAME: str | None = None
+
+
+def _allowed_tool_names() -> set[str] | None:
+    """Ask the API which tools policy allows right now.
+
+    Returns a set of allowed names, or ``None`` meaning "all allowed". Any
+    failure to reach the control plane fails **open** (returns None) — a
+    flaky config endpoint must never silently blind a working assistant.
+    """
+    status, body = _api("GET", "/v1/mcp/config", timeout=10.0)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    if not body.get("enabled", True):
+        return set()  # master switch off → nothing dispatchable
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return None
+    return {t["name"] for t in tools if isinstance(t, dict) and t.get("enabled")}
+
+
+def _heartbeat() -> None:
+    """Best-effort liveness ping so the panel shows a connection dot."""
+    import contextlib
+    # A heartbeat must never break a real call — swallow every failure.
+    with contextlib.suppress(Exception):
+        _api("POST", "/v1/mcp/heartbeat", body={"client": _CLIENT_NAME}, timeout=5.0)
+
+
 # ─── tool catalogue ────────────────────────────────────────────────────
 
 
@@ -617,6 +648,11 @@ def dispatch(message: dict[str, Any]) -> dict[str, Any] | None:
     params = message.get("params") or {}
 
     if method == "initialize":
+        global _CLIENT_NAME
+        client_info = params.get("clientInfo") or {}
+        if isinstance(client_info, dict) and client_info.get("name"):
+            _CLIENT_NAME = str(client_info["name"])
+        _heartbeat()
         return {
             "jsonrpc": "2.0",
             "id": msg_id,
@@ -632,7 +668,11 @@ def dispatch(message: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": TOOLS}}
+        # Honour the control-plane allowlist so the assistant only ever sees
+        # the tools policy permits.
+        allowed = _allowed_tool_names()
+        tools = TOOLS if allowed is None else [t for t in TOOLS if t["name"] in allowed]
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}}
 
     if method == "tools/call":
         tool_name = params.get("name", "")
@@ -643,6 +683,19 @@ def dispatch(message: dict[str, Any]) -> dict[str, Any] | None:
                 "jsonrpc": "2.0", "id": msg_id,
                 "error": {"code": -32602, "message": f"unknown tool: {tool_name}"},
             }
+        # Policy gate — a tool the panel disabled is refused even if the
+        # client still has it cached from an earlier tools/list.
+        allowed = _allowed_tool_names()
+        if allowed is not None and tool_name not in allowed:
+            return {
+                "jsonrpc": "2.0", "id": msg_id,
+                "error": {
+                    "code": -32601,
+                    "message": f"tool '{tool_name}' is disabled by MedusaNexus MCP policy "
+                               f"(enable it in Settings → MCP)",
+                },
+            }
+        _heartbeat()
         try:
             result = handler(tool_args)
         except KeyError as exc:

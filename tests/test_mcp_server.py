@@ -174,6 +174,60 @@ def test_findings_diff_without_against_passes_no_querystring(api_recorder) -> No
     assert calls[-1]["path"] == "/v1/projects/PRJ-1/findings-diff"
 
 
+# ─── control-plane enforcement ──────────────────────────────────────────
+
+
+def test_tools_list_filters_by_allowlist(api_recorder, monkeypatch) -> None:
+    monkeypatch.setattr(mcp_server, "_allowed_tool_names", lambda: {"doctor", "list_projects"})
+    res = mcp_server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in res["result"]["tools"]}
+    assert names == {"doctor", "list_projects"}
+
+
+def test_tools_list_open_when_policy_unreachable(api_recorder, monkeypatch) -> None:
+    # None = fail open → every tool listed.
+    monkeypatch.setattr(mcp_server, "_allowed_tool_names", lambda: None)
+    res = mcp_server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert len(res["result"]["tools"]) == len(mcp_server.TOOLS)
+
+
+def test_disabled_tool_is_refused(api_recorder, monkeypatch) -> None:
+    monkeypatch.setattr(mcp_server, "_allowed_tool_names", lambda: {"doctor"})
+    res = _call("list_projects")
+    assert res["error"]["code"] == -32601
+    assert "disabled by MedusaNexus" in res["error"]["message"]
+
+
+def test_allowed_tool_dispatches(api_recorder, monkeypatch) -> None:
+    calls, _ = api_recorder
+    monkeypatch.setattr(mcp_server, "_allowed_tool_names", lambda: {"list_projects"})
+    res = _call("list_projects")
+    assert "error" not in res
+    assert any(c["path"] == "/v1/projects" for c in calls)
+
+
+def test_master_switch_off_refuses_all(api_recorder, monkeypatch) -> None:
+    monkeypatch.setattr(mcp_server, "_allowed_tool_names", lambda: set())
+    assert _call("doctor")["error"]["code"] == -32601
+
+
+def test_tools_call_sends_heartbeat(api_recorder, monkeypatch) -> None:
+    calls, _ = api_recorder
+    monkeypatch.setattr(mcp_server, "_allowed_tool_names", lambda: None)
+    _call("list_projects")
+    assert any(c["method"] == "POST" and c["path"] == "/v1/mcp/heartbeat" for c in calls)
+
+
+def test_initialize_records_client_and_heartbeats(api_recorder) -> None:
+    calls, _ = api_recorder
+    mcp_server.dispatch({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"clientInfo": {"name": "cursor"}},
+    })
+    assert mcp_server._CLIENT_NAME == "cursor"
+    assert any(c["path"] == "/v1/mcp/heartbeat" for c in calls)
+
+
 # ─── code navigation tools ─────────────────────────────────────────────
 
 
