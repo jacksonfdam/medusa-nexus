@@ -104,7 +104,7 @@ function view_project_runtime(ctx) {
           <button class="btn primary" id="rt-load" style="padding:2px 10px;display:none">[ ▶ LOAD INTO DYNAMIC SESSION ]</button>
         </div>
         <div class="panel-body" style="padding:0">
-          <pre id="rt-script" style="margin:0;padding:12px;background:#050505;color:var(--cyan);font-family:inherit;font-size:11px;max-height:340px;overflow:auto;white-space:pre">// generated Frida script will appear here</pre>
+          <pre id="rt-script" style="margin:0;padding:12px;background:var(--bg-code);color:var(--cyan);font-family:inherit;font-size:11px;max-height:340px;overflow:auto;white-space:pre">// generated Frida script will appear here</pre>
         </div>
       </section>
 
@@ -130,14 +130,14 @@ function view_project_runtime(ctx) {
             <button class="btn primary" id="rt-mango-dl-fire" style="white-space:nowrap" title="adb shell am start -a VIEW -d <uri>">[ ▶ FIRE ON DEVICE ]</button>
             <button class="btn" id="rt-mango-dl-poc" style="white-space:nowrap" title="download a one-click HTML page that fires this deeplink">[ HTML POC ]</button>
           </div>
-          <div class="muted small" id="rt-mango-dl-out" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap;font-family:inherit"></div>
+          <div class="muted small" id="rt-mango-dl-out" style="display:none;padding:6px 8px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px;white-space:pre-wrap;font-family:inherit"></div>
 
           <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
             <span class="muted small uppercase" style="letter-spacing:2px;width:110px">decode flag:</span>
             <input id="rt-mango-flag" class="input t-mono" placeholder="0x10000004 · 268435460 · 0b1010" style="flex:1;min-width:200px">
             <button class="btn primary" id="rt-mango-flag-go" style="white-space:nowrap">[ DECODE ]</button>
           </div>
-          <div id="rt-mango-flag-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px"></div>
+          <div id="rt-mango-flag-out" class="muted small" style="display:none;padding:6px 8px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px"></div>
 
           <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
             <span class="muted small uppercase" style="letter-spacing:2px;width:110px">version diff:</span>
@@ -164,7 +164,7 @@ function view_project_runtime(ctx) {
             </div>
             <button class="btn primary" id="rt-mango-patch-go" style="white-space:nowrap" title="apktool + apksigner under the hood; produces a re-signed APK in the workspace">[ ▶ PATCH APK ]</button>
           </div>
-          <div id="rt-mango-patch-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap"></div>
+          <div id="rt-mango-patch-out" class="muted small" style="display:none;padding:6px 8px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px;white-space:pre-wrap"></div>
 
           <!-- IPA patch panel — only mounted for iOS projects (toggled by mount fn) -->
           <div id="rt-mango-ipa-block" style="display:none">
@@ -194,7 +194,7 @@ function view_project_runtime(ctx) {
               </div>
               <button class="btn primary" id="rt-ipa-patch-go" style="white-space:nowrap;border-color:var(--magenta)" title="ldid -S preferred; codesign --force --sign - as fallback">[ ▶ PATCH IPA ]</button>
             </div>
-            <div id="rt-ipa-patch-out" class="muted small" style="display:none;padding:6px 8px;background:#050505;border:1px solid var(--border);border-radius:2px;white-space:pre-wrap;font-family:'Courier Prime',monospace;max-height:200px;overflow:auto"></div>
+            <div id="rt-ipa-patch-out" class="muted small" style="display:none;padding:6px 8px;background:var(--bg-code);border:1px solid var(--border);border-radius:2px;white-space:pre-wrap;font-family:'Courier Prime',monospace;max-height:200px;overflow:auto"></div>
           </div>
         </div>
       </section>

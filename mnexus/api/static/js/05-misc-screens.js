@@ -44,7 +44,7 @@ function view_report() {
         </section>
         <section class="panel grow">
           <div class="panel-head" id="report-preview-head">// PREVIEW</div>
-          <div class="panel-body col" style="gap:12px;background:#050505" id="report-preview">
+          <div class="panel-body col" style="gap:12px;background:var(--bg-code)" id="report-preview">
             <div class="empty-state">
               <span class="muted small uppercase">no project picked yet</span>
               <div class="muted small" style="margin-top:6px">scan an APK at <a href="#/scan">/#/scan</a>, then come back to render its real Mitigation Playbook here.</div>

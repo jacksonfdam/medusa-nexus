@@ -214,7 +214,7 @@ function view_device_screen() {
       </section>
       <section class="panel">
         <div class="panel-head">// LIVE FRAME</div>
-        <div class="panel-body" id="cap-body" style="display:flex;align-items:center;justify-content:center;min-height:380px;background:#050505">
+        <div class="panel-body" id="cap-body" style="display:flex;align-items:center;justify-content:center;min-height:380px;background:var(--bg-code)">
           <div class="muted">click [ CAPTURE ] to grab the device screen</div>
         </div>
       </section>
