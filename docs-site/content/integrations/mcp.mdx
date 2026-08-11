@@ -111,6 +111,42 @@ Claude ▸ calls scan_apk(apk_path="~/Downloads/target.apk")        → PRJ-A5B7
 This is the [chain-detection workflow](/workflows/chain-detection)
 driven entirely by the assistant — you don't touch a CLI.
 
+## Control plane — enable/disable + tool allowlist
+
+The MCP driver is a stdio process the *agent* spawns, so Nexus can't stop a
+client from launching it — but it **can** decide what that process is allowed
+to expose. The **MCP panel** (`#/mcp` in the web UI, or `/mcp` in the REPL) is
+that control plane:
+
+- **Master switch** — off = the driver exposes nothing and refuses every call.
+- **Per-tool allowlist** — toggle any tool; grouped read / nav / write. `ALLOW
+  ALL` restores the open default, `BLOCK ALL` locks everything.
+- **Live status** — a connection dot that lights when a driver has pinged in
+  the last 30s, plus which client (`clientInfo.name`) is talking.
+- **Setup snippets** — paste-ready config for Claude Desktop / Cursor / Zed
+  with the API base pre-filled, one click to copy.
+
+Enforcement lives in the driver: `tools/list` returns only permitted tools, and
+`tools/call` refuses a disabled tool even if the client cached it —
+`-32601 tool '<name>' is disabled by MedusaNexus MCP policy`. State persists to
+`<workspace>/mcp_config.json`; an absent or corrupt file **fails open** (every
+tool enabled), so the control plane can never silently brick a working
+assistant.
+
+From the REPL:
+
+```bash
+/mcp                       # status + connection dot + allowed count
+/mcp tools                 # full catalogue with enabled state
+/mcp disable               # master switch off
+/mcp block scan_apk run_pipeline   # gate the write tools
+/mcp allow all             # back to open
+/mcp setup cursor          # print the client config
+```
+
+Endpoints behind it: `GET/PUT /v1/mcp/config`, `POST /v1/mcp/heartbeat`,
+`GET /v1/mcp/setup/{agent}`.
+
 ## Claude Desktop wiring
 
 Open `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -203,3 +239,7 @@ Three reasons:
 * The server is stdio-only. No SSE transport, no HTTP transport. Two
   reasons: every MCP client we care about supports stdio, and stdio
   has no auth model to design.
+* The allowlist is the closest thing to auth: since stdio has no
+  credentials, gating *which tools* a driver may call is how you keep a
+  curious assistant away from the write set. Toggle it in the MCP panel
+  (`#/mcp`) or with `/mcp block …`.

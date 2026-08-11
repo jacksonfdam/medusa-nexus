@@ -66,7 +66,7 @@ Walkthrough — registry, confidence model, how to add a vendor — in [`docs-si
 
 ### MCP — drive a full inspection from your AI assistant
 
-`mnexus mcp-serve` now ships **read + write + code-navigation** tools. The write set (`scan_apk`, `run_pipeline`, `analyze_native_lib`) lets Claude Desktop / Cursor / Zed run a full APK ingest → pipeline → finding walkthrough from a single prompt; the code-navigation set (`decompile_project`, `get_class_source`, `search_classes`, `search_source`, `get_manifest`) lets the assistant read the decompiled source itself — the jadx-mcp-server workflow without a running jadx GUI. Wire-up + tool reference + agentic loop example in [`docs-site/content/integrations/mcp.mdx`](docs-site/content/integrations/mcp.mdx).
+`mnexus mcp-serve` now ships **read + write + code-navigation** tools. The write set (`scan_apk`, `run_pipeline`, `analyze_native_lib`) lets Claude Desktop / Cursor / Zed run a full APK ingest → pipeline → finding walkthrough from a single prompt; the code-navigation set (`decompile_project`, `get_class_source`, `search_classes`, `search_source`, `get_manifest`) lets the assistant read the decompiled source itself — the jadx-mcp-server workflow without a running jadx GUI. A **control-plane panel** (`#/mcp`, or `/mcp` in the REPL) governs which tools the driver may expose, shows a live connection dot, and hands you paste-ready setup for Claude Desktop / Cursor / Zed. Wire-up + tool reference + agentic loop example in [`docs-site/content/integrations/mcp.mdx`](docs-site/content/integrations/mcp.mdx).
 
 ## Requirements
 

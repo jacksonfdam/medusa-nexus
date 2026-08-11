@@ -3052,9 +3052,12 @@ def dev_cmd(ctx: click.Context, host: str, port: int) -> None:
 def mcp_serve_cmd(api_base: str) -> None:
     """Speak JSON-RPC 2.0 over stdio so an AI assistant can drive Nexus.
 
-    Tools exposed: list_projects · get_project · list_findings · get_finding ·
-    list_recipes · decode_android_flag · manifest_diff · findings_diff ·
-    firebase_probe · doctor. See docs-site/content/integrations/mcp.mdx for the full wire-up.
+    Tools span read (list_projects · get_finding · doctor · …), code
+    navigation (decompile_project · get_class_source · search_classes ·
+    search_source · get_manifest), and write (scan_apk · run_pipeline ·
+    analyze_native_lib). Which ones are actually exposed is governed by the
+    MCP control plane — toggle tools in the web panel (#/mcp) or the REPL
+    (/mcp). See docs-site/content/integrations/mcp.mdx for the full wire-up.
     """
     if api_base:
         os.environ["MNEXUS_API_BASE"] = api_base
