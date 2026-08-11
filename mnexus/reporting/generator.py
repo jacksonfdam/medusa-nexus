@@ -178,10 +178,58 @@ class ReportGenerator:
             lines.append("")
             lines.append(entry.remediation)
             lines.append("")
+        lines.extend(self._exploitation_lines())
         rendered = "\n".join(lines)
         with open(output_path, "w", encoding="utf-8") as fh:
             fh.write(rendered)
         return output_path
+
+    def _exploitation_lines(self) -> list[str]:
+        """Render the proactive attack plan (project.exploit_attempts) as md.
+
+        PROVABLE = a PoC exists offline; CONFIRMED = it was fired against a
+        live device and reproduced; MANUAL = needs a human. Empty plan gets an
+        honest one-liner rather than a fabricated section.
+        """
+        attempts = list(self.project.exploit_attempts)
+        lines: list[str] = ["", "## Exploitation Plan", ""]
+        if not attempts:
+            lines.append("_No attack plan generated. Run `POST /v1/projects/{id}/attack/plan`._")
+            lines.append("")
+            return lines
+
+        counts: dict[str, int] = {}
+        for a in attempts:
+            counts[a.verdict.value] = counts.get(a.verdict.value, 0) + 1
+        summary = " · ".join(f"{v.upper()} {n}" for v, n in counts.items())
+        lines.append(f"**{summary}** — CONFIRMED = reproduced on a live device; "
+                     "PROVABLE = PoC ready; MANUAL = needs a hands-on repro.")
+        lines.append("")
+
+        lang = {"frida": "javascript", "adb": "bash", "curl": "bash", "html": "html", "none": ""}
+        for a in attempts:
+            lines.append(f"### {a.verdict.value.upper()} · {a.technique} — {a.title}")
+            lines.append("")
+            if a.target:
+                lines.append(f"- target: `{a.target}`")
+            if a.finding_id:
+                lines.append(f"- finding: `{a.finding_id}`")
+            lines.append(f"- why: {a.rationale}")
+            if a.poc:
+                lines.append("- PoC:")
+                lines.append("")
+                lines.append(f"```{lang.get(a.poc_kind.value, '')}")
+                lines.append(a.poc)
+                lines.append("```")
+            if a.executed and a.evidence:
+                lines.append("- device output:")
+                lines.append("")
+                lines.append("```")
+                lines.append(a.evidence)
+                lines.append("```")
+            lines.append(f"- mitigation: {a.mitigation}")
+            lines.append("")
+        return lines
 
     def _render_json(self, data: ReportData, template: ReportTemplate, output_path: str) -> str:
         import json
@@ -204,6 +252,7 @@ class ReportGenerator:
                 for e in data.mitigation_playbook
             ],
             "findings": [f.model_dump(mode="json") for f in data.all_findings],
+            "exploitation_plan": [a.model_dump(mode="json") for a in data.project.exploit_attempts],
         }
         with open(output_path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, default=str)
