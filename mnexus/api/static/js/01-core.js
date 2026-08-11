@@ -40,13 +40,19 @@ const h = (strings, ...values) => String.raw({ raw: strings }, ...values);
 
 /* ─── theme manager ───
  *
- * Two themes ship: `nexus` (default cyberpunk) and `dracula`. The CSS lives
- * under [data-theme="<name>"] in app.css; this manager just toggles the
- * attribute and persists the choice. The early <head> script in index.html
- * applies the saved theme before paint, so we never flash the wrong colors.
+ * Eleven themes ship: `nexus` (default cyberpunk), `dracula`, `chaos-feed`
+ * (the light one — white desktop, Win95 chrome, neon riot), the four
+ * Catppuccin flavors (mocha / macchiato / frappe / latte) and the four
+ * Gradianto variants (deep-ocean / dark-fuchsia / nature-green / midnight-blue).
+ * `chaos-feed` and `catppuccin-latte` are the two light themes. The CSS lives
+ * under [data-theme="<name>"] in
+ * app.css; this manager just toggles the attribute and persists the choice.
+ * The early <head> script in index.html applies the saved theme before paint,
+ * so we never flash the wrong colors.
  *
- * Adding a third theme: append to AVAILABLE_THEMES and add the matching
- * [data-theme="…"] block to app.css. No code changes elsewhere.
+ * Adding another theme: append to AVAILABLE_THEMES and add the matching
+ * [data-theme="…"] block to app.css. No code changes elsewhere — the settings
+ * picker and the ⌘K palette read this list.
  */
 const THEME_KEY = "nexus.theme";
 const AVAILABLE_THEMES = [
@@ -61,6 +67,60 @@ const AVAILABLE_THEMES = [
         name: "🧛 Dracula",
         kicker: "draculatheme.com",
         swatches: ["#282A36", "#8BE9FD", "#50FA7B", "#BD93F9", "#FF5555"],
+    },
+    {
+        id: "chaos-feed",
+        name: "🗞 Chaos Feed",
+        kicker: "light · win95 chrome · neon riot",
+        swatches: ["#FFFFFF", "#000080", "#00E7FF", "#FF0077", "#CCFF00"],
+    },
+    {
+        id: "catppuccin-mocha",
+        name: "🐱 Catppuccin Mocha",
+        kicker: "catppuccin · dark flagship",
+        swatches: ["#1E1E2E", "#89DCEB", "#A6E3A1", "#CBA6F7", "#F38BA8"],
+    },
+    {
+        id: "catppuccin-macchiato",
+        name: "🐱 Catppuccin Macchiato",
+        kicker: "catppuccin · mid dark",
+        swatches: ["#24273A", "#91D7E3", "#A6DA95", "#C6A0F6", "#ED8796"],
+    },
+    {
+        id: "catppuccin-frappe",
+        name: "🐱 Catppuccin Frappé",
+        kicker: "catppuccin · soft dark",
+        swatches: ["#303446", "#99D1DB", "#A6D189", "#CA9EE6", "#E78284"],
+    },
+    {
+        id: "catppuccin-latte",
+        name: "🐱 Catppuccin Latte",
+        kicker: "catppuccin · light",
+        swatches: ["#EFF1F5", "#179299", "#40A02B", "#8839EF", "#D20F39"],
+    },
+    {
+        id: "gradianto-deep-ocean",
+        name: "🌊 Gradianto Deep Ocean",
+        kicker: "gradianto · petrol blue",
+        swatches: ["#1C2739", "#04D9FF", "#75AA5F", "#8EC1FF", "#CC844F"],
+    },
+    {
+        id: "gradianto-dark-fuchsia",
+        name: "🔮 Gradianto Dark Fuchsia",
+        kicker: "gradianto · plum + fuchsia",
+        swatches: ["#3D214E", "#D07BD2", "#2EA9AA", "#71AA84", "#C6C666"],
+    },
+    {
+        id: "gradianto-nature-green",
+        name: "🌿 Gradianto Nature Green",
+        kicker: "gradianto · forest",
+        swatches: ["#20403F", "#2EA9AA", "#71AA84", "#D07BD2", "#C6C666"],
+    },
+    {
+        id: "gradianto-midnight-blue",
+        name: "🌌 Gradianto Midnight Blue",
+        kicker: "gradianto · indigo",
+        swatches: ["#282839", "#8F9BF2", "#96BF7D", "#A98FD8", "#CC8B60"],
     },
 ];
 

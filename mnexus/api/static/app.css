@@ -1,11 +1,12 @@
 /* MEDUSA NEXUS — design system, 1:1 with docs/DESIGN_LANGUAGE.md */
 
 /* ─── design tokens ─────────────────────────────────────────────────────
- * Two themes ship in-tree — `nexus` (default, cyberpunk neon) and `dracula`
- * (https://draculatheme.com). Switch by setting `data-theme="<name>"` on the
- * <html> element; the JS theme manager handles that and persists the choice
- * in localStorage so it survives reloads. Adding more themes = one extra
- * `[data-theme="…"]` block below.
+ * Three themes ship in-tree — `nexus` (default, cyberpunk neon), `dracula`
+ * (https://draculatheme.com) and `chaos-feed` (Win95 chrome smashed into a
+ * neon riot). Switch by setting `data-theme="<name>"` on the <html> element;
+ * the JS theme manager handles that and persists the choice in localStorage
+ * so it survives reloads. Adding more themes = one extra `[data-theme="…"]`
+ * block below.
  *
  * Three primaries drive the palette:
  *   --cyan     → the loudest accent (titles, headings, prompts).
@@ -106,6 +107,363 @@
     /* Dracula doesn't have a CRT/scanline aesthetic — soften the overlay
        so the theme reads cleanly. */
     --scanline: rgba(248, 248, 242, 0.02);
+}
+
+/* Chaos Feed — the only light theme in here: a white 1995 desktop that fell
+ * into a vat of highlighter ink. Ported from the news-feed-chaos stylesheet —
+ * Win95 bevels and hard black drop shadows over a neon grid, so every panel
+ * looks like a window someone dragged there in a hurry.
+ *
+ *   paper     #F4F0E6      paper-cool #DFE7DC
+ *   pink      #FF0077      cyan       #00E7FF
+ *   lime      #CCFF00      orange     #FF8A00
+ *   violet    #7A00FF      green      #00FF85
+ *   win chrome #C0C0C0 face / #FFFFFF highlight / #404040 shadow
+ *   title bar #000080
+ *
+ * The raw neons are fine as fills, shadows and title bars, but unreadable as
+ * ink on white — so the *text* roles use darkened cousins of the same hues and
+ * the neons live on in --chaos-* fills:
+ *   --cyan    = deep cyan   (loudest accent: titles, headings, prompts)
+ *   --acid    = deep green  (good / connected / safe)
+ *   --magenta = deep pink   (kickers, comments, mitigations)
+ *   --fg      = near-black ink, --muted = ink at 62%
+ *   severities — red stays red; orange/olive/green, all print-safe on white.
+ * Corners go square (--radius: 0) because Win95 never heard of a rounded box.
+ * The type stays monospace: ASCII headers and log panes need the grid.
+ * Code and console panes stay dark on purpose — a DOS box on the desktop.
+ */
+:root[data-theme="chaos-feed"] {
+    --bg-base: #FFFFFF;
+    --bg-panel: rgba(20, 22, 27, 0.05);
+    --bg-panel-hover: rgba(255, 0, 119, 0.10);
+    --bg-accent-panel: rgba(0, 231, 255, 0.16);
+    --bg-crit-panel: rgba(255, 31, 75, 0.12);
+    --bg-high-panel: rgba(255, 138, 0, 0.16);
+    --bg-med-panel: rgba(204, 255, 0, 0.28);
+    /* Code / preview surfaces go paper too — this theme's ink is dark, so a
+       black pane would swallow every report, evidence snippet and dump. */
+    --bg-code: #F4F0E6;
+
+    --cyan: #00728F;
+    --acid: #00803F;
+    --magenta: #C4005C;
+    --muted: rgba(20, 22, 27, 0.62);
+    --fg: #14161B;
+
+    --border: rgba(20, 22, 27, 0.35);
+    --border-hover: rgba(255, 0, 119, 0.75);
+    --border-accent: rgba(0, 128, 63, 0.55);
+    --border-crit: rgba(214, 0, 58, 0.60);
+
+    --sev-crit: #D6003A;
+    --sev-high: #B35A00;
+    --sev-med: #6F7C00;
+    --sev-low: #00803F;
+    --sev-info: rgba(20, 22, 27, 0.62);
+
+    /* No CRT scanlines on a paper-white desktop. */
+    --scanline: transparent;
+    --radius: 0;
+
+    /* Chaos-only extras — Win95 chrome plus the undimmed neons. */
+    --chaos-title: #000080;
+    --chaos-face: #D4D0C8;
+    --chaos-hi: #FFFFFF;
+    --chaos-mid: #808080;
+    --chaos-dark: #404040;
+    --chaos-paper: #F4F0E6;
+    --chaos-pink: #FF0077;
+    --chaos-cyan: #00E7FF;
+    --chaos-lime: #CCFF00;
+    --chaos-orange: #FF8A00;
+    --chaos-violet: #7A00FF;
+    --chaos-shadow: 5px 5px 0 rgba(0, 0, 0, 0.55);
+}
+
+/* The desktop itself: white under a 36px neon grid plus two corner glows,
+   same recipe as the feed it came from. Solid --bg-base stays underneath
+   everything else (topbar, sheets) so only the page canvas gets the pattern. */
+:root[data-theme="chaos-feed"] body {
+    background:
+        linear-gradient(90deg, rgba(255, 0, 119, 0.12) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(0, 231, 255, 0.14) 1px, transparent 1px),
+        radial-gradient(circle at 14% 8%, rgba(255, 0, 119, 0.10), transparent 22rem),
+        radial-gradient(circle at 86% 6%, rgba(0, 231, 255, 0.12), transparent 24rem),
+        #FFFFFF;
+    background-size: 36px 36px, 36px 36px, auto, auto, auto;
+    background-attachment: fixed;
+}
+
+/* Windows, not cards: Win95 bevel + hard black shadow on the chrome face. */
+:root[data-theme="chaos-feed"] .panel,
+:root[data-theme="chaos-feed"] .metric-card {
+    background: var(--chaos-paper);
+    border-width: 2px;
+    box-shadow: inset 2px 2px 0 var(--chaos-hi),
+                inset -2px -2px 0 var(--chaos-mid),
+                var(--chaos-shadow);
+}
+:root[data-theme="chaos-feed"] .panel.accent {
+    background: #EAF6F2;
+}
+/* Code, evidence and log panes are paper (--bg-code) with the normal dark ink.
+   No black boxes: this theme's hues are darkened for white, so anything left
+   on a black surface (console tags, mirror footer) would go invisible. */
+:root[data-theme="chaos-feed"] .code,
+:root[data-theme="chaos-feed"] .console {
+    background: var(--bg-code);
+    color: var(--fg);
+    box-shadow: var(--chaos-shadow);
+}
+/* The mirror keeps a black stage — that's the phone's screen — but the frame
+   around it becomes Win95 chrome so the footer text stays readable. */
+:root[data-theme="chaos-feed"] .device-mirror {
+    background: var(--chaos-face);
+    box-shadow: var(--chaos-shadow);
+}
+/* Floating surfaces need an opaque face — --bg-panel is a 5% wash on white. */
+:root[data-theme="chaos-feed"] .side-sheet,
+:root[data-theme="chaos-feed"] .modal,
+:root[data-theme="chaos-feed"] .cmdk {
+    background: var(--chaos-paper);
+    border-color: var(--chaos-dark);
+}
+/* Title bar: Win95 navy with a neon edge on the left, so right-aligned
+   counters and buttons inside the head stay readable. */
+:root[data-theme="chaos-feed"] .panel-head {
+    background: linear-gradient(
+        90deg,
+        var(--magenta) 0 6px,
+        var(--cyan) 6px 10px,
+        var(--chaos-title) 10px 100%
+    );
+    border-bottom: 2px solid var(--chaos-dark);
+    color: var(--chaos-hi);
+}
+/* Counters and hints inside a title bar carry `.muted` (dark ink) — on navy
+   that reads as nothing, so dim them against the bar instead. */
+:root[data-theme="chaos-feed"] .panel-head .muted,
+:root[data-theme="chaos-feed"] .panel-head .small,
+:root[data-theme="chaos-feed"] .panel-head .t-mono {
+    color: rgba(255, 255, 255, 0.78);
+}
+/* Same story for buttons docked in a title bar: give them a chrome face so
+   they don't float as low-contrast text on navy. */
+:root[data-theme="chaos-feed"] .panel-head .btn {
+    background: var(--chaos-face);
+    border-color: var(--chaos-dark);
+    color: var(--fg);
+}
+:root[data-theme="chaos-feed"] .btn {
+    border-width: 2px;
+    box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.6);
+}
+:root[data-theme="chaos-feed"] .btn:active {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.6);
+}
+/* Headings get the misprint treatment — pink/cyan offsets instead of a glow. */
+:root[data-theme="chaos-feed"] .section-header .ascii {
+    text-shadow: 2px 2px 0 var(--magenta), -2px -2px 0 var(--cyan);
+}
+/* The wordmark is small, so a double offset just muds it — navy ink with one
+   crisp pink drop keeps it readable on white. */
+:root[data-theme="chaos-feed"] .brand {
+    color: var(--chaos-title);
+    text-shadow: 2px 2px 0 var(--chaos-pink);
+}
+:root[data-theme="chaos-feed"] .gradient-underline {
+    height: 3px;
+    background: linear-gradient(
+        90deg,
+        var(--magenta) 0 25%,
+        var(--cyan) 25% 50%,
+        var(--chaos-orange) 50% 75%,
+        var(--chaos-lime) 75% 100%
+    );
+}
+
+/* ─── ported themes ─────────────────────────────────────────────────────
+ * Catppuccin (https://github.com/catppuccin/catppuccin) — 4 flavors, and
+ * Gradianto (https://github.com/thvardhan/Gradianto) — 4 gradient variants.
+ * Each is a straight token swap; no per-theme rules needed except Latte, the
+ * only light flavor, whose panels go opaque so modals/side-sheets read solid.
+ *
+ * Role mapping is by function, not by source name — the loudest accent lands
+ * on --cyan (titles/headings/prompts), "good/safe" on --acid, the secondary
+ * accent on --magenta. Each theme keeps its identity colour as the loudest:
+ * Catppuccin → sky, Fuchsia → fuchsia, Deep Ocean → its bright cyan, etc.
+ */
+
+/* Catppuccin Mocha — flagship dark. */
+:root[data-theme="catppuccin-mocha"] {
+    --bg-base: #1E1E2E;
+    --bg-panel: rgba(49, 50, 68, 0.35);
+    --bg-panel-hover: rgba(49, 50, 68, 0.55);
+    --bg-accent-panel: rgba(203, 166, 247, 0.12);
+    --bg-crit-panel: rgba(243, 139, 168, 0.12);
+    --bg-high-panel: rgba(250, 179, 135, 0.12);
+    --bg-med-panel: rgba(249, 226, 175, 0.10);
+    --bg-code: #181825;
+    --cyan: #89DCEB; --acid: #A6E3A1; --magenta: #CBA6F7;
+    --muted: #A6ADC8; --fg: #CDD6F4;
+    --border: rgba(88, 91, 112, 0.45);
+    --border-hover: rgba(203, 166, 247, 0.60);
+    --border-accent: rgba(166, 227, 161, 0.55);
+    --border-crit: rgba(243, 139, 168, 0.60);
+    --sev-crit: #F38BA8; --sev-high: #FAB387; --sev-med: #F9E2AF;
+    --sev-low: #A6E3A1; --sev-info: #A6ADC8;
+    --scanline: rgba(205, 214, 244, 0.03);
+}
+
+/* Catppuccin Macchiato — mid dark. */
+:root[data-theme="catppuccin-macchiato"] {
+    --bg-base: #24273A;
+    --bg-panel: rgba(54, 58, 79, 0.40);
+    --bg-panel-hover: rgba(54, 58, 79, 0.60);
+    --bg-accent-panel: rgba(198, 160, 246, 0.12);
+    --bg-crit-panel: rgba(237, 135, 150, 0.12);
+    --bg-high-panel: rgba(245, 169, 127, 0.12);
+    --bg-med-panel: rgba(238, 212, 159, 0.10);
+    --bg-code: #1E2030;
+    --cyan: #91D7E3; --acid: #A6DA95; --magenta: #C6A0F6;
+    --muted: #A5ADCB; --fg: #CAD3F5;
+    --border: rgba(91, 96, 120, 0.45);
+    --border-hover: rgba(198, 160, 246, 0.60);
+    --border-accent: rgba(166, 218, 149, 0.55);
+    --border-crit: rgba(237, 135, 150, 0.60);
+    --sev-crit: #ED8796; --sev-high: #F5A97F; --sev-med: #EED49F;
+    --sev-low: #A6DA95; --sev-info: #A5ADCB;
+    --scanline: rgba(202, 211, 245, 0.03);
+}
+
+/* Catppuccin Frappé — soft dark. */
+:root[data-theme="catppuccin-frappe"] {
+    --bg-base: #303446;
+    --bg-panel: rgba(65, 69, 89, 0.40);
+    --bg-panel-hover: rgba(65, 69, 89, 0.60);
+    --bg-accent-panel: rgba(202, 158, 230, 0.12);
+    --bg-crit-panel: rgba(231, 130, 132, 0.12);
+    --bg-high-panel: rgba(239, 159, 118, 0.12);
+    --bg-med-panel: rgba(229, 200, 144, 0.10);
+    --bg-code: #292C3C;
+    --cyan: #99D1DB; --acid: #A6D189; --magenta: #CA9EE6;
+    --muted: #A5ADCE; --fg: #C6D0F5;
+    --border: rgba(98, 104, 128, 0.45);
+    --border-hover: rgba(202, 158, 230, 0.60);
+    --border-accent: rgba(166, 209, 137, 0.55);
+    --border-crit: rgba(231, 130, 132, 0.60);
+    --sev-crit: #E78284; --sev-high: #EF9F76; --sev-med: #E5C890;
+    --sev-low: #A6D189; --sev-info: #A5ADCE;
+    --scanline: rgba(198, 208, 245, 0.03);
+}
+
+/* Catppuccin Latte — the light flavor. Dark ink on latte cream; panels go
+   opaque so floating surfaces don't turn translucent over the light body.
+   Loudest accent is teal (sky is too pale to read on cream). */
+:root[data-theme="catppuccin-latte"] {
+    --bg-base: #EFF1F5;
+    --bg-panel: #E6E9EF;
+    --bg-panel-hover: #DCE0E8;
+    --bg-accent-panel: rgba(136, 57, 239, 0.10);
+    --bg-crit-panel: rgba(210, 15, 57, 0.10);
+    --bg-high-panel: rgba(254, 100, 11, 0.12);
+    --bg-med-panel: rgba(223, 142, 29, 0.14);
+    --bg-code: #E6E9EF;
+    --cyan: #179299; --acid: #40A02B; --magenta: #8839EF;
+    --muted: #6C6F85; --fg: #4C4F69;
+    --border: rgba(76, 79, 105, 0.25);
+    --border-hover: rgba(136, 57, 239, 0.50);
+    --border-accent: rgba(64, 160, 43, 0.50);
+    --border-crit: rgba(210, 15, 57, 0.50);
+    --sev-crit: #D20F39; --sev-high: #FE640B; --sev-med: #DF8E1D;
+    --sev-low: #40A02B; --sev-info: #6C6F85;
+    --scanline: transparent;
+}
+
+/* Gradianto Deep Ocean — petrol blue, bright-cyan accent. */
+:root[data-theme="gradianto-deep-ocean"] {
+    --bg-base: #1C2739;
+    --bg-panel: rgba(50, 69, 101, 0.30);
+    --bg-panel-hover: rgba(50, 69, 101, 0.50);
+    --bg-accent-panel: rgba(4, 217, 255, 0.10);
+    --bg-crit-panel: rgba(224, 108, 117, 0.12);
+    --bg-high-panel: rgba(204, 132, 79, 0.14);
+    --bg-med-panel: rgba(198, 196, 94, 0.10);
+    --bg-code: #161F32;
+    --cyan: #04D9FF; --acid: #75AA5F; --magenta: #8EC1FF;
+    --muted: #8D9296; --fg: #C1C1C1;
+    --border: rgba(43, 65, 106, 0.55);
+    --border-hover: rgba(4, 217, 255, 0.50);
+    --border-accent: rgba(117, 170, 95, 0.55);
+    --border-crit: rgba(224, 108, 117, 0.60);
+    --sev-crit: #E06C75; --sev-high: #CC844F; --sev-med: #C6C45E;
+    --sev-low: #75AA5F; --sev-info: #8D9296;
+    --scanline: rgba(4, 217, 255, 0.03);
+}
+
+/* Gradianto Dark Fuchsia — plum base, fuchsia identity accent. */
+:root[data-theme="gradianto-dark-fuchsia"] {
+    --bg-base: #3D214E;
+    --bg-panel: rgba(82, 53, 108, 0.40);
+    --bg-panel-hover: rgba(82, 53, 108, 0.60);
+    --bg-accent-panel: rgba(208, 123, 210, 0.12);
+    --bg-crit-panel: rgba(224, 104, 122, 0.12);
+    --bg-high-panel: rgba(187, 143, 115, 0.14);
+    --bg-med-panel: rgba(198, 198, 102, 0.10);
+    --bg-code: #2E1A3B;
+    --cyan: #2EA9AA; --acid: #71AA84; --magenta: #D07BD2;
+    --muted: #9A86A6; --fg: #C8CCD0;
+    --border: rgba(130, 90, 150, 0.50);
+    --border-hover: rgba(208, 123, 210, 0.60);
+    --border-accent: rgba(113, 170, 132, 0.55);
+    --border-crit: rgba(224, 104, 122, 0.60);
+    --sev-crit: #E0687A; --sev-high: #BB8F73; --sev-med: #C6C666;
+    --sev-low: #71AA84; --sev-info: #9A86A6;
+    --scanline: rgba(208, 123, 210, 0.03);
+}
+
+/* Gradianto Nature Green — forest base, teal accent (fuchsia stays secondary). */
+:root[data-theme="gradianto-nature-green"] {
+    --bg-base: #20403F;
+    --bg-panel: rgba(53, 108, 67, 0.28);
+    --bg-panel-hover: rgba(53, 108, 67, 0.45);
+    --bg-accent-panel: rgba(46, 169, 170, 0.12);
+    --bg-crit-panel: rgba(224, 104, 122, 0.12);
+    --bg-high-panel: rgba(187, 143, 115, 0.14);
+    --bg-med-panel: rgba(198, 198, 102, 0.10);
+    --bg-code: #163130;
+    --cyan: #2EA9AA; --acid: #71AA84; --magenta: #D07BD2;
+    --muted: #8FA39A; --fg: #CCCECE;
+    --border: rgba(53, 108, 67, 0.60);
+    --border-hover: rgba(46, 169, 170, 0.55);
+    --border-accent: rgba(113, 170, 132, 0.60);
+    --border-crit: rgba(224, 104, 122, 0.60);
+    --sev-crit: #E0687A; --sev-high: #BB8F73; --sev-med: #C6C666;
+    --sev-low: #71AA84; --sev-info: #8FA39A;
+    --scanline: rgba(46, 169, 170, 0.03);
+}
+
+/* Gradianto Midnight Blue — indigo base, periwinkle accent. */
+:root[data-theme="gradianto-midnight-blue"] {
+    --bg-base: #282839;
+    --bg-panel: rgba(93, 93, 132, 0.30);
+    --bg-panel-hover: rgba(93, 93, 132, 0.50);
+    --bg-accent-panel: rgba(143, 155, 242, 0.12);
+    --bg-crit-panel: rgba(224, 108, 117, 0.12);
+    --bg-high-panel: rgba(204, 139, 96, 0.14);
+    --bg-med-panel: rgba(187, 181, 91, 0.10);
+    --bg-code: #1F1F2E;
+    --cyan: #8F9BF2; --acid: #96BF7D; --magenta: #A98FD8;
+    --muted: #9A9AB0; --fg: #D4D4D4;
+    --border: rgba(93, 93, 132, 0.55);
+    --border-hover: rgba(143, 155, 242, 0.60);
+    --border-accent: rgba(150, 191, 125, 0.55);
+    --border-crit: rgba(224, 108, 117, 0.60);
+    --sev-crit: #E06C75; --sev-high: #CC8B60; --sev-med: #BBB55B;
+    --sev-low: #96BF7D; --sev-info: #9A9AB0;
+    --scanline: rgba(143, 155, 242, 0.03);
 }
 
 * { box-sizing: border-box; }
