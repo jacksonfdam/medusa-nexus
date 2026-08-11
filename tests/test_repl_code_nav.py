@@ -72,3 +72,67 @@ def test_classes_lists(repl: _Recorder) -> None:
     method, path = repl.calls[-1]
     assert method == "GET"
     assert "/v1/projects/PRJ-1/classes?q=auth&fmt=java" in path
+
+
+# ─── /mcp control plane ─────────────────────────────────────────────────
+
+
+@pytest.fixture
+def mcp_repl(monkeypatch: pytest.MonkeyPatch):
+    rec = _Recorder()
+    rec.puts = []  # type: ignore[attr-defined]
+    monkeypatch.setattr(cli, "_require_server", lambda _state: True)
+
+    catalogue = [
+        {"name": "doctor", "group": "read", "route": "GET /v1/doctor", "enabled": True},
+        {"name": "scan_apk", "group": "write", "route": "POST /v1/apks/upload", "enabled": True},
+    ]
+
+    def fake_api(_state, method, path, *, body=None, form=None):
+        rec.calls.append((method, path))
+        if method == "PUT":
+            rec.puts.append(body)  # type: ignore[attr-defined]
+            return 200, {"enabled": True, "allowed_tools": None, "tools": catalogue, "status": {}}
+        if path.startswith("/v1/mcp/setup/"):
+            return 200, {"agent": "cursor", "config_file": "~/.cursor/mcp.json", "snippet": "{}"}
+        return 200, {"enabled": True, "allowed_tools": None, "tools": catalogue,
+                     "status": {"connected": True, "client": "cursor", "last_seen_ts": 1, "last_seen_ago_s": 2.0}}
+
+    monkeypatch.setattr(cli, "_api_request", fake_api)
+    return rec
+
+
+def test_mcp_status_gets_config(mcp_repl) -> None:
+    cli._mcp(mcp_repl, [])  # type: ignore[arg-type]
+    assert mcp_repl.calls[-1] == ("GET", "/v1/mcp/config")
+
+
+def test_mcp_enable_puts_true(mcp_repl) -> None:
+    cli._mcp(mcp_repl, ["enable"])  # type: ignore[arg-type]
+    assert mcp_repl.puts[-1] == {"enabled": True}  # type: ignore[attr-defined]
+
+
+def test_mcp_disable_puts_false(mcp_repl) -> None:
+    cli._mcp(mcp_repl, ["disable"])  # type: ignore[arg-type]
+    assert mcp_repl.puts[-1] == {"enabled": False}  # type: ignore[attr-defined]
+
+
+def test_mcp_allow_all_sends_null(mcp_repl) -> None:
+    cli._mcp(mcp_repl, ["allow", "all"])  # type: ignore[arg-type]
+    assert mcp_repl.puts[-1] == {"allowed_tools": None}  # type: ignore[attr-defined]
+
+
+def test_mcp_block_all_sends_empty(mcp_repl) -> None:
+    cli._mcp(mcp_repl, ["block", "all"])  # type: ignore[arg-type]
+    assert mcp_repl.puts[-1] == {"allowed_tools": []}  # type: ignore[attr-defined]
+
+
+def test_mcp_block_one_computes_list(mcp_repl) -> None:
+    # Current allowlist is None (=all); blocking scan_apk leaves doctor.
+    cli._mcp(mcp_repl, ["block", "scan_apk"])  # type: ignore[arg-type]
+    assert mcp_repl.puts[-1] == {"allowed_tools": ["doctor"]}  # type: ignore[attr-defined]
+
+
+def test_mcp_setup_hits_agent_route(mcp_repl) -> None:
+    cli._mcp(mcp_repl, ["setup", "cursor"])  # type: ignore[arg-type]
+    assert mcp_repl.calls[-1] == ("GET", "/v1/mcp/setup/cursor")

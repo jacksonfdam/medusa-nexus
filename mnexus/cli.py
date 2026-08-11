@@ -19,6 +19,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.align import Align
@@ -147,6 +148,7 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/decompile [jadx|apktool]", "Materialise the decompiled source tree on disk (needed before /source + /classes)."),
         ("/source <fqcn>",   "Print one decompiled class by fully-qualified name (--smali for the apktool tree)."),
         ("/classes [keyword]", "List/filter decompiled classes by fqcn (--smali for the apktool tree)."),
+        ("/mcp [verb]",      "MCP control plane · status · tools · enable · disable · allow/block <tool|all> · setup <agent>."),
         ("/attribute",       "Re-tag findings with SDK / first-party owners (LibraryAttributionAudit back-fill)."),
         ("/backup [--all]",  "Zip up one project (or every project) — model + findings + workspace + reports."),
         ("/delete [--all]",  "Wipe one project (or every project) from disk + DB. Destructive; --yes required."),
@@ -1637,6 +1639,91 @@ def _classes(state: ReplState, args: list[str]) -> None:
         console.print(f"[dim]…+{len(rows) - 60} more (narrow with a keyword or --max)[/dim]")
 
 
+# ─── /mcp — MCP control plane ─────────────────────────────────────────
+
+def _mcp(state: ReplState, args: list[str]) -> None:
+    """`/mcp [status|tools|enable|disable|allow …|block …|setup <agent>]`.
+
+    Govern which tools the stdio MCP driver may expose to an AI assistant.
+    ``allow``/``block`` take tool names or the literal ``all``. ``setup``
+    prints the paste-ready client config. No args = status.
+    """
+    if args and args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /mcp [status|tools|enable|disable|allow <tool…|all>|block <tool…|all>|setup <claude|cursor|zed>]")
+        return
+    if not _require_server(state):
+        return
+    sub = args[0] if args else "status"
+    rest = args[1:]
+
+    def _cfg() -> dict[str, Any] | None:
+        status, body = _api_request(state, "GET", "/v1/mcp/config")
+        if status != 200 or not isinstance(body, dict):
+            console.print(f"[red]mcp config failed[/red] [{status}] {str(body)[:160]}")
+            return None
+        return body
+
+    def _put(payload: dict[str, Any]) -> dict[str, Any] | None:
+        status, body = _api_request(state, "PUT", "/v1/mcp/config", body=payload)
+        if status != 200 or not isinstance(body, dict):
+            console.print(f"[red]mcp update failed[/red] [{status}] {str(body)[:160]}")
+            return None
+        return body
+
+    if sub == "setup":
+        agent = rest[0] if rest else "claude"
+        status, body = _api_request(state, "GET", f"/v1/mcp/setup/{agent}")
+        if status != 200 or not isinstance(body, dict):
+            console.print(f"[red]setup failed[/red] [{status}] {str(body)[:160]}"); return
+        console.print(f"[cyan]{agent}[/cyan] → [dim]{body.get('config_file')}[/dim]")
+        from rich.syntax import Syntax
+        console.print(Syntax(body.get("snippet", ""), "json", theme="ansi_dark"))
+        return
+
+    if sub == "enable":
+        cfg = _put({"enabled": True})
+    elif sub == "disable":
+        cfg = _put({"enabled": False})
+    elif sub in ("allow", "block"):
+        if not rest:
+            console.print(f"[red]usage:[/red] /mcp {sub} <tool…|all>"); return
+        if rest == ["all"]:
+            cfg = _put({"allowed_tools": None if sub == "allow" else []})
+        else:
+            cur = _cfg()
+            if cur is None:
+                return
+            names = [t["name"] for t in cur.get("tools", [])]
+            allowed = set(cur.get("allowed_tools") or names)  # None → all currently
+            if sub == "allow":
+                allowed |= set(rest)
+            else:
+                allowed -= set(rest)
+            cfg = _put({"allowed_tools": [n for n in names if n in allowed]})
+    else:  # status | tools
+        cfg = _cfg()
+
+    if cfg is None:
+        return
+
+    st = cfg.get("status", {})
+    dot = "[green]●[/green]" if st.get("connected") else "[dim]○[/dim]"
+    seen = f"last seen {st.get('last_seen_ago_s')}s ago" if st.get("last_seen_ts") else "no driver connected"
+    who = f" · {st.get('client')}" if st.get("client") else ""
+    enabled = "[green]ENABLED[/green]" if cfg.get("enabled") else "[red]DISABLED[/red]"
+    tools = cfg.get("tools", [])
+    on = sum(1 for t in tools if t.get("enabled"))
+    console.print(f"MCP {enabled}  {dot} {seen}{who}  [dim]· {on}/{len(tools)} tools allowed[/dim]")
+
+    if sub == "tools":
+        color = {"read": "cyan", "nav": "green", "write": "magenta"}
+        for t in tools:
+            mark = "[green]✓[/green]" if t.get("enabled") else "[red]✗[/red]"
+            g = t.get("group", "read")
+            console.print(f"  {mark} [{color.get(g, 'white')}]{t['name']:<22}[/{color.get(g, 'white')}] "
+                          f"[dim]{g:<5} {t.get('route', '')}[/dim]")
+
+
 # ─── /backup + /delete — project lifecycle ────────────────────────────
 
 def _backup(state: ReplState, args: list[str]) -> None:
@@ -2117,6 +2204,7 @@ SLASH_COMMANDS = {
     "decompile": _decompile,
     "source":    _source,
     "classes":   _classes,
+    "mcp":       _mcp,
     "attribute": _attribute,
     "backup":    _backup,
     "delete":    _delete,
