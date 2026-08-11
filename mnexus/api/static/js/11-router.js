@@ -16,6 +16,7 @@ import { mount_finding_detail, mount_recipes, mount_report, mount_settings } fro
 import { mount_project_components, mount_project_native, mount_project_secrets, mount_project_tracer, view_project_components, view_project_native, view_project_secrets, view_project_tracer } from "./10a-project-chrome.js";
 import { mount_pipeline, mount_project_api_map, mount_project_attack_tree, mount_project_dataflow, mount_project_owasp, mount_project_ssl_map, mount_project_surface, mount_report_diff, mount_terminal, view_pipeline, view_project_api_map, view_project_attack_tree, view_project_dataflow, view_project_owasp, view_project_ssl_map, view_project_surface, view_report_diff, view_states, view_terminal, view_toasts } from "./10b-project-analysis.js";
 import { tabGroupKey, tabsRestoreScroll, tabsSaveScroll, tabsTrack } from "./12-shell-ui.js";
+import { mount_mcp, view_mcp } from "./14-mcp-panel.js";
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Route map + router
@@ -45,6 +46,7 @@ const ROUTES = [
     { path: "recipes",                          view: view_recipes,           mount: mount_recipes },
     { path: "tools",                            view: view_tools,             mount: mount_tools },
     { path: "settings",                         view: view_settings,          mount: mount_settings },
+    { path: "mcp",                              view: view_mcp,               mount: mount_mcp },
     { path: "about",                            view: view_about },
     { path: "terminal",                         view: view_terminal,          mount: mount_terminal },
     { path: "states",                           view: view_states },

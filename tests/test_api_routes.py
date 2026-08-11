@@ -34,7 +34,7 @@ def test_root_serves_spa_shell(client: TestClient) -> None:
     # Sidebar primary routes (DYNAMIC and NETWORK now reachable only via the
     # project workspace tabs) + 3 secondary entries at the bottom.
     for nav_item in ("DASHBOARD", "PROJECTS", "SCAN", "DEVICES", "ADB",
-                     "REPORT", "TOOLS", "RECIPES", "SETTINGS",
+                     "REPORT", "TOOLS", "RECIPES", "SETTINGS", "MCP",
                      "BOOT", "CREDITS", "TERMINAL"):
         assert f">{nav_item}<" in body, f"sidebar missing {nav_item}"
     # Belt-and-suspenders: pin that we did NOT regrow the removed entries.
@@ -77,7 +77,7 @@ def test_every_sidebar_route_has_a_handler(client: TestClient) -> None:
     route table — which now lives in 11-router.js."""
     js = client.get("/static/js/11-router.js").text
     for route in ("dashboard", "projects", "scan", "dynamic", "network",
-                  "report", "tools", "recipes", "settings",
+                  "report", "tools", "recipes", "settings", "mcp",
                   "about", "boot", "terminal"):
         # Each route shows up as a path entry in the ROUTES list.
         assert f'path: "{route}"' in js, f"route '{route}' not in ROUTES table"
