@@ -4445,6 +4445,100 @@ async def project_findings_diff(project_id: str, against: str | None = None) -> 
     }
 
 
+# ─── proactive attack engine ────────────────────────────────────────────
+# Plan (offline, always) + execute (device subset, dry-run default). The plan
+# is persisted on the project so the report can render it.
+
+
+def _attack_payload(p: Project) -> dict[str, Any]:
+    from mnexus.intelligence.attack_runner import verdict_summary
+    attempts = list(p.exploit_attempts)
+    return {
+        "project_id": p.id,
+        "summary": verdict_summary(attempts),
+        "count": len(attempts),
+        "attempts": [a.model_dump(mode="json") for a in attempts],
+    }
+
+
+@app.get("/v1/projects/{project_id}/attack")
+async def attack_get(project_id: str) -> dict[str, Any]:
+    """The stored attack plan (empty until POST …/attack/plan runs)."""
+    return _attack_payload(_require_project(project_id))
+
+
+@app.post("/v1/projects/{project_id}/attack/plan")
+async def attack_plan(project_id: str) -> dict[str, Any]:
+    """Build the offline attack plan from the static surface and persist it.
+
+    Deterministic + side-effect-free: maps findings/surface to concrete PoCs
+    with a PROVABLE verdict. Nothing is fired here — that's …/attack/execute.
+    """
+    from mnexus.intelligence.attack_planner import plan_attacks
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    p.exploit_attempts = plan_attacks(p)
+    nexus.db.save_project(p)
+    return _attack_payload(p)
+
+
+@app.post("/v1/projects/{project_id}/attack/execute")
+async def attack_execute(project_id: str, execute: bool = False) -> dict[str, Any]:
+    """Fire the device-executable subset (adb PoCs) and record verdicts.
+
+    Safety model: **dry-run by default**. With ``execute=false`` (the default)
+    this reports what *would* run and whether a device is connected, firing
+    nothing. Only ``execute=true`` actually triggers the adb commands against
+    the bridged device, upgrading each PROVABLE attempt to CONFIRMED or
+    DISPROVEN. Frida + curl PoCs are never auto-fired (they belong to the
+    /dynamic session and to explicit human decisions respectively).
+
+    Auto-plans first if no plan exists. 503 when execute=true but no device.
+    """
+    import shlex
+
+    from mnexus.intelligence.attack_planner import plan_attacks
+    from mnexus.intelligence.attack_runner import run_attacks, runnable
+
+    p = _require_project(project_id)
+    nexus: MedusaNexus = app.state.nexus
+    if not p.exploit_attempts:
+        p.exploit_attempts = plan_attacks(p)
+
+    adb = nexus.engines["adb"]
+    connected = await adb.is_device_connected()  # type: ignore[attr-defined]
+    would_run = runnable(p.exploit_attempts)
+
+    if not execute:
+        nexus.db.save_project(p)  # persist the freshly-auto-planned attempts
+        return {
+            **_attack_payload(p),
+            "dry_run": True,
+            "device_connected": connected,
+            "would_run": [a.id for a in would_run],
+            "note": "pass execute=true to fire the adb PoCs against the connected device",
+        }
+
+    if not connected:
+        raise HTTPException(503, "no device connected — plug a device in and authorise USB debugging")
+
+    async def _run_poc(poc: str) -> str:
+        # PoCs are 'adb shell am …'; swap the literal 'adb' for the configured
+        # binary and hand the rest to the engine's runner.
+        argv = [nexus.config.adb_path, *shlex.split(poc)[1:]]
+        return await adb._run(argv)  # type: ignore[attr-defined]
+
+    fired = await run_attacks(p.exploit_attempts, _run_poc, device_connected=True)
+    nexus.db.save_project(p)
+    return {
+        **_attack_payload(p),
+        "dry_run": False,
+        "device_connected": True,
+        "fired": [a.id for a in fired],
+    }
+
+
 @app.post("/v1/projects/{project_id}/mango/deeplink/fire")
 async def mango_deeplink_fire(project_id: str, uri: str = Form(...)) -> dict[str, Any]:
     """Fire a deeplink intent on the connected device — Mango's ``deeplink``.
