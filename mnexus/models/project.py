@@ -11,8 +11,8 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from mnexus.models.attack_surface import AttackSurface
+from mnexus.models.exploit import ExploitAttempt
 from mnexus.models.finding import Finding
-
 
 Platform = Literal["android", "ios"]
 
@@ -43,6 +43,10 @@ class Project(BaseModel):
     attack_surface: AttackSurface | None = None
     suggested_hooks: list[str] = Field(default_factory=list, description="Auto-generated Frida scripts.")
     dynamic_results: list[Finding] = Field(default_factory=list)
+    exploit_attempts: list[ExploitAttempt] = Field(
+        default_factory=list,
+        description="Proactive attack plan — PoCs + PROVABLE/CONFIRMED verdicts per finding.",
+    )
 
     @property
     def bundle_id(self) -> str:
