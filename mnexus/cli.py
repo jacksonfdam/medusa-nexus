@@ -149,6 +149,7 @@ def _help(state: ReplState, args: list[str]) -> None:
         ("/source <fqcn>",   "Print one decompiled class by fully-qualified name (--smali for the apktool tree)."),
         ("/classes [keyword]", "List/filter decompiled classes by fqcn (--smali for the apktool tree)."),
         ("/mcp [verb]",      "MCP control plane · status · tools · enable · disable · allow/block <tool|all> · setup <agent>."),
+        ("/attack [plan|show|run]", "Proactive exploitation: build PoCs (plan), print them (show), fire the adb subset (run --go)."),
         ("/attribute",       "Re-tag findings with SDK / first-party owners (LibraryAttributionAudit back-fill)."),
         ("/backup [--all]",  "Zip up one project (or every project) — model + findings + workspace + reports."),
         ("/delete [--all]",  "Wipe one project (or every project) from disk + DB. Destructive; --yes required."),
@@ -1724,6 +1725,65 @@ def _mcp(state: ReplState, args: list[str]) -> None:
                           f"[dim]{g:<5} {t.get('route', '')}[/dim]")
 
 
+# ─── /attack — proactive exploitation ────────────────────────────────
+
+def _attack(state: ReplState, args: list[str]) -> None:
+    """`/attack [plan|show|run] [--project <id>] [--go]`.
+
+    Turn findings into concrete PoCs. ``plan`` (default) builds the offline
+    plan; ``show`` prints the stored one; ``run`` fires the adb subset against
+    a connected device — DRY-RUN unless you pass ``--go``.
+    """
+    if args and args[0] in ("-h", "--help"):
+        console.print("[red]usage:[/red] /attack [plan|show|run] [--project <id>] [--go]")
+        return
+    sub = args[0] if args and not args[0].startswith("-") else "plan"
+    rest = args[1:] if args and not args[0].startswith("-") else args
+    project_id = state.active_project_id
+    go = False
+    it = iter(rest)
+    for tok in it:
+        if tok == "--project":
+            project_id = next(it, "") or project_id
+        elif tok == "--go":
+            go = True
+        else:
+            console.print(f"[yellow]ignored arg:[/yellow] {tok}")
+    if not project_id:
+        console.print("[red]no active project.[/red] /use <id> or pass --project."); return
+    if not _require_server(state):
+        return
+
+    if sub == "show":
+        status, body = _api_request(state, "GET", f"/v1/projects/{project_id}/attack")
+    elif sub == "run":
+        qs = "?execute=true" if go else "?execute=false"
+        status, body = _api_request(state, "POST", f"/v1/projects/{project_id}/attack/execute{qs}")
+    else:  # plan
+        status, body = _api_request(state, "POST", f"/v1/projects/{project_id}/attack/plan")
+
+    if status != 200 or not isinstance(body, dict):
+        console.print(f"[red]attack {sub} failed[/red] [{status}] {str(body.get('detail', body) if isinstance(body, dict) else body)[:200]}")
+        return
+
+    summary = body.get("summary", {})
+    parts = " · ".join(f"{k.upper()} {v}" for k, v in summary.items()) or "no attempts"
+    console.print(f"[bold]attack plan[/bold] [dim]({body.get('count', 0)} attempts)[/dim]  {parts}")
+    if sub == "run" and body.get("dry_run"):
+        console.print(f"[yellow]dry-run[/yellow] — device_connected={body.get('device_connected')}; "
+                      f"{len(body.get('would_run', []))} adb PoC(s) would fire. Pass [bold]--go[/bold] to execute.")
+
+    vcolor = {"confirmed": "red", "provable": "yellow", "disproven": "green", "manual": "cyan"}
+    kglyph = {"frida": "🐍", "adb": "🤖", "curl": "🌐", "html": "📄", "none": "✋"}
+    for a in body.get("attempts", [])[:40]:
+        v = a.get("verdict", "")
+        console.print(f"  [{vcolor.get(v, 'white')}]{v.upper():<9}[/{vcolor.get(v, 'white')}] "
+                      f"{kglyph.get(a.get('poc_kind', 'none'), '')} [white]{a.get('technique', '')}[/white] "
+                      f"[dim]{a.get('title', '')[:70]}[/dim]")
+    if len(body.get("attempts", [])) > 40:
+        console.print(f"[dim]…+{len(body['attempts']) - 40} more (see /report or GET /attack)[/dim]")
+
+
 # ─── /backup + /delete — project lifecycle ────────────────────────────
 
 def _backup(state: ReplState, args: list[str]) -> None:
@@ -2205,6 +2265,7 @@ SLASH_COMMANDS = {
     "source":    _source,
     "classes":   _classes,
     "mcp":       _mcp,
+    "attack":    _attack,
     "attribute": _attribute,
     "backup":    _backup,
     "delete":    _delete,

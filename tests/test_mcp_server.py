@@ -275,6 +275,34 @@ def test_get_manifest_defaults_to_xml(api_recorder) -> None:
     assert calls[-1]["path"] == "/v1/projects/PRJ-1/manifest?fmt=xml"
 
 
+# ─── attack engine tools ────────────────────────────────────────────────
+
+
+def test_plan_attack_posts_plan(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("plan_attack", {"project_id": "PRJ-1"})
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["path"] == "/v1/projects/PRJ-1/attack/plan"
+
+
+def test_execute_attack_dry_run_by_default(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("execute_attack", {"project_id": "PRJ-1"})
+    assert calls[-1]["path"] == "/v1/projects/PRJ-1/attack/execute?execute=false"
+
+
+def test_execute_attack_opt_in_fires(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("execute_attack", {"project_id": "PRJ-1", "execute": True})
+    assert calls[-1]["path"] == "/v1/projects/PRJ-1/attack/execute?execute=true"
+
+
+def test_get_attack_plan_reads(api_recorder) -> None:
+    calls, _ = api_recorder
+    _call("get_attack_plan", {"project_id": "PRJ-1"})
+    assert calls[-1] == {"method": "GET", "path": "/v1/projects/PRJ-1/attack", "body": None, "form": None}
+
+
 def test_firebase_probe_strips_empty_fields_from_body(api_recorder) -> None:
     """The /v1/firebase/probe endpoint 400s when fed an empty config. We
     drop blank fields so the assistant can over-specify without errors."""

@@ -43,6 +43,10 @@ TOOL_GROUPS: dict[str, str] = {
     "scan_apk": "write",
     "run_pipeline": "write",
     "analyze_native_lib": "write",
+    # attack — proactive exploitation
+    "get_attack_plan": "read",
+    "plan_attack": "write",
+    "execute_attack": "write",
 }
 
 # Short human label of the underlying route, for the panel (not wire-load).
@@ -65,6 +69,9 @@ TOOL_ROUTES: dict[str, str] = {
     "scan_apk": "POST /v1/apks/upload",
     "run_pipeline": "POST /v1/pipelines/{name}/run",
     "analyze_native_lib": "GET /v1/projects/{id}/native/analyze",
+    "get_attack_plan": "GET /v1/projects/{id}/attack",
+    "plan_attack": "POST /v1/projects/{id}/attack/plan",
+    "execute_attack": "POST /v1/projects/{id}/attack/execute",
 }
 
 _CONFIG_FILENAME = "mcp_config.json"

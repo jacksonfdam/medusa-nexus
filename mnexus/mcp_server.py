@@ -22,6 +22,9 @@ What the assistant can do once wired:
   * ``search_classes``       — list / filter decompiled classes by fqcn
   * ``search_source``        — grep the decompiled workspace for a string
   * ``get_manifest``         — decoded AndroidManifest.xml / Info.plist
+  * ``plan_attack``          — build the offline exploitation plan (PoCs)
+  * ``execute_attack``       — fire the adb PoC subset (dry-run by default)
+  * ``get_attack_plan``      — read the stored plan + verdicts
 
 The last five turn the assistant from a report reader into a code
 reader — the jadx-GUI-plugin workflow (zinja-coder's jadx-mcp-server &
@@ -437,6 +440,50 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "get_attack_plan",
+        "description": (
+            "Fetch the stored proactive attack plan for a project — per-finding "
+            "exploitation attempts with PoC artifacts and PROVABLE/CONFIRMED/"
+            "MANUAL verdicts. Empty until plan_attack has run."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "required": ["project_id"],
+        },
+    },
+    {
+        "name": "plan_attack",
+        "description": (
+            "Build the offline attack plan from the static surface and persist it: "
+            "maps findings/surface to concrete PoCs (adb, Frida, curl) with a "
+            "PROVABLE verdict. Deterministic, no device, no network, nothing fired."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "required": ["project_id"],
+        },
+    },
+    {
+        "name": "execute_attack",
+        "description": (
+            "Fire the device-executable subset (adb PoCs) against a bridged device "
+            "and upgrade each to CONFIRMED or DISPROVEN. DRY-RUN by default: pass "
+            "execute=true to actually trigger. Frida + curl PoCs are never "
+            "auto-fired. Auto-plans first if no plan exists."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "execute":    {"type": "boolean", "default": False,
+                               "description": "true = actually fire; false (default) = dry-run."},
+            },
+            "required": ["project_id"],
+        },
+    },
+    {
         "name": "analyze_native_lib",
         "description": (
             "Run the native-lib analyser against a specific .so in a project. Returns "
@@ -605,6 +652,25 @@ def _handle_get_manifest(args: dict[str, Any]) -> dict[str, Any]:
     return {"status": status, "fmt": fmt, "manifest": body}
 
 
+def _handle_get_attack_plan(args: dict[str, Any]) -> dict[str, Any]:
+    pid = urllib.parse.quote(args["project_id"])
+    status, body = _api("GET", f"/v1/projects/{pid}/attack")
+    return {"status": status, "attack": body}
+
+
+def _handle_plan_attack(args: dict[str, Any]) -> dict[str, Any]:
+    pid = urllib.parse.quote(args["project_id"])
+    status, body = _api("POST", f"/v1/projects/{pid}/attack/plan", timeout=120.0)
+    return {"status": status, "attack": body}
+
+
+def _handle_execute_attack(args: dict[str, Any]) -> dict[str, Any]:
+    pid = urllib.parse.quote(args["project_id"])
+    qs = "?" + urllib.parse.urlencode({"execute": "true" if args.get("execute") else "false"})
+    status, body = _api("POST", f"/v1/projects/{pid}/attack/execute{qs}", timeout=300.0)
+    return {"status": status, "attack": body}
+
+
 def _handle_analyze_native_lib(args: dict[str, Any]) -> dict[str, Any]:
     pid = urllib.parse.quote(args["project_id"])
     qs = "?" + urllib.parse.urlencode({"lib": args["lib_path"]})
@@ -634,6 +700,10 @@ _HANDLERS = {
     "scan_apk":            _handle_scan_apk,
     "run_pipeline":        _handle_run_pipeline,
     "analyze_native_lib":  _handle_analyze_native_lib,
+    # attack engine — plan offline, execute the device subset on opt-in
+    "get_attack_plan":     _handle_get_attack_plan,
+    "plan_attack":         _handle_plan_attack,
+    "execute_attack":      _handle_execute_attack,
 }
 
 

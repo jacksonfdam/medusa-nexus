@@ -136,3 +136,42 @@ def test_mcp_block_one_computes_list(mcp_repl) -> None:
 def test_mcp_setup_hits_agent_route(mcp_repl) -> None:
     cli._mcp(mcp_repl, ["setup", "cursor"])  # type: ignore[arg-type]
     assert mcp_repl.calls[-1] == ("GET", "/v1/mcp/setup/cursor")
+
+
+# ─── /attack ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def attack_repl(monkeypatch: pytest.MonkeyPatch):
+    rec = _Recorder()
+    monkeypatch.setattr(cli, "_require_server", lambda _state: True)
+
+    def fake_api(_state, method, path, *, body=None, form=None):
+        rec.calls.append((method, path))
+        return 200, {"count": 1, "summary": {"provable": 1}, "dry_run": True,
+                     "device_connected": False, "would_run": ["EXP-1"],
+                     "attempts": [{"verdict": "provable", "poc_kind": "adb",
+                                   "technique": "exported-activity", "title": "t"}]}
+
+    monkeypatch.setattr(cli, "_api_request", fake_api)
+    return rec
+
+
+def test_attack_plan_is_default(attack_repl) -> None:
+    cli._attack(attack_repl, [])  # type: ignore[arg-type]
+    assert attack_repl.calls[-1] == ("POST", "/v1/projects/PRJ-1/attack/plan")
+
+
+def test_attack_show_gets(attack_repl) -> None:
+    cli._attack(attack_repl, ["show"])  # type: ignore[arg-type]
+    assert attack_repl.calls[-1] == ("GET", "/v1/projects/PRJ-1/attack")
+
+
+def test_attack_run_is_dry_by_default(attack_repl) -> None:
+    cli._attack(attack_repl, ["run"])  # type: ignore[arg-type]
+    assert attack_repl.calls[-1] == ("POST", "/v1/projects/PRJ-1/attack/execute?execute=false")
+
+
+def test_attack_run_go_executes(attack_repl) -> None:
+    cli._attack(attack_repl, ["run", "--go"])  # type: ignore[arg-type]
+    assert attack_repl.calls[-1] == ("POST", "/v1/projects/PRJ-1/attack/execute?execute=true")
